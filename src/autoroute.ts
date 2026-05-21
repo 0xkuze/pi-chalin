@@ -1,0 +1,221 @@
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { AgentCatalog } from "./agents.ts";
+import { loadEffectiveConfig } from "./config.ts";
+import { buildCompactMeshCriticalSystemPrompt, buildCompactMeshOrchestratorSystemPrompt, buildMeshOrchestratorSystemPrompt } from "./orchestration.ts";
+import { beginMeshTurn, recordDirectToolCompletion } from "./runtime-state.ts";
+import { setMeshStatus } from "./ui.ts";
+
+export function registerMeshAutoRouter(pi: ExtensionAPI): void {
+  pi.on("input", async (event) => {
+    if (event.source === "extension") return { action: "continue" };
+    const text = event.text.trim();
+    if (!text || text.startsWith("/") || text.startsWith("!")) return { action: "continue" };
+
+    // Never consume the user prompt. The primary Pi agent stays in control and
+    // decides whether to call mesh_route as one of its normal tools.
+    return { action: "continue" };
+  });
+
+  pi.on("before_agent_start", async (event, ctx) => {
+    beginMeshTurn({ prompt: typeof event.prompt === "string" ? event.prompt : undefined });
+    const loaded = loadEffectiveConfig({ cwd: ctx.cwd });
+    if (!loaded.config.enabled) return;
+    const promptText = typeof event.prompt === "string" ? event.prompt : "";
+    const useCompactPrompt = shouldUseCompactDirectOrchestrationPrompt(promptText);
+    const useCompactCriticalPrompt = !useCompactPrompt && shouldUseCompactMeshCriticalPrompt(promptText);
+    const catalog = useCompactPrompt || useCompactCriticalPrompt ? undefined : AgentCatalog.load({ cwd: ctx.cwd });
+    const orchestrationPrompt = useCompactPrompt
+      ? buildCompactMeshOrchestratorSystemPrompt()
+      : useCompactCriticalPrompt ? buildCompactMeshCriticalSystemPrompt() : buildMeshOrchestratorSystemPrompt(catalog?.list() ?? []);
+    return {
+      systemPrompt: `${event.systemPrompt}\n\n${orchestrationPrompt}`,
+      message: {
+        customType: useCompactPrompt ? "pi-mesh-direct-compact-orchestration" : useCompactCriticalPrompt ? "pi-mesh-critical-compact-orchestration" : "pi-mesh-orchestration",
+        content: useCompactPrompt ? compactDirectSteeringMessage(ctx.hasUI) : useCompactCriticalPrompt ? compactCriticalSteeringMessage(ctx.hasUI) : [
+          "If the user says continue/resume after an interrupted pi-mesh run, call mesh_resume before answering from partial findings.",
+          "pi-mesh preflight: if this is branch/project analysis, architecture/planning, broad/project-wide review, project-wide refactor strategy, complex/risky multi-file implementation, or memory recall, call mesh_route first. Bounded read-only mini-project reviews, bounded scaffolding, named-file bugfixes, named-file refactors, and simple implementation with explicit acceptance criteria should stay direct.",
+          "For explicit small bugfix/test requests with named files, inspect the target files once, edit promptly, and verify. Do not route or dry-run unless the change is broad, destructive, a security-sensitive mutation, or ambiguous.",
+          "Also call mesh_route for risky surgical/long-file edits; use scout → planner → worker → reviewer so the edit stays targeted and verified.",
+          "If the user asks to compare independent approaches/options, choose mesh_route with parallel planners/reviewers and synthesize the recommendation afterward.",
+          "Choose topology/agents yourself. Use one mesh_route call only, then synthesize from its handoff; do not inspect files directly unless a concrete gap remains.",
+          ctx.hasUI ? undefined : "Non-interactive mode: avoid dry-run for safe bounded edits; either edit directly or run a real mesh_route. Use dryRun only for destructive/high-risk/ambiguous work that genuinely needs user review.",
+          "Simple chat, definitions, one obvious command, tiny isolated edits, bounded read-only mini-project reviews, named-file bugfixes, or bounded scaffolding/simple implementation tasks with explicit files stay direct. Direct mode must still satisfy every explicit acceptance criterion exactly, including requested helper extraction, tests, no dependency additions, and behavior preservation. If the user asks for tests, changing only implementation is incomplete even when existing tests pass; add or update the relevant test file before final verification. For time/window behavior, make tests deterministic with an injected or controlled clock; do not assert exact `Date.now()`-derived milliseconds against real wall time. For dependency-free TypeScript scaffolding, write the exact requested files, keep requested APIs/exported helpers in the requested source file, prefer package.json test script `node --experimental-strip-types --test test/*.test.ts`, put tests under `test/`, avoid uninstalled runners like tsx/vitest/jest, export the requested API, declare requested package.json `bin` entries that point to executable file paths, never command strings, and fix verification failures and rerun verification after the final edit before answering. After edits plus a passing final verification, answer immediately with changed files, verification result, and one note naming the requested behavior/constraint satisfied.",
+        ].filter((line): line is string => Boolean(line)).join("\n"),
+        display: false,
+      },
+    };
+  });
+
+  pi.on("agent_end", (_event, ctx) => {
+    setMeshStatus(ctx, { kind: "idle" });
+  });
+
+  pi.on("tool_execution_end", (event, ctx) => {
+    if (["mesh_route", "mesh_resume"].includes(event.toolName)) {
+      if (event.isError) return;
+      const blockedReason = meshRouteBlockedReason(event);
+      if (blockedReason) {
+        pi.sendMessage({
+          customType: "pi-mesh-route-blocked-nudge",
+          content: `${event.toolName} did not execute work (${blockedReason}). Do not claim completion from that result. If the user's request is a safe explicit edit, continue directly with native tools; otherwise explain the blocker.`,
+          display: false,
+        }, { triggerTurn: false, deliverAs: "steer" });
+        return;
+      }
+      pi.sendMessage({
+        customType: "pi-mesh-synthesis-nudge",
+        content: `${event.toolName} finished. Answer the user's original prompt now from the Final answer material in the tool result. Do not call another tool unless that material explicitly names a critical blocking gap.`,
+        display: false,
+      }, { triggerTurn: false, deliverAs: "steer" });
+      scheduleNonInteractiveShutdown(ctx);
+      return;
+    }
+
+    const eventArgs = (event as { args?: { command?: unknown } }).args;
+    const { shouldProgressNudge, shouldReadyToVerifyNudge, shouldFailureNudge, shouldMissingTestNudge, shouldCompletionNudge, verificationCommand } = recordDirectToolCompletion({
+      toolName: event.toolName,
+      isError: event.isError,
+      command: typeof eventArgs?.command === "string" ? eventArgs.command : undefined,
+      argsText: eventArgs ? JSON.stringify(eventArgs) : undefined,
+    });
+    if (shouldProgressNudge) {
+      pi.sendMessage({
+        customType: "pi-mesh-direct-progress-nudge",
+        content: "You have changed files for a bounded direct task. If the user asked for tests and you have not changed a test/spec file, add or update the relevant test before verification. Then run the nearest relevant verification command. If it fails, fix only the root cause and rerun verification after the last edit; then answer. The final answer must name the changed file paths and the exact verification command/result. Do not continue exploring unless a concrete acceptance criterion is still missing.",
+        display: false,
+      }, { triggerTurn: false, deliverAs: "steer" });
+    }
+    if (shouldReadyToVerifyNudge) {
+      pi.sendMessage({
+        customType: "pi-mesh-direct-ready-to-verify-nudge",
+        content: [
+          "Implementation and required test/doc edits are now in place for this bounded direct task.",
+          "Stop planning/exploring. Run the nearest relevant verification command now, normally `npm test` for dependency-free Node fixtures. If it passes, answer immediately.",
+          "If verification fails, fix only the root cause and rerun the same nearest verification after the final edit. A final answer with a failed/stale Verification is invalid.",
+        ].join("\n"),
+        display: false,
+      }, { triggerTurn: false, deliverAs: "steer" });
+    }
+    if (shouldFailureNudge) {
+      const commandText = verificationCommand ? `\`${verificationCommand}\`` : "the verification command";
+      pi.sendMessage({
+        customType: "pi-mesh-direct-verification-failed-nudge",
+        content: [
+          `${commandText} failed after file changes.`,
+          "Do NOT answer as done yet. Read the failure, fix the root cause, and rerun the nearest relevant verification after the final edit. You may not answer with a failed or stale Verification result.",
+          "If this is dependency-free TypeScript scaffolding, do not add uninstalled runners; write the exact requested files, keep requested APIs/exported helpers in the requested source file, use Node's built-in test runner with `node --experimental-strip-types --test test/*.test.ts`, keep tests in `test/`, and fix imports/scripts so `npm test` passes.",
+          "If the failure involves time/window logic, remove wall-clock flakiness: inject/control the clock or make assertions tolerant before rerunning verification.",
+        ].join("\n"),
+        display: false,
+      }, { triggerTurn: false, deliverAs: "steer" });
+    }
+    if (shouldMissingTestNudge) {
+      pi.sendMessage({
+        customType: "pi-mesh-direct-tests-missing-nudge",
+        content: [
+          "The user requested tests, but the changed files so far do not include a test/spec file.",
+          "Do NOT answer as done yet. Add or update the relevant test file, rerun the nearest verification command, then answer with changed implementation and test paths.",
+        ].join("\n"),
+        display: false,
+      }, { triggerTurn: false, deliverAs: "steer" });
+    }
+    if (!shouldCompletionNudge) return;
+    const commandText = verificationCommand ? `\`${verificationCommand}\`` : "the verification command";
+    pi.sendMessage({
+      customType: "pi-mesh-direct-completion-nudge",
+      content: [
+        `You changed files and ${commandText} passed.`,
+        "If the user's acceptance criteria are satisfied and this passing verification happened after the last edit, answer now using this exact compact evidence format:",
+        "Passing tests is not enough by itself: before answering, compare the changed files against every explicit prompt requirement, including requested package metadata, bin/scripts, docs, tests, public API, and no-dependency constraints.",
+        "- Changed: `path/to/file`[, `path/to/test`]",
+        `- Verification: ${commandText} passed`,
+        "- Notes: one short sentence naming the requested behavior/constraint you satisfied, such as edge case covered, no external dependencies, or time reset behavior",
+        "Do not omit the Verification or Notes line. Do not call more tools unless a concrete requested requirement is still missing.",
+      ].join("\n"),
+      display: false,
+    }, { triggerTurn: false, deliverAs: "steer" });
+  });
+
+  pi.on("session_shutdown", () => {
+    // No background auto-routing workers are owned by this module anymore.
+    // Subagent execution is driven through the mesh_route tool and Pi's native
+    // abort signal.
+  });
+}
+
+
+export function shouldUseCompactDirectOrchestrationPrompt(prompt: string): boolean {
+  const text = prompt.toLowerCase();
+  if (!text.trim()) return false;
+  if (looksLikeMeshOrchestrationWork(text)) return false;
+  const pathMentions = countPathMentions(prompt);
+  const hasDirectMutationVerb = /\b(implementa|implementar|implement|fix|corrige|corregir|refactor|refactoriza|añade|agrega|add|update|actualiza|scaffold|scaffoldea|crea|create|write|escribe)\b/i.test(prompt);
+  const hasScaffoldContract = /\b(scaffold|scaffoldea|greenfield|desde cero|librer[ií]a|cli|package\.json|readme|sin dependencias|no external dependencies)\b/i.test(prompt)
+    && /\b(test|tests|prueba|pruebas|src\/|package\.json|readme|api|export)\b/i.test(prompt);
+  return (hasDirectMutationVerb && pathMentions > 0 && pathMentions <= 6) || hasScaffoldContract;
+}
+
+export function shouldUseCompactMeshCriticalPrompt(prompt: string): boolean {
+  const text = prompt.toLowerCase();
+  return /\b(long-file|archivo largo|surgical|quir[uú]rgic|evita reescribir|avoid rewrite|auth|refresh token|security-sensitive|seguridad|dos cambios independientes|independent implementation|modulos separados|m[oó]dulos separados)\b/i.test(text)
+    && /\b(implementa|implement|cambia|change|fix|corrige|agrega|add|tests|pruebas|worker|parallel|paralel)\b/i.test(text);
+}
+
+function compactCriticalSteeringMessage(hasUI?: boolean): string {
+  return [
+    "pi-mesh critical preflight: this is risky/complex/surgical work. First action must be `mesh_route`; do not answer direct and do not inspect with native tools first.",
+    hasUI ? undefined : "Non-interactive mode: one real mesh_route, then stop from the mesh handoff; no post-mesh native exploration.",
+    "Use worker/reviewer discipline: decompose, assign ownership, verify, and preserve a compact final handoff.",
+  ].filter((line): line is string => Boolean(line)).join("\n");
+}
+
+function compactDirectSteeringMessage(hasUI?: boolean): string {
+  return [
+    "pi-mesh compact preflight: this looks like bounded direct work. Prefer native tools; do not spend budget on orchestration prose or visible planning before tool calls.",
+    hasUI ? undefined : "Non-interactive mode: first action should be a relevant tool call; inspect briefly, write promptly, verify, fix failures, rerun verification after the final edit, then final answer.",
+    "For dependency-free TypeScript scaffolding: exact requested files, Node built-in test runner, tests under test/, no uninstalled runners/dependencies, exported requested API. If it is a CLI package, declare the requested command in package.json `bin`, not only in `scripts`; `bin` values must be executable file paths such as `./src/cli.ts` or `./bin/name`, never `node ...` command strings.",
+    "If the prompt says review-only, docs-only, no code changes, or no mutations, obey that literally: do not add tests/source files or modify code unless the user explicitly asks.",
+    "Final answer must include Changed, Verification, and Notes. Do not continue exploring after verification passes.",
+  ].filter((line): line is string => Boolean(line)).join("\n");
+}
+
+function looksLikeMeshOrchestrationWork(text: string): boolean {
+  return /\b(en profundidad|deep|todo el proyecto|project-wide|arquitectura|architecture|migration|migraci[oó]n|strategy|estrategia|review completo|security review|broad|riesgoso|risky|long-file|archivo largo|surgical|quir[uú]rgic|paralel|parallel|compare approaches|opciones|resume|contin[uú]a|memory|memoria)\b/i.test(text);
+}
+
+function countPathMentions(prompt: string): number {
+  const matches = prompt.match(/(?:^|[\s`'"])(?:[\w.-]+\/)+[\w.@-]+|(?:^|[\s`'"])(?:package\.json|README\.md|tsconfig\.json|pyproject\.toml|Cargo\.toml|go\.mod)(?=$|[\s`'".,:;)]|)/gi);
+  return matches?.length ?? 0;
+}
+
+function meshRouteBlockedReason(event: unknown): string | undefined {
+  const details = (event as { result?: { details?: { approval?: { action?: unknown; reason?: unknown }; routeGuard?: { action?: unknown; reason?: unknown } } } }).result?.details;
+  if (details?.routeGuard?.action === "direct-recommended") {
+    const reason = details.routeGuard.reason;
+    return typeof reason === "string" && reason.trim() ? `direct-recommended: ${reason}` : "direct-recommended";
+  }
+  const action = details?.approval?.action;
+  if (typeof action === "string" && action !== "allow") {
+    const reason = details?.approval?.reason;
+    return typeof reason === "string" && reason.trim() ? `${action}: ${reason}` : action;
+  }
+  return undefined;
+}
+
+function scheduleNonInteractiveShutdown(ctx: { hasUI?: boolean; abort?: () => void; shutdown?: () => void }): void {
+  if (ctx.hasUI || typeof ctx.shutdown !== "function" || process.env.PI_MESH_NONINTERACTIVE_SHUTDOWN === "0") return;
+  const abort = ctx.abort;
+  const shutdown = ctx.shutdown;
+  const configuredDelay = Number(process.env.PI_MESH_NONINTERACTIVE_SHUTDOWN_DELAY_MS);
+  const delayMs = Number.isFinite(configuredDelay) && configuredDelay >= 0 ? configuredDelay : 0;
+  const timer = setTimeout(() => {
+    try {
+      abort?.();
+      shutdown();
+    } catch {
+      // Pi can mark extension contexts stale while a print-mode turn exits.
+      // The tool result has already been emitted, so stale shutdown is safe to ignore.
+    }
+  }, delayMs);
+  timer.unref?.();
+}

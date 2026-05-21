@@ -1,0 +1,70 @@
+{
+  "name": "pi-mesh",
+  "version": "0.1.0",
+  "description": "Pi Coding Agent extension for routed, memory-aware subagent workflows",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/index.ts",
+  "files": [
+    "assets/**/*.png",
+    "src/**/*.ts",
+    "agents/**/*.md",
+    "evals/**/*.ts",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "eval:orchestration": "node --experimental-strip-types evals/orchestration.eval.ts",
+    "eval": "npm run eval:orchestration",
+    "eval:orchestration:sdk": "node --experimental-strip-types evals/orchestration.eval.ts --runner=sdk --limit=1",
+    "eval:sdk": "npm run eval:orchestration:sdk",
+    "eval:memory": "node --experimental-strip-types evals/memory.eval.ts",
+    "eval:quality": "node --experimental-strip-types evals/quality-ab.eval.ts",
+    "eval:quality:sdk": "node --experimental-strip-types evals/quality-ab.eval.ts --mode=sdk",
+    "eval:all": "npm run eval:orchestration && npm run eval:memory && npm run eval:mutation && npm run eval:trajectory && npm run eval:long",
+    "eval:mutation": "node --experimental-strip-types evals/mutation.eval.ts",
+    "eval:trajectory": "node --experimental-strip-types evals/trajectory.eval.ts",
+    "eval:trace": "node --experimental-strip-types evals/trace-quality.eval.ts",
+    "eval:workflow": "node --experimental-strip-types evals/workflow-quality.eval.ts",
+    "eval:workflow:matrix": "PI_MESH_WORKFLOW_MODEL=openai-codex/gpt-5.3-codex-spark PI_MESH_WORKFLOW_THINKING=low PI_MESH_WORKFLOW_ALLOW_MULTI_SDK=1 PI_MESH_WORKFLOW_ALLOW_LONG_SDK=1 PI_MESH_WORKFLOW_GATES=1 node --experimental-strip-types evals/workflow-quality.eval.ts --mode=sdk --case=all-with-holdout --variant=both --runs=3 --timeoutMs=60000 --matrixPath=evals/results/workflow-quality-full-matrix.jsonl",
+    "eval:long": "node --experimental-strip-types evals/long-running.eval.ts"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "subagents",
+    "agentic"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "sql.js-fts5": "^1.4.0",
+    "typebox": "^1.1.24"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.75.3",
+    "@earendil-works/pi-tui": "^0.75.3",
+    "@types/node": "^24.3.0",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}

@@ -1,0 +1,7 @@
+.DS_Store
+node_modules/
+.pi-mesh/
+*.tgz
+dist/
+coverage/
+docs/
