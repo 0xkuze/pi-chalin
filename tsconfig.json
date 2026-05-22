@@ -1,13 +1,16 @@
 {
   "compilerOptions": {
-    "target": "ES2023",
+    "target": "ES2025",
+    "lib": ["ES2025", "ESNext.Collection"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "strict": true,
     "noEmit": true,
+    "rootDir": ".",
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "types": ["node", "bun"],
+    "noUncheckedSideEffectImports": true,
     "skipLibCheck": true
   },
   "include": ["src/**/*.ts", "test/**/*.ts", "evals/**/*.ts"]
