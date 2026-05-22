@@ -35,6 +35,8 @@ export { ArtifactStore } from "./artifacts.ts";
 export { DEFAULT_CONFIG, approvalDecision, loadEffectiveConfig, setAgentModelOverride, setAgentThinkingOverride, writeProjectConfig, writeUserConfig } from "./config.ts";
 export { ChalinKernel } from "./kernel.ts";
 export { MemoryStore, createMemoryCandidate } from "./memory.ts";
+export { EngramMemoryStore, createConfiguredMemoryStore, resolveMemoryBackendStatus } from "./memory-provider.ts";
 export { MockWorkerRunner, SdkWorkerRunner, parseAgentOutput } from "./runner.ts";
 export { resolveChalinPaths } from "./paths.ts";
 export type { AgentDefinition, AgentMemoryPolicy, AgentThinkingLevel, RouteDecision, RoutePlan, RunState, MemoryCandidate, MemoryRecord } from "./schemas.ts";
+export type { MemoryProvider } from "./config.ts";

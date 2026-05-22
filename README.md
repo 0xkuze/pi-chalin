@@ -42,7 +42,7 @@ Use it when a task benefits from:
 | Routing | Direct execution for bounded work, chalin workflows for broad or risky work. |
 | Subagents | Built-in `scout`, `planner`, `worker`, `reviewer`, `researcher`, `delegate`, `oracle`, `context-builder`, and `conflict-resolver` agents. |
 | Topologies | `single`, `chain`, `parallel`, `dag`, and `memory-only` workflow shapes. |
-| Memory | Local records, candidates, approval/rejection, deduplication, revisions, and FTS-backed search. |
+| Memory | Configurable local or Engram-backed records, candidates, deduplication, revisions, and search. |
 | Artifacts | Resumable checkpoints, validation contracts, interviews, and handoffs. |
 | Safety | Approval thresholds, autonomy modes, recursion guards, single-writer isolation, stale-run recovery, and mutation checks. |
 | TUI | Smart Panel, agent manager, activity monitor, memory review, artifact panel, and web fetch audit. |
@@ -99,11 +99,12 @@ Once Pi loads the package, use `/chalin` inside a Pi session.
 | `/chalin off` | Disable autonomous routing for the current project. |
 | `/chalin agents` | Open the agent manager. |
 | `/chalin memory` | Review memory records and pending candidates. |
-| `/chalin memory <query>` | Search local memory. |
+| `/chalin memory <query>` | Search the configured memory backend. |
 | `/chalin artifacts` | Open artifact and resumable task context. |
 | `/chalin artifacts <feature>` | Resume context for a specific feature artifact. |
 | `/chalin activity` | Inspect the active or latest run. |
 | `/chalin web` | Open the web fetch audit panel. |
+| `/chalin settings` | Choose the memory provider: `auto`, `engram`, or `pi-chalin` local. |
 | `/chalin status` | Print routing, autonomy, safety, agent, memory, and guard status. |
 
 ## Tools
@@ -206,6 +207,30 @@ Project-local runtime files live under `.pi-chalin/`:
 .pi-chalin/memory.sqlite
 .pi-chalin/runs/
 ```
+
+Memory can run against pi-chalin's local SQLite store or Engram. Configure it in `.pi-chalin/config.json` or through `/chalin settings`:
+
+```json
+{
+  "memory": {
+    "provider": "auto",
+    "engram": {
+      "baseUrl": "http://127.0.0.1:7437",
+      "command": "engram",
+      "autoStart": false,
+      "autoSync": true,
+      "syncThrottleMs": 30000,
+      "timeoutMs": 800
+    }
+  }
+}
+```
+
+`auto` uses Engram when the HTTP service is reachable and falls back to local memory. `engram` uses Engram as the memory source for `/chalin memory`; the `baseUrl` may point at any Engram local-runtime-compatible endpoint, including a remote `engram serve` instance. Engram Cloud is supported through Engram's local-first sync model: run `engram serve` against a cloud-enrolled/synced Engram store, then point pi-chalin at that runtime. When `autoSync` is enabled and the configured Engram runtime is local, pi-chalin checks `/sync/status` and runs the official `engram sync --cloud --import --project <project>` before reads, then `engram sync --cloud --project <project>` after writes. This uses `ENGRAM_CLOUD_TOKEN` from the runtime environment and never persists the token.
+
+If the user already has `gentle-pi`/`gentle-engram` working, pi-chalin reuses that Engram runtime. No MCP bootstrap command is required from pi-chalin: choose `engram` in `/chalin settings`, and pi-chalin will use `ENGRAM_URL`, `ENGRAM_PORT`, `ENGRAM_BIN`, the default `http://127.0.0.1:7437` runtime, and Engram's own project detection. If Engram Cloud is enrolled and the Pi process has `ENGRAM_CLOUD_TOKEN`, reads automatically import pending cloud chunks before listing/searching memory.
+
+When Engram is the active/preferred memory provider, `/chalin memory` lists Engram observations only, including project and personal scopes returned by Engram. pi-chalin does not expose its local `approve`/`reject` review flow in that mode. If the user selects `pi-chalin local`, the local SQLite memory store keeps its existing pending-review, approve, reject, delete, search, and revise behavior.
 
 User-level configuration and agents currently live under `~/.pi/chalin/`. That path is part of the Pi chalin workflow namespace, not the package name.
 

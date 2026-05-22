@@ -15,7 +15,8 @@ import { Type } from "typebox";
 import { ArtifactStore, type ArtifactFeatureStatus } from "./artifacts.ts";
 import type { BudgetPolicy } from "./budget.ts";
 import { buildProjectDiscoveryIndex, formatProjectDiscoveryIndex } from "./discovery.ts";
-import { createMemoryCandidate, MemoryStore } from "./memory.ts";
+import { createMemoryCandidate } from "./memory.ts";
+import { createConfiguredMemoryStore } from "./memory-provider.ts";
 import { buildProjectSnapshot, formatProjectSnapshot } from "./snapshot.ts";
 import { fetchWebUrls, formatWebBundle, searchWeb } from "./webfetch.ts";
 
@@ -475,7 +476,7 @@ export function createChalinMemorySearchTool(policy: ChildToolPolicy): ToolDefin
       const input = isRecord(params) ? params : {};
       const gate = policy.beforeTool("chalin_memory_search", input);
       if (!gate.allowed) return blockedToolResult(gate.reason);
-      const store = new MemoryStore({ cwd: policy.cwd });
+      const store = createConfiguredMemoryStore({ cwd: policy.cwd });
       const bundle = await store.retrieve({
         query: String(params.query ?? ""),
         sourceAgent: policy.agentName,
@@ -510,7 +511,7 @@ export function createChalinMemoryWriteTool(policy: ChildToolPolicy): ToolDefini
       if (!gate.allowed) return blockedToolResult(gate.reason);
       const validation = validateMemoryWriteParams(params);
       if (!validation.allowed) return blockedToolResult(validation.reason);
-      const store = new MemoryStore({ cwd: policy.cwd });
+      const store = createConfiguredMemoryStore({ cwd: policy.cwd });
       const [record] = await store.submitCandidates([createMemoryCandidate({
         category: params.category,
         content: params.content,
@@ -546,7 +547,7 @@ export function createChalinMemoryReviseTool(policy: ChildToolPolicy): ToolDefin
       if (!gate.allowed) return blockedToolResult(gate.reason);
       const validation = validateMemoryRevisionParams(params);
       if (!validation.allowed) return blockedToolResult(validation.reason);
-      const store = new MemoryStore({ cwd: policy.cwd });
+      const store = createConfiguredMemoryStore({ cwd: policy.cwd });
       const record = await store.revise(params.id, {
         category: params.category,
         content: params.content,

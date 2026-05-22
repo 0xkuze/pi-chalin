@@ -71,3 +71,34 @@ test("config persists and validates per-agent thinking overrides", () => {
   assert.equal(loaded.config.agents.thinkingOverrides["built-in/scout"], undefined);
   assert.match(loaded.diagnostics.join("\n"), /Invalid agents.thinkingOverrides/);
 });
+
+test("config validates memory provider and engram settings", () => {
+  const cwd = tempDir("pi-chalin-cwd-");
+  const userRoot = tempDir("pi-chalin-user-");
+  writeJson(path.join(userRoot, "config.json"), {
+    memory: {
+      provider: "cloud-brain",
+      engram: {
+        baseUrl: "",
+        command: "",
+        autoStart: "yes",
+        autoSync: "yes",
+        syncThrottleMs: -1,
+        timeoutMs: 42,
+        project: 123,
+      },
+    },
+  });
+
+  const loaded = loadEffectiveConfig({ cwd, userRoot });
+
+  assert.equal(loaded.config.memory.provider, "auto");
+  assert.equal(loaded.config.memory.engram.baseUrl, "http://127.0.0.1:7437");
+  assert.equal(loaded.config.memory.engram.command, "engram");
+  assert.equal(loaded.config.memory.engram.autoStart, false);
+  assert.equal(loaded.config.memory.engram.autoSync, true);
+  assert.equal(loaded.config.memory.engram.syncThrottleMs, 30_000);
+  assert.equal(loaded.config.memory.engram.timeoutMs, 800);
+  assert.equal(loaded.config.memory.engram.project, undefined);
+  assert.match(loaded.diagnostics.join("\n"), /Invalid memory\.provider/);
+});

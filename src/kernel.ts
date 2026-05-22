@@ -1,7 +1,8 @@
 import { AgentCatalog } from "./agents.ts";
 import { ArtifactStore } from "./artifacts.ts";
-import { approvalDecision, type ChalinConfig } from "./config.ts";
-import { MemoryStore } from "./memory.ts";
+import { DEFAULT_CONFIG, approvalDecision, type ChalinConfig } from "./config.ts";
+import type { MemoryStoreLike } from "./memory.ts";
+import { createConfiguredMemoryStore } from "./memory-provider.ts";
 import { MockWorkerRunner, SdkWorkerRunner, type WorkerRunner, type WorkerRunnerContext } from "./runner.ts";
 import type { AgentDefinition, AgentStage, AgentStep, AgentThinkingLevel, ApprovalDecision, MemoryRecord, RouteDecision, RoutePlan, RunState } from "./schemas.ts";
 
@@ -9,7 +10,7 @@ export interface ChalinKernelOptions {
   cwd?: string;
   config?: ChalinConfig;
   catalog?: AgentCatalog;
-  memory?: MemoryStore;
+  memory?: MemoryStoreLike;
   artifacts?: ArtifactStore;
   runner?: WorkerRunner;
   sdkRunner?: WorkerRunner;
@@ -29,7 +30,7 @@ export class ChalinKernel {
   private readonly cwd: string;
   private readonly config: ChalinConfig;
   private readonly catalog: AgentCatalog;
-  private readonly memory: MemoryStore;
+  private readonly memory: MemoryStoreLike;
   private readonly artifacts: ArtifactStore;
   private readonly runner: WorkerRunner;
   private readonly sdkRunner: WorkerRunner;
@@ -38,14 +39,9 @@ export class ChalinKernel {
 
   constructor(options?: ChalinKernelOptions) {
     this.cwd = options?.cwd ?? process.cwd();
-    this.config = options?.config ?? {
-      enabled: true,
-      autonomy: "balanced",
-      safety: { approvalRiskThreshold: "medium", recursionGuard: true, singleWriterGuard: true, mutationExpectationGuard: true, blockCritical: true },
-      agents: { modelOverrides: {}, thinkingOverrides: {}, modelPersistenceDefaults: { "built-in": "user", user: "user", project: "project" } },
-    };
+    this.config = options?.config ?? DEFAULT_CONFIG;
     this.catalog = options?.catalog ?? AgentCatalog.load({ cwd: this.cwd });
-    this.memory = options?.memory ?? new MemoryStore({ cwd: this.cwd });
+    this.memory = options?.memory ?? createConfiguredMemoryStore({ cwd: this.cwd }, this.config);
     this.artifacts = options?.artifacts ?? new ArtifactStore({ cwd: this.cwd });
     this.runner = options?.runner ?? new MockWorkerRunner();
     this.sdkRunner = options?.sdkRunner ?? new SdkWorkerRunner();

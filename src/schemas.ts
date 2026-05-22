@@ -292,6 +292,7 @@ export interface ChalinRuntimeState {
   pendingApprovals: number;
   activeRuns: number;
   pendingMemoryCandidates: number;
+  memoryBackend?: string;
   lastRun?: RunState;
 }
 

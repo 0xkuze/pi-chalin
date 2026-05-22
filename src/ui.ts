@@ -46,6 +46,7 @@ export function summarizeChalinHome(state: ChalinRuntimeState, agentCount: numbe
     `agents: ${agentCount}`,
     `activity: ${summarizeActivity(state)}`,
     `guards: ${summarizeGuardHealth(state.lastRun)}`,
+    `memory: ${state.memoryBackend ?? "pi-chalin local"}`,
     `memory candidates: ${state.pendingMemoryCandidates}`,
     `approvals: ${state.pendingApprovals}`,
   ];
@@ -63,6 +64,7 @@ export async function openSmartPanel(
     onSelectMemory(): Promise<void>;
     onSelectArtifacts?(): Promise<void>;
     onSelectWebFetch?(): Promise<void>;
+    onSelectSettings?(): Promise<void>;
   },
 ): Promise<void> {
   const lines = summarizeChalinHome(options.state, options.agents.length);
@@ -85,6 +87,7 @@ export async function openSmartPanel(
     options.pendingMemories.length > 0 ? `Memory · ${options.pendingMemories.length} pending` : "Memory",
     ...(options.onSelectArtifacts ? ["Artifacts"] : []),
     ...(options.onSelectWebFetch ? ["WebFetch"] : []),
+    ...(options.onSelectSettings ? ["Settings"] : []),
     "Status",
     ...(options.diagnostics.length > 0 ? ["Diagnostics"] : []),
     "Close",
@@ -95,6 +98,7 @@ export async function openSmartPanel(
   if (selected?.startsWith("Memory")) return options.onSelectMemory();
   if (selected === "Artifacts") return options.onSelectArtifacts?.();
   if (selected === "WebFetch") return options.onSelectWebFetch?.();
+  if (selected === "Settings") return options.onSelectSettings?.();
   if (selected === "Diagnostics") return void ctx.ui.notify(options.diagnostics.join("\n"), "warning");
   if (selected === "Status") ctx.ui.notify(lines.join("\n"), "info");
 }
@@ -258,9 +262,10 @@ export async function openMemoryReview(
   ctx: ExtensionContext,
   memories: MemoryRecord[],
   actions: { approve(id: string): void; reject(id: string): void; delete(id: string): void },
+  options: { title?: string; emptyMessage?: string } = {},
 ): Promise<void> {
   if (memories.length === 0) {
-    ctx.ui.notify("No memory records found.", "info");
+    ctx.ui.notify(options.emptyMessage ?? "No memory records found.", "info");
     return;
   }
   const sorted = [...memories].sort((a, b) => memoryStatusRank(a.status) - memoryStatusRank(b.status) || b.createdAt.localeCompare(a.createdAt));
@@ -269,7 +274,22 @@ export async function openMemoryReview(
     ctx.ui.notify(sorted.map(format).join("\n"), "info");
     return;
   }
-  const selected = await ctx.ui.select("pi-chalin Memory", [...sorted.map(format), "Close"]);
+  if (typeof ctx.ui.custom === "function") {
+    const result = await openMemoryReviewOverlay(ctx, sorted, options.title ?? "pi-chalin Memory");
+    if (!result) return;
+    const record = sorted.find((candidate) => candidate.id === result.id);
+    if (!record) return;
+    if (result.action === "details") {
+      ctx.ui.notify(formatMemoryDetail(record), "info");
+      return;
+    }
+    if (result.action === "approve") actions.approve(record.id);
+    if (result.action === "reject") actions.reject(record.id);
+    if (result.action === "delete") actions.delete(record.id);
+    ctx.ui.notify(`Memory ${memoryActionPast(result.action)}: ${memoryTitle(record)}`, "info");
+    return;
+  }
+  const selected = await ctx.ui.select(options.title ?? "pi-chalin Memory", [...sorted.map(format), "Close"]);
   if (!selected || selected === "Close") return;
   const record = sorted.find((candidate) => selected === format(candidate));
   if (!record) return;
@@ -288,6 +308,339 @@ export async function openMemoryReview(
   if (action === "Reject") actions.reject(record.id);
   if (action === "Delete" || action === "Delete permanently") actions.delete(record.id);
   if (action && action !== "Close") ctx.ui.notify(`Memory ${action.toLowerCase().replace(/\s+.*/, "")}d: ${memoryTitle(record)}`, "info");
+}
+
+type MemoryOverlayAction = "details" | "approve" | "reject" | "delete";
+type MemoryOverlayResult = { action: MemoryOverlayAction; id: string } | undefined;
+
+async function openMemoryReviewOverlay(ctx: ExtensionContext, memories: MemoryRecord[], title: string): Promise<MemoryOverlayResult> {
+  return ctx.ui.custom<MemoryOverlayResult>(
+    (tui, theme, _keybindings, done) => new MemoryReviewOverlay(tui, theme, title, memories, done),
+    {
+      overlay: true,
+      overlayOptions: {
+        anchor: "center",
+        width: "94%",
+        maxHeight: "88%",
+        margin: 1,
+      },
+    },
+  );
+}
+
+class MemoryReviewOverlay implements Component, Focusable {
+  focused = false;
+  private query = "";
+  private filterIndex = 0;
+  private selectedIndex = 0;
+  private readonly filters: Array<MemoryRecord["status"] | "all">;
+
+  constructor(
+    private readonly tui: TUI,
+    private readonly theme: Theme,
+    private readonly title: string,
+    private readonly memories: MemoryRecord[],
+    private readonly done: (result: MemoryOverlayResult) => void,
+  ) {
+    const statuses = Array.from(new Set(memories.map((record) => record.status)));
+    this.filters = ["all", ...(["pending", "active", "quarantined", "stale", "superseded", "rejected"] as const).filter((status) => statuses.includes(status))];
+  }
+
+  handleInput(data: string): void {
+    if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+      this.done(undefined);
+      return;
+    }
+    if (matchesKey(data, "tab") || matchesKey(data, "right")) {
+      this.filterIndex = (this.filterIndex + 1) % this.filters.length;
+      this.selectedIndex = 0;
+      this.tui.requestRender();
+      return;
+    }
+    if (matchesKey(data, "left")) {
+      this.filterIndex = (this.filterIndex - 1 + this.filters.length) % this.filters.length;
+      this.selectedIndex = 0;
+      this.tui.requestRender();
+      return;
+    }
+    if (matchesKey(data, "up")) {
+      this.moveSelection(-1);
+      return;
+    }
+    if (matchesKey(data, "down")) {
+      this.moveSelection(1);
+      return;
+    }
+    if (matchesKey(data, "pageUp")) {
+      this.moveSelection(-MEMORY_OVERLAY_VISIBLE_ROWS);
+      return;
+    }
+    if (matchesKey(data, "pageDown")) {
+      this.moveSelection(MEMORY_OVERLAY_VISIBLE_ROWS);
+      return;
+    }
+    if (matchesKey(data, "home")) {
+      this.selectedIndex = 0;
+      this.tui.requestRender();
+      return;
+    }
+    if (matchesKey(data, "end")) {
+      this.selectedIndex = Math.max(0, this.filteredMemories().length - 1);
+      this.tui.requestRender();
+      return;
+    }
+    if (matchesKey(data, "enter")) {
+      this.finish("details");
+      return;
+    }
+    if (data === "A" || (data === "a" && this.query.length === 0)) {
+      this.finish("approve");
+      return;
+    }
+    if (data === "R" || (data === "r" && this.query.length === 0)) {
+      this.finish("reject");
+      return;
+    }
+    if (data === "D" || (data === "d" && this.query.length === 0)) {
+      this.finish("delete");
+      return;
+    }
+    if (isBackspace(data)) {
+      this.query = this.query.slice(0, -1);
+      this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.filteredMemories().length - 1));
+      this.tui.requestRender();
+      return;
+    }
+    if (matchesKey(data, "ctrl+u")) {
+      this.query = "";
+      this.selectedIndex = 0;
+      this.tui.requestRender();
+      return;
+    }
+    if (isPrintableInput(data)) {
+      this.query += data;
+      this.selectedIndex = 0;
+      this.tui.requestRender();
+    }
+  }
+
+  render(width: number): string[] {
+    const overlayWidth = Math.max(1, width);
+    const innerWidth = Math.max(1, overlayWidth - 2);
+    const filtered = this.filteredMemories();
+    this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, filtered.length - 1));
+    const selected = filtered[this.selectedIndex];
+    const border = (text: string) => this.theme.fg("border", text);
+    const row = (content = "") => `${border("|")}${padAnsi(content, innerWidth)}${border("|")}`;
+    const filter = this.filters[this.filterIndex] ?? "all";
+    const header = ` ${this.theme.fg("accent", this.theme.bold(this.title))} ${this.theme.fg("dim", `${filtered.length}/${this.memories.length} records · ${memoryFilterLabel(filter)}`)}`;
+    const search = this.query ? `search: ${this.query}` : "type to search";
+    const body = innerWidth >= 86
+      ? renderMemoryOverlayWide(filtered, selected, this.selectedIndex, this.theme, innerWidth)
+      : renderMemoryOverlayNarrow(filtered, selected, this.selectedIndex, this.theme, innerWidth);
+    const lines = [
+      border(`+${"-".repeat(innerWidth)}+`),
+      row(header),
+      row(` ${renderMemoryFilterTabs(this.filters, filter, this.theme, Math.max(20, innerWidth - 2))}`),
+      row(` ${this.theme.fg("dim", `${search} · tab filter · up/down navigate · enter details · A/R/D action · esc close`)}`),
+      row(""),
+      ...body.map((line) => row(line)),
+      border(`+${"-".repeat(innerWidth)}+`),
+    ];
+    return clampRenderedLines(lines, overlayWidth);
+  }
+
+  invalidate(): void {}
+
+  private moveSelection(delta: number): void {
+    const max = Math.max(0, this.filteredMemories().length - 1);
+    this.selectedIndex = Math.max(0, Math.min(max, this.selectedIndex + delta));
+    this.tui.requestRender();
+  }
+
+  private finish(action: MemoryOverlayAction): void {
+    const record = this.filteredMemories()[this.selectedIndex];
+    if (!record) return;
+    if ((action === "approve" || action === "reject") && record.status !== "pending") {
+      this.tui.requestRender();
+      return;
+    }
+    this.done({ action, id: record.id });
+  }
+
+  private filteredMemories(): MemoryRecord[] {
+    const filter = this.filters[this.filterIndex] ?? "all";
+    const terms = normalizeSearch(this.query).split(" ").filter(Boolean);
+    return this.memories.filter((record) => {
+      if (filter !== "all" && record.status !== filter) return false;
+      if (terms.length === 0) return true;
+      const haystack = normalizeSearch(memorySearchText(record));
+      return terms.every((term) => haystack.includes(term));
+    });
+  }
+}
+
+const MEMORY_OVERLAY_VISIBLE_ROWS = 18;
+
+function renderMemoryOverlayWide(
+  memories: MemoryRecord[],
+  selected: MemoryRecord | undefined,
+  selectedIndex: number,
+  theme: Theme,
+  width: number,
+): string[] {
+  const listWidth = Math.max(36, Math.min(62, Math.floor(width * 0.48)));
+  const detailWidth = Math.max(24, width - listWidth - 3);
+  const list = renderMemoryListWindow(memories, selectedIndex, theme, listWidth);
+  const detail = renderMemoryDetailPane(selected, theme, detailWidth, MEMORY_OVERLAY_VISIBLE_ROWS);
+  const rows = Math.max(MEMORY_OVERLAY_VISIBLE_ROWS, list.length, detail.length);
+  const lines: string[] = [];
+  for (let index = 0; index < rows; index += 1) {
+    lines.push(`${padAnsi(list[index] ?? "", listWidth)} ${theme.fg("border", "|")} ${padAnsi(detail[index] ?? "", detailWidth)}`);
+  }
+  return lines;
+}
+
+function renderMemoryOverlayNarrow(
+  memories: MemoryRecord[],
+  selected: MemoryRecord | undefined,
+  selectedIndex: number,
+  theme: Theme,
+  width: number,
+): string[] {
+  return [
+    ...renderMemoryListWindow(memories, selectedIndex, theme, width),
+    "",
+    ...renderMemoryDetailPane(selected, theme, width, 8),
+  ];
+}
+
+function renderMemoryListWindow(memories: MemoryRecord[], selectedIndex: number, theme: Theme, width: number): string[] {
+  if (memories.length === 0) return [theme.fg("muted", "No matching memories.")];
+  const startIndex = Math.max(
+    0,
+    Math.min(selectedIndex - Math.floor(MEMORY_OVERLAY_VISIBLE_ROWS / 2), memories.length - MEMORY_OVERLAY_VISIBLE_ROWS),
+  );
+  const endIndex = Math.min(startIndex + MEMORY_OVERLAY_VISIBLE_ROWS, memories.length);
+  const lines: string[] = [];
+  for (let index = startIndex; index < endIndex; index += 1) {
+    const record = memories[index];
+    if (!record) continue;
+    const active = index === selectedIndex;
+    const line = formatMemoryOverlayRow(record, width - 2);
+    const prefix = active ? theme.fg("accent", "> ") : "  ";
+    const colored = active ? theme.bg("selectedBg", theme.fg("text", line)) : colorMemoryRow(theme, record, line);
+    lines.push(prefix + colored);
+  }
+  if (memories.length > MEMORY_OVERLAY_VISIBLE_ROWS) {
+    lines.push(theme.fg("dim", `  ${selectedIndex + 1}/${memories.length}`));
+  }
+  return lines;
+}
+
+function renderMemoryDetailPane(record: MemoryRecord | undefined, theme: Theme, width: number, maxLines: number): string[] {
+  if (!record) return [theme.fg("muted", "Select a memory to inspect details.")];
+  const title = stripMemoryPrefix(record.content) || record.category;
+  const metadata = [
+    record.status,
+    record.category,
+    record.scope,
+    record.sourceAgent,
+    record.topicKey,
+  ].filter(Boolean).join(" · ");
+  const contentLines = wrapPlainText(record.content, Math.max(12, width)).slice(0, Math.max(2, maxLines - 7));
+  return [
+    theme.fg("accent", theme.bold(truncateToWidth(title, width, "...", false))),
+    theme.fg("dim", truncateToWidth(metadata, width, "...", false)),
+    "",
+    ...contentLines.map((line) => theme.fg("text", line)),
+    "",
+    theme.fg("dim", `confidence ${Math.round(record.confidence * 100)}% · importance ${record.importance}`),
+    theme.fg("dim", `seen ${record.duplicateCount} · used ${record.useCount ?? 0} · revisions ${record.revisionCount}`),
+    record.evidence ? theme.fg("muted", truncateToWidth(`evidence: ${record.evidence}`, width, "...", false)) : "",
+  ].filter((line) => line !== "");
+}
+
+function formatMemoryOverlayRow(record: MemoryRecord, width: number): string {
+  const status = `${memoryStatusIcon(record.status)} ${record.status}`.padEnd(13);
+  const category = truncateUi(record.category, 14).padEnd(14);
+  const source = truncateUi(record.sourceAgent, 15).padEnd(15);
+  const titleWidth = Math.max(16, width - visibleWidth(status) - visibleWidth(category) - visibleWidth(source) - 6);
+  return truncateToWidth(`${status} ${category} ${source} ${truncateUi(stripMemoryPrefix(record.content), titleWidth)}`, width, "...", false);
+}
+
+function renderMemoryFilterTabs(filters: Array<MemoryRecord["status"] | "all">, selected: MemoryRecord["status"] | "all", theme: Theme, width: number): string {
+  const text = filters.map((filter) => {
+    const label = ` ${memoryFilterLabel(filter)} `;
+    return filter === selected ? theme.bg("selectedBg", theme.fg("text", label)) : theme.fg("dim", label);
+  }).join(" ");
+  return truncateToWidth(text, width, "...", true);
+}
+
+function memoryFilterLabel(filter: MemoryRecord["status"] | "all"): string {
+  return filter === "all" ? "all" : filter;
+}
+
+function colorMemoryRow(theme: Theme, record: MemoryRecord, line: string): string {
+  if (record.status === "pending") return theme.fg("accent", line);
+  if (record.status === "active") return theme.fg("text", line);
+  if (record.status === "rejected") return theme.fg("muted", line);
+  return theme.fg("dim", line);
+}
+
+function memorySearchText(record: MemoryRecord): string {
+  return [
+    record.id,
+    record.status,
+    record.category,
+    record.sourceAgent,
+    record.scope,
+    record.topicKey,
+    record.content,
+    record.evidence,
+  ].filter(Boolean).join(" ");
+}
+
+function normalizeSearch(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function wrapPlainText(text: string, width: number): string[] {
+  const normalized = text.replace(/\r/g, "").split("\n").flatMap((line) => line.trim() ? [line.trim()] : [""]);
+  const result: string[] = [];
+  for (const line of normalized) {
+    if (!line) {
+      result.push("");
+      continue;
+    }
+    let current = "";
+    for (const word of line.split(/\s+/)) {
+      const next = current ? `${current} ${word}` : word;
+      if (visibleWidth(next) <= width) {
+        current = next;
+        continue;
+      }
+      if (current) result.push(current);
+      current = visibleWidth(word) > width ? truncateToWidth(word, width, "", false) : word;
+    }
+    if (current) result.push(current);
+  }
+  return result.length ? result : [""];
+}
+
+function isBackspace(data: string): boolean {
+  return data === "\b" || data === "\x7f" || matchesKey(data, "backspace");
+}
+
+function isPrintableInput(data: string): boolean {
+  return data.length === 1 && data >= " " && data !== "\x7f";
+}
+
+function memoryActionPast(action: MemoryOverlayAction): string {
+  if (action === "approve") return "approved";
+  if (action === "reject") return "rejected";
+  if (action === "delete") return "deleted";
+  return "opened";
 }
 
 function formatMemoryListItem(record: MemoryRecord): string {

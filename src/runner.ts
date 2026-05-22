@@ -2,7 +2,8 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentDefinition, AgentThinkingLevel } from "./schemas.ts";
 import { evaluateBudgetUsage, policyForStep, recordBudgetCheckpoint, summarizeToolUtility } from "./budget.ts";
 import type { ChalinPathsOptions } from "./paths.ts";
-import { createMemoryCandidate, MemoryStore } from "./memory.ts";
+import { createMemoryCandidate } from "./memory.ts";
+import { createConfiguredMemoryStore } from "./memory-provider.ts";
 import type { AgentOutput, AgentStep, MemoryCandidate, RouteDecision, RoutePlan, RunState, RunStepMetrics, RunStepState, TokenUsageSummary } from "./schemas.ts";
 import { createChildToolPolicy, createChildTools, type ChildToolActivity, type ChildToolPolicy } from "./child-tools.ts";
 import { createChalinChildSessionManager } from "./child-sessions.ts";
@@ -544,7 +545,7 @@ function buildPromptOptionsForStep(run: RunState, step: RunStepState, agent: Age
 async function compactMemoryContextForStep(cwd: string, step: RunStepState, agent: AgentDefinition | undefined, previous?: string): Promise<string | undefined> {
   if (!agent?.memory.read || !agent.capabilities.includes("memory-read")) return undefined;
   const query = [step.task, previous ? `Previous handoff: ${previous.slice(0, 700)}` : ""].filter(Boolean).join("\n");
-  const bundle = await new MemoryStore({ cwd }).retrieve({
+  const bundle = await createConfiguredMemoryStore({ cwd }).retrieve({
     query,
     sourceAgent: step.agent,
     agentConcern: agent.concern,

@@ -6,6 +6,7 @@ import { isAgentThinkingLevel, riskRank, type AgentScope, type AgentThinkingLeve
 export type AutonomyLevel = "low" | "balanced" | "high";
 export type ApprovalRiskThreshold = RouteRisk;
 export type ModelPersistenceTarget = "session" | "project" | "user";
+export type MemoryProvider = "auto" | "engram" | "pi-chalin";
 
 export interface ChalinConfig {
   enabled: boolean;
@@ -21,6 +22,18 @@ export interface ChalinConfig {
     modelOverrides: Record<string, string>;
     thinkingOverrides: Record<string, AgentThinkingLevel>;
     modelPersistenceDefaults: Record<AgentScope, ModelPersistenceTarget>;
+  };
+  memory: {
+    provider: MemoryProvider;
+    engram: {
+      baseUrl: string;
+      command: string;
+      autoStart: boolean;
+      autoSync: boolean;
+      syncThrottleMs: number;
+      timeoutMs: number;
+      project?: string;
+    };
   };
 }
 
@@ -47,6 +60,17 @@ export const DEFAULT_CONFIG: ChalinConfig = {
       "built-in": "user",
       user: "user",
       project: "project",
+    },
+  },
+  memory: {
+    provider: "auto",
+    engram: {
+      baseUrl: "http://127.0.0.1:7437",
+      command: "engram",
+      autoStart: false,
+      autoSync: true,
+      syncThrottleMs: 30_000,
+      timeoutMs: 800,
     },
   },
 };
@@ -117,6 +141,40 @@ function coerceConfig(input: ChalinConfig, diagnostics: string[]): ChalinConfig 
       diagnostics.push(`Invalid agents.thinkingOverrides['${agentRef}']='${String(level)}'; removing override.`);
       delete config.agents.thinkingOverrides[agentRef];
     }
+  }
+  if (!isObject(config.memory)) config.memory = structuredClone(DEFAULT_CONFIG.memory);
+  if (!["auto", "engram", "pi-chalin"].includes(config.memory.provider)) {
+    diagnostics.push(`Invalid memory.provider '${String(config.memory.provider)}'; using '${DEFAULT_CONFIG.memory.provider}'.`);
+    config.memory.provider = DEFAULT_CONFIG.memory.provider;
+  }
+  if (!isObject(config.memory.engram)) config.memory.engram = structuredClone(DEFAULT_CONFIG.memory.engram);
+  if (typeof config.memory.engram.baseUrl !== "string" || !config.memory.engram.baseUrl.trim()) {
+    diagnostics.push(`Invalid memory.engram.baseUrl '${String(config.memory.engram.baseUrl)}'; using '${DEFAULT_CONFIG.memory.engram.baseUrl}'.`);
+    config.memory.engram.baseUrl = DEFAULT_CONFIG.memory.engram.baseUrl;
+  }
+  if (typeof config.memory.engram.command !== "string" || !config.memory.engram.command.trim()) {
+    diagnostics.push(`Invalid memory.engram.command '${String(config.memory.engram.command)}'; using '${DEFAULT_CONFIG.memory.engram.command}'.`);
+    config.memory.engram.command = DEFAULT_CONFIG.memory.engram.command;
+  }
+  if (typeof config.memory.engram.autoStart !== "boolean") {
+    diagnostics.push(`Invalid memory.engram.autoStart '${String(config.memory.engram.autoStart)}'; using '${DEFAULT_CONFIG.memory.engram.autoStart}'.`);
+    config.memory.engram.autoStart = DEFAULT_CONFIG.memory.engram.autoStart;
+  }
+  if (typeof config.memory.engram.autoSync !== "boolean") {
+    diagnostics.push(`Invalid memory.engram.autoSync '${String(config.memory.engram.autoSync)}'; using '${DEFAULT_CONFIG.memory.engram.autoSync}'.`);
+    config.memory.engram.autoSync = DEFAULT_CONFIG.memory.engram.autoSync;
+  }
+  if (!Number.isFinite(config.memory.engram.syncThrottleMs) || config.memory.engram.syncThrottleMs < 0 || config.memory.engram.syncThrottleMs > 300_000) {
+    diagnostics.push(`Invalid memory.engram.syncThrottleMs '${String(config.memory.engram.syncThrottleMs)}'; using '${DEFAULT_CONFIG.memory.engram.syncThrottleMs}'.`);
+    config.memory.engram.syncThrottleMs = DEFAULT_CONFIG.memory.engram.syncThrottleMs;
+  }
+  if (!Number.isFinite(config.memory.engram.timeoutMs) || config.memory.engram.timeoutMs < 100 || config.memory.engram.timeoutMs > 10_000) {
+    diagnostics.push(`Invalid memory.engram.timeoutMs '${String(config.memory.engram.timeoutMs)}'; using '${DEFAULT_CONFIG.memory.engram.timeoutMs}'.`);
+    config.memory.engram.timeoutMs = DEFAULT_CONFIG.memory.engram.timeoutMs;
+  }
+  if (config.memory.engram.project !== undefined && typeof config.memory.engram.project !== "string") {
+    diagnostics.push(`Invalid memory.engram.project '${String(config.memory.engram.project)}'; removing override.`);
+    delete config.memory.engram.project;
   }
   return config;
 }

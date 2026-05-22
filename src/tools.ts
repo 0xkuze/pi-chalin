@@ -6,7 +6,8 @@ import { AgentCatalog } from "./agents.ts";
 import { ArtifactStore } from "./artifacts.ts";
 import { loadEffectiveConfig } from "./config.ts";
 import { ChalinKernel, routeFromPlan } from "./kernel.ts";
-import { createMemoryCandidate, MemoryStore } from "./memory.ts";
+import { createMemoryCandidate } from "./memory.ts";
+import { createConfiguredMemoryStore } from "./memory-provider.ts";
 import { formatInterviewResult, runChalinInterview, type InterviewRequestInput } from "./interview.ts";
 import { loadResumableRunState } from "./runner-state.ts";
 import { beginChalinRouteInvocation, finishChalinRouteInvocation, setLatestRun } from "./runtime-state.ts";
@@ -218,7 +219,7 @@ export function registerChalinTools(pi: ExtensionAPI): void {
     async execute(_toolCallId, params: ChalinRouteToolParams, signal, onUpdate, ctx) {
       const loaded = loadEffectiveConfig({ cwd: ctx.cwd });
       const catalog = AgentCatalog.load({ cwd: ctx.cwd });
-      const memory = new MemoryStore({ cwd: ctx.cwd });
+      const memory = createConfiguredMemoryStore({ cwd: ctx.cwd }, loaded.config);
       const kernel = new ChalinKernel({
         cwd: ctx.cwd,
         config: loaded.config,
@@ -349,7 +350,7 @@ export function registerChalinTools(pi: ExtensionAPI): void {
       const run = loadResumableRunState({ cwd: ctx.cwd, runId: params.runId });
       if (!run) return textResult(params.runId ? `No resumable pi-chalin run found for '${params.runId}'.` : "No paused or stale pi-chalin run found to resume.", { runId: params.runId });
       const catalog = AgentCatalog.load({ cwd: ctx.cwd });
-      const memory = new MemoryStore({ cwd: ctx.cwd });
+      const memory = createConfiguredMemoryStore({ cwd: ctx.cwd }, loaded.config);
       const kernel = new ChalinKernel({
         cwd: ctx.cwd,
         config: loaded.config,
@@ -411,7 +412,7 @@ export function registerChalinTools(pi: ExtensionAPI): void {
     ],
     parameters: ChalinMemorySearchParams,
     async execute(_toolCallId, params: ChalinMemorySearchToolParams, _signal, _onUpdate, ctx) {
-      const memory = new MemoryStore({ cwd: ctx.cwd });
+      const memory = createConfiguredMemoryStore({ cwd: ctx.cwd });
       const bundle = await memory.retrieve({
         query: params.query,
         sourceAgent: "primary-pi",
@@ -437,7 +438,7 @@ export function registerChalinTools(pi: ExtensionAPI): void {
     async execute(_toolCallId, params: ChalinMemoryWriteToolParams, _signal, _onUpdate, ctx) {
       const content = params.content.trim();
       if (content.length < 24) return textResult("memory rejected: content is too short to be durable.", { status: "rejected" });
-      const memory = new MemoryStore({ cwd: ctx.cwd });
+      const memory = createConfiguredMemoryStore({ cwd: ctx.cwd });
       const [record] = await memory.submitCandidates([createMemoryCandidate({
         category: params.category,
         content,
@@ -466,7 +467,7 @@ export function registerChalinTools(pi: ExtensionAPI): void {
     async execute(_toolCallId, params: ChalinMemoryReviseToolParams, _signal, _onUpdate, ctx) {
       const content = params.content.trim();
       if (content.length < 24) return textResult("memory revision rejected: content is too short to be durable.", { status: "rejected" });
-      const memory = new MemoryStore({ cwd: ctx.cwd });
+      const memory = createConfiguredMemoryStore({ cwd: ctx.cwd });
       const record = await memory.revise(params.id, {
         content,
         category: params.category,

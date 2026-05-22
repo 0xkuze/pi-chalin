@@ -38,6 +38,19 @@ export interface MemoryRevisionInput {
   reason?: string;
 }
 
+export interface MemoryStoreLike {
+  submitCandidates(candidates: MemoryCandidate[]): Promise<MemoryRecord[]>;
+  list(status?: MemoryRecord["status"]): Promise<MemoryRecord[]>;
+  pendingCount(): Promise<number>;
+  approve(id: string): Promise<MemoryRecord | undefined>;
+  reject(id: string): Promise<MemoryRecord | undefined>;
+  delete(id: string): Promise<boolean>;
+  search(query: string, limit?: number): Promise<MemorySearchResult[]>;
+  retrieve(request: MemoryContextRequest): Promise<MemoryContextBundle>;
+  revise(id: string, input: MemoryRevisionInput): Promise<MemoryRecord | undefined>;
+  events(recordId?: string): Promise<MemoryAuditEvent[]>;
+}
+
 type SqlJsStatic = any;
 type SqlJsDatabase = any;
 
@@ -52,7 +65,7 @@ export class MemoryStore {
 
   async submitCandidates(candidates: MemoryCandidate[]): Promise<MemoryRecord[]> {
     const now = new Date().toISOString();
-    const records = dedupeCandidates(candidates).map((candidate) => buildMemoryRecord(candidate, now));
+    const records = prepareMemoryRecords(candidates, now);
 
     await this.withDb(true, (db) => {
       const existingRecords = selectRows(db, "SELECT * FROM memory_records ORDER BY createdAt DESC")
@@ -315,6 +328,10 @@ export function createMemoryCandidate(input: Omit<MemoryCandidate, "id" | "creat
     id: input.id ?? `memory-${stableHash(normalizeForDedupe(content))}`,
     createdAt,
   };
+}
+
+export function prepareMemoryRecords(candidates: MemoryCandidate[], now = new Date().toISOString()): MemoryRecord[] {
+  return dedupeCandidates(candidates).map((candidate) => buildMemoryRecord(candidate, now));
 }
 
 async function getSqlModule(): Promise<SqlJsStatic> {

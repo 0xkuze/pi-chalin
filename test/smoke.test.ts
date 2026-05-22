@@ -200,17 +200,24 @@ test("primary Pi agent receives compact global memory context before direct or r
   })]);
   assert.ok(record);
 
-  const promptResult = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Implementa una mejora pequeña en tests async retry evitando sleeps frágiles",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, { cwd, hasUI: false, model: undefined, modelRegistry: { getAvailable: () => [] } });
+  const previousProvider = process.env.PI_CHALIN_MEMORY_PROVIDER;
+  process.env.PI_CHALIN_MEMORY_PROVIDER = "pi-chalin";
+  try {
+    const promptResult = await beforeAgentStart({
+      type: "before_agent_start",
+      prompt: "Implementa una mejora pequeña en tests async retry evitando sleeps frágiles",
+      systemPrompt: "base",
+      systemPromptOptions: {},
+    }, { cwd, hasUI: false, model: undefined, modelRegistry: { getAvailable: () => [] } });
 
-  assert.match(promptResult?.systemPrompt ?? "", /pi-chalin global memory context/i);
-  assert.match(promptResult?.systemPrompt ?? "", /Async retry tests should avoid time\.Sleep/i);
-  const events = await memory.events(record.id);
-  assert.ok(events.some((event) => event.type === "retrieve" && event.actor === "primary-pi-global"));
+    assert.match(promptResult?.systemPrompt ?? "", /pi-chalin global memory context/i);
+    assert.match(promptResult?.systemPrompt ?? "", /Async retry tests should avoid time\.Sleep/i);
+    const events = await memory.events(record.id);
+    assert.ok(events.some((event) => event.type === "retrieve" && event.actor === "primary-pi-global"));
+  } finally {
+    if (previousProvider === undefined) delete process.env.PI_CHALIN_MEMORY_PROVIDER;
+    else process.env.PI_CHALIN_MEMORY_PROVIDER = previousProvider;
+  }
 });
 
 test("spanish continuation prompt steers the resumed parent session to chalin_resume", async () => {
@@ -1137,6 +1144,67 @@ test("Memory Review uses compact list items and a detail drill-down", async () =
   assert.deepEqual(approved, []);
 });
 
+test("Memory Review uses a searchable overlay for large memory sets", async () => {
+  const records = Array.from({ length: 64 }, (_, index) => memoryRecord({
+    id: `memory-${index + 1}`,
+    status: index === 17 ? "pending" : "active",
+    category: index === 17 ? "workflow" : "project-fact",
+    sourceAgent: index === 17 ? "reviewer" : "context-builder",
+    content: index === 17
+      ? "needle memory overlay should be easy to find without rendering every memory as a select option."
+      : `Routine memory ${index + 1} stays available without bloating the select menu.`,
+  }));
+  const renders: string[] = [];
+  const approved: string[] = [];
+  let selectCalled = false;
+  let customOptions: unknown;
+  let requestRenderCount = 0;
+  const plainTheme = {
+    fg: (_color: string, text: string) => text,
+    bg: (_color: string, text: string) => text,
+    bold: (text: string) => text,
+  };
+
+  await openMemoryReview({
+    cwd: tempDir("pi-chalin-memory-overlay-"),
+    hasUI: true,
+    ui: {
+      notify: () => {},
+      select: async () => {
+        selectCalled = true;
+        return undefined;
+      },
+      custom: async (factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (result: { action: string; id: string } | undefined) => void) => { render(width: number): string[]; handleInput?(data: string): void }, options: unknown) => {
+        customOptions = options;
+        let result: { action: string; id: string } | undefined;
+        const component = factory({ requestRender: () => { requestRenderCount += 1; } }, plainTheme, {}, (value) => { result = value; });
+        renders.push(component.render(110).join("\n"));
+        for (const char of "needle") component.handleInput?.(char);
+        renders.push(component.render(110).join("\n"));
+        component.handleInput?.("A");
+        return result;
+      },
+    },
+  } as never, records, {
+    approve: (id) => approved.push(id),
+    reject: () => {},
+    delete: () => {},
+  });
+
+  assert.equal(selectCalled, false);
+  assert.match(JSON.stringify(customOptions), /"overlay":true/);
+  assert.match(renders[0] ?? "", /pi-chalin Memory/);
+  assert.match(renders[0] ?? "", /64\/64 records/);
+  assert.doesNotMatch(renders[0] ?? "", /Routine memory 64/);
+  assert.match(renders[1] ?? "", /1\/64 records/);
+  assert.match(renders[1] ?? "", /needle memory overlay/);
+  assert.deepEqual(approved, ["memory-18"]);
+  assert.ok(requestRenderCount > 0);
+  for (const render of renders) {
+    for (const line of render.split("\n")) assert.ok(visibleWidth(line) <= 110, `line exceeds overlay width: ${visibleWidth(line)} > 110`);
+  }
+});
+
 
 test("/chalin completions expose Activity instead of technical Runs", () => {
   const fake = createFakePi();
@@ -1145,7 +1213,38 @@ test("/chalin completions expose Activity instead of technical Runs", () => {
   const completions = command.getArgumentCompletions?.("") ?? [];
 
   assert.ok(completions.some((item) => item.value === "activity"));
+  assert.ok(completions.some((item) => item.value === "settings"));
   assert.ok(!completions.some((item) => item.value === "runs"));
+});
+
+test("/chalin settings persists the selected memory provider", async () => {
+  const fake = createFakePi();
+  registerPiChalin(fake.api as never);
+  const command = fake.commands.get("chalin") as { handler: (args: string, ctx: unknown) => Promise<void> };
+  const cwd = tempDir("pi-chalin-settings-");
+  const selections = ["Memory provider · auto", "Engram · native Engram memory"];
+  const notifications: string[] = [];
+  const previousEngramUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:9";
+
+  try {
+    await command.handler("settings", {
+      cwd,
+      hasUI: true,
+      ui: {
+        select: async () => selections.shift(),
+        notify: (message: string) => notifications.push(message),
+        setStatus: () => {},
+      },
+    });
+  } finally {
+    if (previousEngramUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = previousEngramUrl;
+  }
+
+  const config = JSON.parse(fs.readFileSync(path.join(cwd, ".pi-chalin", "config.json"), "utf-8")) as { memory?: { provider?: string } };
+  assert.equal(config.memory?.provider, "engram");
+  assert.match(notifications.join("\n"), /Memory provider set to engram/);
 });
 
 

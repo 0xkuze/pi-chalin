@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { AgentCatalog } from "./agents.ts";
 import { loadEffectiveConfig } from "./config.ts";
-import { MemoryStore } from "./memory.ts";
+import { createConfiguredMemoryStore } from "./memory-provider.ts";
 import { buildCompactChalinCriticalSystemPrompt, buildCompactChalinOrchestratorSystemPrompt, buildCompactChalinResumeSystemPrompt, buildChalinOrchestratorSystemPrompt } from "./orchestration.ts";
 import { isUsableStepHandoff, loadResumableRunState } from "./runner-state.ts";
 import { beginChalinTurn, recordDirectToolCompletion } from "./runtime-state.ts";
@@ -159,7 +159,7 @@ async function globalMemoryContextForPrompt(cwd: string, prompt: string): Promis
   const query = prompt.trim();
   if (query.length < 8) return undefined;
   try {
-    const bundle = await new MemoryStore({ cwd }).retrieve({
+    const bundle = await createConfiguredMemoryStore({ cwd }).retrieve({
       query,
       sourceAgent: "primary-pi-global",
       limit: 5,
