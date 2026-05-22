@@ -48,7 +48,7 @@ export function registerChalinCommands(pi: ExtensionAPI): void {
       const lastRun = getLatestRun();
 
       if (command === "agents") {
-        await openAgentManager(ctx, agents, sessionModelOverrides, sessionThinkingOverrides);
+        await openAgentManager(ctx, agents, sessionModelOverrides, sessionThinkingOverrides, loaded.config.agents.modelOverrides, loaded.config.agents.thinkingOverrides);
         return;
       }
 
@@ -125,7 +125,7 @@ export function registerChalinCommands(pi: ExtensionAPI): void {
         agents,
         diagnostics,
         pendingMemories,
-        onSelectAgents: () => openAgentManager(ctx, agents, sessionModelOverrides, sessionThinkingOverrides),
+        onSelectAgents: () => openAgentManager(ctx, agents, sessionModelOverrides, sessionThinkingOverrides, loaded.config.agents.modelOverrides, loaded.config.agents.thinkingOverrides),
         onSelectActivity: () => openActivityMonitor(ctx, activeRun ?? lastRun),
         onSelectMemory: async () => openMemoryReview(ctx, await memory.list(), {
           approve: (id) => void memory.approve(id),

@@ -6,10 +6,10 @@ import { afterEach, test } from "bun:test";
 import registerPiChalin from "../src/index.ts";
 import { shouldUseCompactDirectOrchestrationPrompt, shouldUseCompactChalinCriticalPrompt } from "../src/autoroute.ts";
 import { resetRuntimeState, setLatestRun } from "../src/runtime-state.ts";
-import { chalinFooterText, openMemoryReview, openSmartPanel, summarizeRuntimeGuards } from "../src/ui.ts";
+import { chalinFooterText, openAgentManager, openAgentModelPicker, openMemoryReview, openSmartPanel, summarizeRuntimeGuards } from "../src/ui.ts";
 import { finalAnswerMaterial, formatChalinRoutePlanWidget, formatChalinRunWidget } from "../src/tools.ts";
 import { createRunState } from "../src/runner.ts";
-import type { MemoryRecord, RunState } from "../src/schemas.ts";
+import type { AgentDefinition, MemoryRecord, RunState } from "../src/schemas.ts";
 
 const tempDirs: string[] = [];
 afterEach(() => {
@@ -727,6 +727,85 @@ test("/chalin Smart Panel does not auto-open memory when pending memories exist"
   assert.deepEqual(selectedTitles, ["pi-chalin Smart Panel"]);
   assert.equal(memoryOpened, false);
   assert.ok(selectedOptions[0]?.some((option) => option === "Memory · 1 pending"));
+});
+
+test("Agent model picker refreshes Pi registry and persisted selection reappears in agent list", async () => {
+  const cwd = tempDir("pi-chalin-agent-model-ui-");
+  const agent: AgentDefinition = {
+    name: "worker",
+    scope: "built-in",
+    concern: "implementation",
+    capabilities: [],
+    description: "Worker",
+    model: "inherit",
+    thinking: "high",
+    tools: [],
+    memory: { read: false, write: "never", categories: [] },
+    systemPrompt: "",
+    diagnostics: [],
+  };
+  const sessionOverrides = new Map<string, string>();
+  const notifications: string[] = [];
+  let renderedPicker = "";
+  let renderCount = 0;
+  let refreshCount = 0;
+
+  await openAgentModelPicker({
+    cwd,
+    hasUI: true,
+    modelRegistry: {
+      refresh: () => { refreshCount += 1; },
+      getAvailable: () => refreshCount > 0
+        ? [
+          { provider: "legacy", id: "old-model", name: "Old Model" },
+          { provider: "local", id: "new-model", name: "New Model" },
+        ]
+        : [],
+    },
+    ui: {
+      custom: async (factory: any) => {
+        const theme = {
+          fg: (_color: string, text: string) => text,
+          bold: (text: string) => text,
+        };
+        const component = await factory({ requestRender: () => { renderCount += 1; } }, theme, {}, () => {});
+        component.handleInput("n");
+        component.handleInput("e");
+        component.handleInput("w");
+        renderedPicker = component.render(120).join("\n");
+        return "local/new-model";
+      },
+      select: async () => "project",
+      notify: (message: string) => notifications.push(message),
+    },
+  } as never, agent, sessionOverrides);
+
+  assert.equal(refreshCount, 1);
+  assert.ok(renderCount >= 3);
+  assert.match(renderedPicker, /local\/new-model/);
+  assert.doesNotMatch(renderedPicker, /legacy\/old-model/);
+  assert.equal(sessionOverrides.get("built-in/worker"), undefined);
+
+  const projectConfig = JSON.parse(fs.readFileSync(path.join(cwd, ".pi-chalin", "config.json"), "utf-8")) as {
+    agents: { modelOverrides: Record<string, string>; thinkingOverrides?: Record<string, never> };
+  };
+  assert.equal(projectConfig.agents.modelOverrides["built-in/worker"], "local/new-model");
+
+  const agentListSelections: Array<{ title: string; options: string[] }> = [];
+  await openAgentManager({
+    cwd,
+    hasUI: true,
+    ui: {
+      select: async (title: string, options: string[]) => {
+        agentListSelections.push({ title, options });
+        return undefined;
+      },
+      notify: () => {},
+    },
+  } as never, [agent], sessionOverrides, new Map(), projectConfig.agents.modelOverrides, {});
+
+  assert.match(agentListSelections[0]?.options.join("\n") ?? "", /built-in\/worker · implementation · local\/new-model · thinking high/);
+  assert.match(notifications.join("\n"), /built-in\/worker model set to local\/new-model \(project\)/);
 });
 
 test("Memory Review uses compact list items and a detail drill-down", async () => {
