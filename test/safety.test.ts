@@ -35,3 +35,21 @@ test("child policy compresses oversized tool output and records output/read budg
   assert.equal(policy.metrics().outputTruncatedCount, 1);
   assert.ok(policy.metrics().readBytes < 7000);
 });
+
+test("child policy limits synthesis cross-step duplicate reads", () => {
+  const policy = createChildToolPolicy({
+    cwd: process.cwd(),
+    maxToolCalls: 10,
+    allowedTools: ["read"],
+    priorFilesRead: ["src/index.ts"],
+    maxCrossStepDuplicateReads: 1,
+  });
+
+  assert.deepEqual(policy.beforeTool("read", { path: "src/index.ts" }), { allowed: true });
+  const blocked = policy.beforeTool("read", { path: "src/index.ts" });
+
+  assert.equal(blocked.allowed, false);
+  assert.match(blocked.reason, /cross_step_duplicate_reads=1:src\/index\.ts/);
+  assert.equal(policy.metrics().budgetStopCount, 1);
+  assert.equal(policy.metrics().toolCalls, 1);
+});

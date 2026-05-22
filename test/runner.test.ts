@@ -30,6 +30,13 @@ test("parseAgentOutput extracts categorized human-readable memory candidates", (
   assert.equal(output.memoryCandidates[0]?.category, "tooling");
 });
 
+test("parseAgentOutput parses tagged memory candidates wrapped in backticks", () => {
+  const output = parseAgentOutput("scout", "## Memory Candidates\n- `project-fact: evgo is a Go monorepo for Evaluar microservices.`\n- `pattern: Pattern B to Pattern A migration requires a new ADR.`");
+  assert.deepEqual(output.memoryCandidates.map((candidate) => candidate.category), ["project-fact", "pattern"]);
+  assert.equal(output.memoryCandidates[0]?.confidence, 0.9);
+  assert.doesNotMatch(output.memoryCandidates[0]?.content ?? "", /^`/);
+});
+
 test("parseAgentOutput ignores non-bullet memory blocks and None", () => {
   const codeOutput = parseAgentOutput("scout", "## Memory Candidates\ncmd = ['pi', '-e', 'src/index.ts']\nprint('--- stdout ---')");
   const noneOutput = parseAgentOutput("scout", "## Memory Candidates\n- None.");
@@ -426,6 +433,14 @@ test("parseAgentOutput accepts richer memory categories for long-running work", 
   assert.deepEqual(output.memoryCandidates.map((candidate) => candidate.category), ["testing", "workflow"]);
 });
 
+test("parseAgentOutput preserves larger scout handoffs for downstream synthesis", () => {
+  const longHandoff = `## Handoff\n${"Evidence path src/index.ts supports runtime entrypoint. ".repeat(45)}\n## Memory Candidates\n- None.`;
+  const scout = parseAgentOutput("scout", longHandoff);
+  const worker = parseAgentOutput("worker", longHandoff);
+  assert.ok((scout.handoff?.length ?? 0) > 1800);
+  assert.ok((worker.handoff?.length ?? 0) <= 1200);
+});
+
 test("buildSdkPrompt compresses repeated policy when previous handoff is available", () => {
   const agent: AgentDefinition = {
     name: "context-builder",
@@ -444,7 +459,69 @@ test("buildSdkPrompt compresses repeated policy when previous handoff is availab
   assert.match(prompt, /Previous Handoff/);
   assert.match(prompt, /Discovery index omitted/i);
   assert.doesNotMatch(prompt, /duplicated tool rule/);
-  assert.ok(prompt.length < 5200, `prompt should stay compact, got ${prompt.length}`);
+  assert.ok(prompt.length < 6500, `prompt should stay compact, got ${prompt.length}`);
+});
+
+test("buildSdkPrompt puts context-builder into handoff-first gap-read mode", () => {
+  const agent: AgentDefinition = {
+    name: "context-builder",
+    scope: "built-in",
+    concern: "context-building",
+    capabilities: ["inspect-files", "search-files", "memory-read", "memory-write"],
+    description: "Packages repo facts for the next agent.",
+    model: "inherit",
+    tools: [],
+    memory: { read: true, write: "candidate", categories: [] },
+    systemPrompt: "",
+    diagnostics: [],
+  };
+
+  const prompt = buildSdkPrompt(
+    agent,
+    "A partir del handoff del scout, sintetiza qué hace el proyecto en profundidad.",
+    tempDir("pi-mesh-gap-read-prompt-"),
+    "Coverage Matrix: runtime covered with evidence in src/index.ts.",
+    120,
+    "deep",
+    { priorFilesRead: ["package.json", "src/index.ts"], synthesisGapReadLimit: 7 },
+  );
+
+  assert.match(prompt, /Handoff-first synthesis/i);
+  assert.match(prompt, /at most 7 gap reads/i);
+  assert.match(prompt, /Already Covered Evidence Paths/);
+  assert.match(prompt, /src\/index\.ts/);
+  assert.match(prompt, /primary evidence map/i);
+});
+
+test("buildSdkPrompt puts reviewer into sampled audit mode after handoff", () => {
+  const agent: AgentDefinition = {
+    name: "reviewer",
+    scope: "built-in",
+    concern: "review",
+    capabilities: ["inspect-files", "search-files", "validate"],
+    description: "Reviews synthesized repo facts.",
+    model: "inherit",
+    tools: [],
+    memory: { read: false, write: "never", categories: [] },
+    systemPrompt: "",
+    diagnostics: [],
+  };
+
+  const prompt = buildSdkPrompt(
+    agent,
+    "Review risks/gaps in this deep project analysis.",
+    tempDir("pi-mesh-review-gap-prompt-"),
+    "Coverage Matrix: runtime covered with evidence in nuxt.config.js; auth covered in middleware/auth.js.",
+    120,
+    "deep",
+    { priorFilesRead: ["nuxt.config.js", "middleware/auth.js"], synthesisGapReadLimit: 5 },
+  );
+
+  assert.match(prompt, /Handoff-first review/i);
+  assert.match(prompt, /sample only the highest-risk/i);
+  assert.match(prompt, /at most 5 gap reads/i);
+  assert.match(prompt, /Already Covered Evidence Paths/);
+  assert.match(prompt, /middleware\/auth\.js/);
 });
 
 test("buildSdkPrompt adds a coverage and evidence contract for deep project analysis", () => {

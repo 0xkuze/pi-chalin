@@ -196,6 +196,8 @@ test("pi-mesh uses compact orchestration context for bounded scaffold prompts", 
   assert.match(promptResult?.message?.content ?? "", /rerun verification after the final edit/i);
   assert.match(promptResult?.message?.content ?? "", /package\.json `bin`/i);
   assert.match(promptResult?.message?.content ?? "", /never `node \.\.\.` command strings/i);
+  assert.match(promptResult?.message?.content ?? "", /injected clocks\/schedulers/i);
+  assert.match(promptResult?.message?.content ?? "", /process\.env/i);
 });
 
 
@@ -249,6 +251,7 @@ test("direct bounded edits get one completion nudge after verification", async (
   assert.match((failureNudges[0]?.message as { content?: string }).content ?? "", /Do NOT answer as done yet/i);
   assert.match((failureNudges[0]?.message as { content?: string }).content ?? "", /node --experimental-strip-types --test test\/\*\.test\.ts/i);
   assert.match((failureNudges[0]?.message as { content?: string }).content ?? "", /wall-clock flakiness/i);
+  assert.match((failureNudges[0]?.message as { content?: string }).content ?? "", /process\.env/i);
 
   toolExecutionEnd({ toolName: "bash", isError: false, args: { command: "npm test" } }, ctx);
   const nudges = fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-mesh-direct-completion-nudge");
@@ -257,6 +260,7 @@ test("direct bounded edits get one completion nudge after verification", async (
   assert.match(nudgeContent, /answer now/i);
   assert.match(nudgeContent, /Verification: `npm test` passed/i);
   assert.match(nudgeContent, /Passing tests is not enough/i);
+  assert.match(nudgeContent, /starter smoke\/empty path/i);
   assert.match(nudgeContent, /bin\/scripts/i);
   assert.match(nudgeContent, /Do not omit the Verification or Notes line/i);
   assert.deepEqual(nudges[0]?.options, { triggerTurn: false, deliverAs: "steer" });
@@ -296,6 +300,7 @@ test("direct bounded edits recognize Python unittest verification and rerun afte
   const nudges = fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-mesh-direct-completion-nudge");
   assert.equal(nudges.length, 1);
   assert.match((nudges[0]?.message as { content?: string }).content ?? "", /python -m unittest discover -s tests/);
+  assert.match((nudges[0]?.message as { content?: string }).content ?? "", /starter smoke\/empty path/);
 });
 
 test("direct bounded edits do not complete when requested tests were not changed", async () => {
@@ -316,6 +321,10 @@ test("direct bounded edits do not complete when requested tests were not changed
 
   assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-mesh-direct-tests-missing-nudge").length, 1);
   assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-mesh-direct-completion-nudge").length, 0);
+  const missingNudge = fake.messages.find((item) => (item.message as { customType?: string }).customType === "pi-mesh-direct-tests-missing-nudge");
+  assert.deepEqual(missingNudge?.options, { triggerTurn: true, deliverAs: "steer" });
+  assert.match((missingNudge?.message as { content?: string }).content ?? "", /next action must be an edit\/write/i);
+  assert.match((missingNudge?.message as { content?: string }).content ?? "", /non-trivial assertions/i);
 
   toolExecutionEnd({ toolName: "edit", isError: false, args: { path: "test/rateLimit.test.ts" } }, ctx);
   assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-mesh-direct-ready-to-verify-nudge").length, 1);

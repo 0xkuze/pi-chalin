@@ -12,15 +12,19 @@ function tempDir(prefix: string): string { const dir = fs.mkdtempSync(path.join(
 test("project discovery indexes unusual nested layouts without semantic hardcoding", () => {
   const dir = tempDir("pi-mesh-discovery-");
   fs.mkdirSync(path.join(dir, "weird-zone", "alpha", "src"), { recursive: true });
+  fs.mkdirSync(path.join(dir, "weird-zone", "alpha", "docs", "adr"), { recursive: true });
   fs.mkdirSync(path.join(dir, "runtime", "edge", "checks"), { recursive: true });
   fs.mkdirSync(path.join(dir, "node_modules", "ignored"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "AGENTS.md"), "Read me first.\n");
+  fs.writeFileSync(path.join(dir, "weird-zone", "alpha", "AGENTS.md"), "Package rules.\n");
+  fs.writeFileSync(path.join(dir, "weird-zone", "alpha", "docs", "adr", "0001.md"), "Decision.\n");
   fs.writeFileSync(path.join(dir, "workspace.anything"), "members = ['weird-zone/*']\n");
   fs.writeFileSync(path.join(dir, "weird-zone", "alpha", "manifest.custom.json"), "{}\n");
   fs.writeFileSync(path.join(dir, "weird-zone", "alpha", "src", "entry.strange"), "boot\n");
   fs.writeFileSync(path.join(dir, "runtime", "edge", "checks", "health.spec.strange"), "test\n");
   fs.writeFileSync(path.join(dir, "node_modules", "ignored", "huge.js"), "ignored\n");
 
-  const index = buildProjectDiscoveryIndex(dir, { maxDepth: 4, maxEntries: 100 });
+  const index = buildProjectDiscoveryIndex(dir, { maxDepth: 5, maxEntries: 100 });
   const text = formatProjectDiscoveryIndex(index);
 
   assert.ok(index.entries.some((entry) => entry.path === "weird-zone/alpha/src/entry.strange"));
@@ -28,5 +32,10 @@ test("project discovery indexes unusual nested layouts without semantic hardcodi
   assert.equal(index.entries.some((entry) => entry.path.includes("node_modules")), false);
   assert.ok(index.configLikeFiles.includes("weird-zone/alpha/manifest.custom.json"));
   assert.ok(index.testLikeFiles.includes("runtime/edge/checks/health.spec.strange"));
+  assert.ok(index.instructionFiles.includes("AGENTS.md"));
+  assert.ok(index.instructionFiles.includes("weird-zone/alpha/AGENTS.md"));
+  assert.ok(index.instructionFiles.includes("weird-zone/alpha/docs/adr/0001.md"));
+  assert.match(text, /instruction\/JIT files/i);
+  assert.match(text, /read the root instruction file/i);
   assert.match(text, /raw, non-semantic/i);
 });

@@ -359,10 +359,39 @@ function exportedNames(content: string): Set<string> {
     if (ts.isExportDeclaration(node) && node.exportClause && ts.isNamedExports(node.exportClause)) {
       for (const element of node.exportClause.elements) names.add(element.name.text);
     }
+    if (ts.isExpressionStatement(node) && ts.isBinaryExpression(node.expression) && node.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      collectCommonJsExportNames(node.expression, names);
+    }
     ts.forEachChild(node, visit);
   };
   visit(source);
   return names;
+}
+
+function collectCommonJsExportNames(expression: ts.BinaryExpression, names: Set<string>): void {
+  const left = expression.left;
+  const right = expression.right;
+  if (isModuleExports(left) && ts.isObjectLiteralExpression(right)) {
+    for (const property of right.properties) {
+      if (ts.isShorthandPropertyAssignment(property)) names.add(property.name.text);
+      if (ts.isPropertyAssignment(property) && ts.isIdentifier(property.name)) names.add(property.name.text);
+      if (ts.isPropertyAssignment(property) && ts.isStringLiteral(property.name)) names.add(property.name.text);
+    }
+    return;
+  }
+  const assignedName = commonJsAssignedName(left);
+  if (assignedName) names.add(assignedName);
+}
+
+function isModuleExports(node: ts.Node): boolean {
+  return ts.isPropertyAccessExpression(node) && node.expression.getText() === "module" && node.name.text === "exports";
+}
+
+function commonJsAssignedName(node: ts.Node): string | undefined {
+  if (!ts.isPropertyAccessExpression(node)) return undefined;
+  if (node.expression.getText() === "exports") return node.name.text;
+  if (ts.isPropertyAccessExpression(node.expression) && node.expression.expression.getText() === "module" && node.expression.name.text === "exports") return node.name.text;
+  return undefined;
 }
 
 function exportNameMatches(expected: string, actual: string): boolean {

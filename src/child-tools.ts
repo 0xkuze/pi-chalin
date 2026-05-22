@@ -84,6 +84,8 @@ export interface ChildToolPolicyOptions {
   budgetPolicy?: BudgetPolicy;
   agentName?: string;
   allowedTools?: string[];
+  priorFilesRead?: string[];
+  maxCrossStepDuplicateReads?: number;
   onActivity?: (activity: ChildToolActivity) => void;
 }
 
@@ -124,12 +126,15 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
   const filesTouched: string[] = [];
   const retriesByTool: Record<string, number> = {};
   const allowedTools = new Set(options.allowedTools ?? []);
+  const priorFilesRead = new Set((options.priorFilesRead ?? []).map((item) => normalizeMetricPath(item, options.cwd)));
+  const maxCrossStepDuplicateReads = options.maxCrossStepDuplicateReads ?? Number.POSITIVE_INFINITY;
   const hasExplicitAllowlist = options.allowedTools !== undefined;
   let budgetStopCount = 0;
   let toolCalls = 0;
   let readBytes = 0;
   let outputChars = 0;
   let outputTruncatedCount = 0;
+  let crossStepDuplicateReadCount = 0;
   const startedAt = Date.now();
   const caps = options.budgetPolicy?.caps ?? {
     maxToolCalls: options.maxToolCalls,
@@ -211,6 +216,17 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
           activity(toolName, "blocked");
           return violation(`write_existing_file:${normalizeMetricPath(target, options.cwd)}`);
         }
+      }
+
+      if (toolName === "read") {
+        const readPath = getPathParam(params);
+        const normalizedReadPath = readPath ? normalizeMetricPath(readPath, options.cwd) : undefined;
+        if (normalizedReadPath && priorFilesRead.has(normalizedReadPath) && crossStepDuplicateReadCount >= maxCrossStepDuplicateReads) {
+          budgetStopCount += 1;
+          activity(toolName, "blocked");
+          return { allowed: false, reason: `budget_exceeded:read:cross_step_duplicate_reads=${maxCrossStepDuplicateReads}:${normalizedReadPath}` };
+        }
+        if (normalizedReadPath && priorFilesRead.has(normalizedReadPath)) crossStepDuplicateReadCount += 1;
       }
 
       if (toolName === "edit") {

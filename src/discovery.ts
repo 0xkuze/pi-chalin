@@ -21,6 +21,7 @@ export interface ProjectDiscoveryIndex {
   ignoredDirs: string[];
   extensionHistogram: Record<string, number>;
   shallowFiles: string[];
+  instructionFiles: string[];
   configLikeFiles: string[];
   testLikeFiles: string[];
 }
@@ -105,6 +106,7 @@ export function buildProjectDiscoveryIndex(cwdInput: string, options: ProjectDis
     ignoredDirs: [...ignoredDirs].sort(),
     extensionHistogram: extensionHistogram(files),
     shallowFiles: files.filter((entry) => entry.depth <= 2).map((entry) => entry.path).slice(0, 80),
+    instructionFiles: files.filter((entry) => isInstructionLike(entry.path)).map((entry) => entry.path).slice(0, 80),
     configLikeFiles: files.filter((entry) => isConfigLike(entry.path)).map((entry) => entry.path).slice(0, 80),
     testLikeFiles: files.filter((entry) => isTestLike(entry.path)).map((entry) => entry.path).slice(0, 80),
   };
@@ -125,11 +127,12 @@ export function formatProjectDiscoveryIndex(index: ProjectDiscoveryIndex): strin
     index.ignoredDirs.length ? `- ignored dirs: ${index.ignoredDirs.join(", ")}` : undefined,
     histogram ? `- extension histogram: ${histogram}` : undefined,
     dirs.length ? `- directories: ${dirs.join(", ")}` : undefined,
+    index.instructionFiles.length ? `- instruction/JIT files: ${index.instructionFiles.join(", ")}` : undefined,
     index.shallowFiles.length ? `- shallow files: ${index.shallowFiles.join(", ")}` : undefined,
     index.configLikeFiles.length ? `- config-like files: ${index.configLikeFiles.join(", ")}` : undefined,
     index.testLikeFiles.length ? `- test-like files: ${index.testLikeFiles.join(", ")}` : undefined,
     files.length ? `- sampled files: ${files.join(", ")}` : undefined,
-    "Guidance: treat this as an index only. Infer project architecture from reading evidence files, not from path names alone.",
+    "Guidance: treat this as an index only. For repositories with AGENTS.md/CONTEXT.md/JIT files, read the root instruction file and relevant package instruction files before broad code reads; then verify claims with the smallest evidence set.",
   ].filter((line): line is string => Boolean(line)).join("\n");
 }
 
@@ -172,6 +175,13 @@ function isConfigLike(filePath: string): boolean {
   return /(^|[.-])(config|rc|lock|workspace|manifest|project|settings|schema)([.-]|$)/.test(base)
     || ["makefile", "dockerfile", "readme.md", "agents.md", "package.json", "go.mod", "cargo.toml", "pyproject.toml", "pom.xml", "build.gradle", "composer.json", "gemfile"].includes(base)
     || /\.(ya?ml|toml|json|ini|env|properties)$/i.test(base);
+}
+
+function isInstructionLike(filePath: string): boolean {
+  const base = path.basename(filePath).toLowerCase();
+  return ["agents.md", "claude.md", "context.md"].includes(base)
+    || /(^|\/)(docs\/adr|adr)\//i.test(filePath)
+    || /(^|\/)\.agents\/skills\/readme\.md$/i.test(filePath);
 }
 
 function isTestLike(filePath: string): boolean {

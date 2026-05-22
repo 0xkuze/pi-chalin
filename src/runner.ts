@@ -12,6 +12,11 @@ import { ArtifactStore } from "./artifacts.ts";
 import { buildProjectDiscoveryIndex, formatProjectDiscoveryIndex } from "./discovery.ts";
 import { cleanupWorktrees, mergeWorktreeChanges, needsWorktreeIsolation, prepareWorktreeIsolation, type WorktreeIsolationPlan } from "./worktrees.ts";
 
+interface SdkPromptOptions {
+  priorFilesRead?: string[];
+  synthesisGapReadLimit?: number;
+}
+
 export interface WorkerRunnerContext extends MeshPathsOptions {
   agents: Map<string, AgentDefinition>;
   modelOverrides?: Record<string, string>;
@@ -400,7 +405,8 @@ async function runSdkStep(
     run.warnings.push(...selectedModel.warnings);
     const selectedThinking = resolveAgentThinking(agent, step.agent, context, selectedModel.resolution);
     step.thinkingLevel = selectedThinking.label;
-    const budgetPolicy = policyForStep(agent, step, run.route.kind, run.route.risk);
+    const promptOptions = buildPromptOptionsForStep(run, step, agent, options.previous);
+    const budgetPolicy = budgetPolicyForSdkStep(policyForStep(agent, step, run.route.kind, run.route.risk), agent, step, options.previous);
     const maxToolCalls = budgetPolicy.caps.maxToolCalls;
     step.budget = budgetPolicy.profile;
     step.maxToolCalls = maxToolCalls;
@@ -412,9 +418,11 @@ async function runSdkStep(
       budgetPolicy,
       agentName: step.agent,
       allowedTools,
+      priorFilesRead: promptOptions.priorFilesRead,
+      maxCrossStepDuplicateReads: promptOptions.synthesisGapReadLimit !== undefined ? synthesisCrossStepDuplicateReadLimit(agent) : undefined,
       onActivity: activity.onToolActivity,
     });
-    const prompt = buildSdkPrompt(agent, step.task, options.cwd, options.previous, budgetPolicy);
+    const prompt = buildSdkPrompt(agent, step.task, options.cwd, options.previous, budgetPolicy, "normal", promptOptions);
     const { createAgentSession } = await import("@earendil-works/pi-coding-agent");
     const releaseChildEnv = enterChildEnv();
     try {
@@ -454,6 +462,7 @@ async function runSdkStep(
           mergePolicyMetrics(extractSessionMetrics(created.session.state.messages as unknown[], stepStartedAtMs), childPolicy),
           step,
           budgetPolicy,
+          promptOptions.priorFilesRead,
         );
       } finally {
         created.session.dispose();
@@ -510,6 +519,38 @@ function enterChildEnv(): () => void {
     else process.env.PI_MESH_DISABLED = childEnv.previousDisabled;
     childEnv.previousChild = undefined;
     childEnv.previousDisabled = undefined;
+  };
+}
+
+function buildPromptOptionsForStep(run: RunState, step: RunStepState, agent: AgentDefinition | undefined, previous?: string): SdkPromptOptions {
+  const priorFilesRead = priorFilesReadBeforeStep(run, step);
+  return {
+    priorFilesRead,
+    ...(isHandoffGapReadMode(agent, step.task, previous) ? { synthesisGapReadLimit: synthesisGapReadLimit() } : {}),
+  };
+}
+
+function priorFilesReadBeforeStep(run: RunState, currentStep: RunStepState): string[] {
+  const index = run.steps.indexOf(currentStep);
+  const previousSteps = index >= 0 ? run.steps.slice(0, index) : run.steps.filter((step) => step !== currentStep);
+  return [...new Set(previousSteps.flatMap((step) => step.metrics?.filesRead ?? []))].slice(0, 80);
+}
+
+function budgetPolicyForSdkStep(policy: ReturnType<typeof policyForStep>, agent: AgentDefinition | undefined, step: RunStepState, previous?: string): ReturnType<typeof policyForStep> {
+  if (!isHandoffGapReadMode(agent, step.task, previous)) return policy;
+  const reviewMode = agent?.concern === "review";
+  const maxToolCalls = Math.min(policy.caps.maxToolCalls, reviewMode ? handoffReviewToolCallLimit() : synthesisToolCallLimit());
+  return {
+    ...policy,
+    id: `${policy.id}:${reviewMode ? "handoff-review" : "handoff-synthesis"}`,
+    taskKind: reviewMode ? "review" : "synthesis",
+    caps: {
+      ...policy.caps,
+      maxToolCalls,
+      maxReadBytes: Math.min(policy.caps.maxReadBytes, reviewMode ? 240_000 : 600_000),
+      maxOutputChars: Math.min(policy.caps.maxOutputChars, reviewMode ? 10_000 : 14_000),
+      maxTurns: Math.min(policy.caps.maxTurns, reviewMode ? 3 : 4),
+    },
   };
 }
 
@@ -593,7 +634,7 @@ export function parseAgentOutput(agent: string, raw: string): AgentOutput {
   const warnings: string[] = [];
   let handoff: string | undefined;
   const handoffMatch = raw.match(/##\s*Handoff\s*\n([\s\S]*?)(?:\n##\s|$)/i);
-  if (handoffMatch?.[1]) handoff = truncateText(handoffMatch[1].trim(), handoffBudgetChars());
+  if (handoffMatch?.[1]) handoff = truncateText(handoffMatch[1].trim(), handoffBudgetChars(agent));
 
   const candidates: MemoryCandidate[] = [];
   const memoryBlock = raw.match(/##\s*Memory Candidates?\s*\n([\s\S]*?)(?:\n##\s|$)/i)?.[1];
@@ -614,12 +655,17 @@ export function parseAgentOutput(agent: string, raw: string): AgentOutput {
 function parseMemoryCandidateLine(line: string): { category: string; content: string; confidence: number } | undefined {
   const bullet = line.match(/^\s*[-*]\s+(.+?)\s*$/)?.[1]?.trim();
   if (!bullet || /^none\.?$/i.test(bullet)) return undefined;
-  const tagged = bullet.match(/^(project-fact|pattern|tooling|testing|workflow|bugfix|validation|artifact|decision|preference|architecture|safety|security|failure|agent-note)\s*:\s*(.+)$/i);
+  const normalized = bullet
+    .replace(/^`+|`+$/g, "")
+    .replace(/^["“”']+|["“”']+$/g, "")
+    .trim();
+  if (!normalized || /^none\.?$/i.test(normalized)) return undefined;
+  const tagged = normalized.match(/^(project-fact|pattern|tooling|testing|workflow|bugfix|validation|artifact|decision|preference|architecture|safety|security|failure|agent-note)\s*:\s*(.+)$/i);
   if (tagged?.[1] && tagged[2]) {
     const category = tagged[1].toLowerCase();
     return { category, content: tagged[2].trim(), confidence: category === "agent-note" ? 0.7 : 0.9 };
   }
-  return { category: "agent-note", content: bullet, confidence: 0.7 };
+  return { category: "agent-note", content: normalized, confidence: 0.7 };
 }
 
 function planSteps(plan: RoutePlan): RunStepState[] {
@@ -931,10 +977,11 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-export function buildSdkPrompt(agent: AgentDefinition | undefined, task: string, cwd: string, previous?: string, budget: ReturnType<typeof policyForStep> | number = toolBudgetForAgent(agent), budgetProfile: ToolBudgetProfile = "normal"): string {
+export function buildSdkPrompt(agent: AgentDefinition | undefined, task: string, cwd: string, previous?: string, budget: ReturnType<typeof policyForStep> | number = toolBudgetForAgent(agent), budgetProfile: ToolBudgetProfile = "normal", options: SdkPromptOptions = {}): string {
   const discoveryIndex = formatProjectDiscoveryIndex(buildProjectDiscoveryIndex(cwd));
   const capabilities = agent?.capabilities ?? [];
   const deepProjectAnalysis = isDeepProjectAnalysisTask(task) || budgetProfile === "deep" || (typeof budget !== "number" && budget.profile === "deep");
+  const handoffGapMode = isHandoffGapReadMode(agent, task, previous);
   const budgetPolicy = typeof budget === "number"
     ? policyForStep(agent, { agent: agent?.name ?? "agent", task, budget: budgetProfile }, "single-agent")
     : budget;
@@ -961,6 +1008,9 @@ export function buildSdkPrompt(agent: AgentDefinition | undefined, task: string,
     `- Tool budget profile: ${profile}. Max tool calls for this child turn: ${maxTools}.`,
     `- Budget caps: ${budgetPolicy.caps.maxSeconds}s, $${budgetPolicy.caps.maxUsd}, ${budgetPolicy.caps.maxTurns} turns, ${budgetPolicy.caps.maxOutputChars} output chars, ${budgetPolicy.caps.maxReadBytes} read bytes, ${budgetPolicy.caps.maxFilesTouched} files touched, ${budgetPolicy.caps.maxRetriesPerTool} retries/tool.`,
     "- Stay bounded. Do not perform an exhaustive repository crawl unless the task explicitly requires it.",
+    agent?.concern === "recon" || deepProjectAnalysis
+      ? "- AGENTS/JIT-first: when the discovery index lists AGENTS.md, CONTEXT.md, ADRs, or package instruction files, read the root instructions first and then only the package instruction files relevant to the task before broad source reads."
+      : undefined,
     profile === "tight"
       ? "- Tight profile: use the discovery index first, then inspect only the smallest evidence set needed to answer."
       : profile === "deep" || profile === "extended"
@@ -977,6 +1027,7 @@ export function buildSdkPrompt(agent: AgentDefinition | undefined, task: string,
     "- For long-running work, use mesh_artifact_write only at meaningful boundaries: feature-state at start, checkpoint after a completed handoff, validation-contract before reviewer/worker handoff, worker-skill for reusable feature-specific rules.",
     "- Do not paste raw command output or long code snippets. Cite file paths and line-level evidence when useful.",
     deepProjectAnalysis ? deepProjectAnalysisContract() : undefined,
+    handoffGapMode ? handoffGapReadContract(options, agent) : undefined,
     "",
     "## Stop conditions",
     stopConditionsForAgent(agent, task),
@@ -984,6 +1035,9 @@ export function buildSdkPrompt(agent: AgentDefinition | undefined, task: string,
     previous ? "## Previous Handoff" : undefined,
     previous || undefined,
     previous ? "" : undefined,
+    previous && options.priorFilesRead?.length ? "## Already Covered Evidence Paths" : undefined,
+    previous && options.priorFilesRead?.length ? formatPriorFilesRead(options.priorFilesRead) : undefined,
+    previous && options.priorFilesRead?.length ? "" : undefined,
     "## Task",
     task,
     "",
@@ -1169,6 +1223,67 @@ function deepProjectAnalysisContract(): string {
   ].join("\n");
 }
 
+function isSynthesisGapReadMode(agent: AgentDefinition | undefined, task: string, previous?: string): boolean {
+  if (!previous?.trim()) return false;
+  if (agent?.concern !== "context-building") return false;
+  return isDeepProjectAnalysisTask(task) || /\b(synthesize|summarize|explain|final answer|answer material|consolidate|context-builder|a partir del handoff|scout findings|síntesis|sintetiza|resumen)\b/i.test(task);
+}
+
+function isReviewGapReadMode(agent: AgentDefinition | undefined, task: string, previous?: string): boolean {
+  if (!previous?.trim()) return false;
+  if (agent?.concern !== "review") return false;
+  return isDeepProjectAnalysisTask(task) || /\b(review|validate|verify|audit|risk|gap|quality|correctness|revisa|verifica|valida|riesgos?|gaps?)\b/i.test(task);
+}
+
+function isHandoffGapReadMode(agent: AgentDefinition | undefined, task: string, previous?: string): boolean {
+  return isSynthesisGapReadMode(agent, task, previous) || isReviewGapReadMode(agent, task, previous);
+}
+
+function synthesisToolCallLimit(): number {
+  const parsed = Number(process.env.PI_MESH_SYNTHESIS_TOOL_LIMIT);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 35;
+}
+
+function handoffReviewToolCallLimit(): number {
+  const parsed = Number(process.env.PI_MESH_REVIEW_TOOL_LIMIT);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 12;
+}
+
+function synthesisGapReadLimit(): number {
+  const parsed = Number(process.env.PI_MESH_SYNTHESIS_GAP_READ_LIMIT);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 12;
+}
+
+function synthesisCrossStepDuplicateReadLimit(agent?: AgentDefinition): number {
+  const parsed = Number(process.env.PI_MESH_SYNTHESIS_CROSS_READ_LIMIT);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : agent?.concern === "review" ? 1 : 3;
+}
+
+function handoffGapReadContract(options: SdkPromptOptions, agent: AgentDefinition | undefined): string {
+  const gapReadLimit = options.synthesisGapReadLimit ?? synthesisGapReadLimit();
+  const reviewMode = agent?.concern === "review";
+  return [
+    "",
+    reviewMode ? "## Handoff-first review / sampled-audit contract" : "## Handoff-first synthesis / gap-read contract",
+    reviewMode
+      ? "- Treat `Previous Handoff` as the primary evidence map. Your job is targeted quality audit, not a second repository crawl."
+      : "- Treat `Previous Handoff` as the primary evidence map. Your job is synthesis, not a second repository crawl.",
+    `- You may do at most ${gapReadLimit} gap reads/searches when the handoff has a concrete unknown, contradiction, or missing evidence needed for the final answer.`,
+    reviewMode ? "- For review, sample only the highest-risk or least-supported claims. Prefer grep/find for exact symbols/config keys; avoid full reads of already-covered files." : undefined,
+    "- Do not reread files listed in `Already Covered Evidence Paths` unless you name the specific missing symbol/line/claim you are verifying.",
+    "- If a read is blocked by the cross-step duplicate-read policy, do not retry variants of the same evidence path; use the handoff evidence and mark the claim as sampled/not rechecked.",
+    "- Prefer citing evidence already present in the handoff. Use new reads only to close explicit gaps, then stop.",
+    "- If coverage is incomplete, say exactly what remains unknown instead of expanding into a broad crawl.",
+    "- Return final answer material plus a compact handoff; do not emit a second raw exploration log.",
+  ].filter((line): line is string => Boolean(line)).join("\n");
+}
+
+function formatPriorFilesRead(files: string[]): string {
+  const unique = [...new Set(files)].slice(0, 40);
+  const extra = files.length > unique.length ? `\n- …${files.length - unique.length} more` : "";
+  return `${unique.map((file) => `- ${file}`).join("\n")}${extra}`;
+}
+
 function hasAnyCapability(agent: AgentDefinition, capabilities: AgentCapability[]): boolean {
   return capabilities.some((capability) => agent.capabilities.includes(capability));
 }
@@ -1347,7 +1462,7 @@ function mergePolicyMetrics(metrics: RunStepMetrics, policy: ChildToolPolicy): R
   };
 }
 
-function finalizeStepMetrics(metrics: RunStepMetrics, step: RunStepState, budgetPolicy: ReturnType<typeof policyForStep>): RunStepMetrics {
+function finalizeStepMetrics(metrics: RunStepMetrics, step: RunStepState, budgetPolicy: ReturnType<typeof policyForStep>, priorFilesRead: string[] = []): RunStepMetrics {
   const utility = summarizeToolUtility({
     findings: extractFindingLines(step.output?.text ?? ""),
     toolCalls: metrics.toolCalls,
@@ -1366,9 +1481,15 @@ function finalizeStepMetrics(metrics: RunStepMetrics, step: RunStepState, budget
     filesTouched: metrics.filesTouched?.length ?? 0,
     retriesByTool: metrics.retriesByTool ?? {},
   });
+  const prior = new Set(priorFilesRead);
+  const crossStepDuplicateReads = [...new Set((metrics.filesRead ?? []).filter((file) => prior.has(file)))];
   return {
     ...metrics,
     utility,
+    ...(crossStepDuplicateReads.length ? {
+      crossStepDuplicateReadCount: crossStepDuplicateReads.length,
+      crossStepDuplicateReads: crossStepDuplicateReads.slice(0, 30),
+    } : {}),
     ...(health.status === "budget-capped" || health.status === "warn" ? { budgetStopCount: Math.max(metrics.budgetStopCount ?? 0, health.status === "budget-capped" ? 1 : 0) } : {}),
   };
 }
@@ -1393,17 +1514,21 @@ function summarizeRunMetrics(run: RunState): RunState["metrics"] {
   const toolCallsByName: Record<string, number> = {};
   const policyViolations: string[] = [];
   const filesRead: string[] = [];
+  const crossStepDuplicateReads: string[] = [];
   let toolCalls = 0;
   let duplicateReadCount = 0;
+  let crossStepDuplicateReadCount = 0;
   let budgetStopCount = 0;
   for (const step of run.steps) {
     if (!step.metrics) continue;
     addUsage(usage, step.metrics.usage);
     toolCalls += step.metrics.toolCalls;
     duplicateReadCount += step.metrics.duplicateReadCount ?? 0;
+    crossStepDuplicateReadCount += step.metrics.crossStepDuplicateReadCount ?? 0;
     budgetStopCount += step.metrics.budgetStopCount ?? 0;
     policyViolations.push(...(step.metrics.policyViolations ?? []));
     filesRead.push(...(step.metrics.filesRead ?? []));
+    crossStepDuplicateReads.push(...(step.metrics.crossStepDuplicateReads ?? []));
     for (const [name, count] of Object.entries(step.metrics.toolCallsByName)) {
       toolCallsByName[name] = (toolCallsByName[name] ?? 0) + count;
     }
@@ -1416,6 +1541,7 @@ function summarizeRunMetrics(run: RunState): RunState["metrics"] {
     ...(policyViolations.length ? { policyViolations } : {}),
     ...(budgetStopCount > 0 ? { budgetStopCount } : {}),
     ...(duplicateReadCount > 0 ? { duplicateReadCount } : {}),
+    ...(crossStepDuplicateReadCount > 0 ? { crossStepDuplicateReadCount, crossStepDuplicateReads: [...new Set(crossStepDuplicateReads)].slice(0, 50) } : {}),
     ...(filesRead.length ? { filesRead: [...new Set(filesRead)].slice(0, 50) } : {}),
   };
 }
@@ -1506,9 +1632,10 @@ function truncateText(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
 
-function handoffBudgetChars(): number {
+function handoffBudgetChars(agent?: string): number {
   const parsed = Number(process.env.PI_MESH_HANDOFF_BUDGET_CHARS);
-  return Number.isFinite(parsed) && parsed > 200 ? parsed : 1200;
+  if (Number.isFinite(parsed) && parsed > 200) return parsed;
+  return agent === "scout" || agent === "context-builder" ? 2200 : 1200;
 }
 
 function rawOutputBudgetChars(): number {

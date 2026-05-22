@@ -39,7 +39,7 @@ export function registerMeshAutoRouter(pi: ExtensionAPI): void {
           "If the user asks to compare independent approaches/options, choose mesh_route with parallel planners/reviewers and synthesize the recommendation afterward.",
           "Choose topology/agents yourself. Use one mesh_route call only, then synthesize from its handoff; do not inspect files directly unless a concrete gap remains.",
           ctx.hasUI ? undefined : "Non-interactive mode: avoid dry-run for safe bounded edits; either edit directly or run a real mesh_route. Use dryRun only for destructive/high-risk/ambiguous work that genuinely needs user review.",
-          "Simple chat, definitions, one obvious command, tiny isolated edits, bounded read-only mini-project reviews, named-file bugfixes, or bounded scaffolding/simple implementation tasks with explicit files stay direct. Direct mode must still satisfy every explicit acceptance criterion exactly, including requested helper extraction, tests, no dependency additions, and behavior preservation. If the user asks for tests, changing only implementation is incomplete even when existing tests pass; add or update the relevant test file before final verification. For time/window behavior, make tests deterministic with an injected or controlled clock; do not assert exact `Date.now()`-derived milliseconds against real wall time. For dependency-free TypeScript scaffolding, write the exact requested files, keep requested APIs/exported helpers in the requested source file, prefer package.json test script `node --experimental-strip-types --test test/*.test.ts`, put tests under `test/`, avoid uninstalled runners like tsx/vitest/jest, export the requested API, declare requested package.json `bin` entries that point to executable file paths, never command strings, and fix verification failures and rerun verification after the final edit before answering. After edits plus a passing final verification, answer immediately with changed files, verification result, and one note naming the requested behavior/constraint satisfied.",
+          "Simple chat, definitions, one obvious command, tiny isolated edits, bounded read-only mini-project reviews, named-file bugfixes, or bounded scaffolding/simple implementation tasks with explicit files stay direct. Direct mode must still satisfy every explicit acceptance criterion exactly, including requested helper extraction, tests, no dependency additions, and behavior preservation. If the user asks for tests, changing only implementation is incomplete even when existing tests pass; add or update the relevant test file before final verification. Those tests must prove the requested behavior with at least one non-trivial positive case and one meaningful edge/failure case when applicable; merely renaming or preserving a starter smoke/empty test is incomplete. For time/window behavior, make tests deterministic with an injected or controlled clock when possible; avoid brittle Node MockTimers usage unless you verify the current Node API in this project. Do not assert exact `Date.now()`-derived milliseconds against real wall time. For dependency-free TypeScript scaffolding, write the exact requested files, keep requested APIs/exported helpers in the requested source file, prefer package.json test script `node --experimental-strip-types --test test/*.test.ts`, put tests under `test/`, avoid uninstalled runners like tsx/vitest/jest, export the requested API, declare requested package.json `bin` entries that point to executable file paths, never command strings, and fix verification failures and rerun verification after the final edit before answering. For Node CLI subprocess tests, derive target paths directly with `fileURLToPath(new URL('../src/file.ts', import.meta.url))` and pass `env: { ...process.env, ...overrides }` so stripped PATH/NODE_OPTIONS cannot create false failures. After edits plus a passing final verification, answer immediately with changed files, verification result, and one note naming the requested behavior/constraint satisfied.",
         ].filter((line): line is string => Boolean(line)).join("\n"),
         display: false,
       },
@@ -81,7 +81,7 @@ export function registerMeshAutoRouter(pi: ExtensionAPI): void {
     if (shouldProgressNudge) {
       pi.sendMessage({
         customType: "pi-mesh-direct-progress-nudge",
-        content: "You have changed files for a bounded direct task. If the user asked for tests and you have not changed a test/spec file, add or update the relevant test before verification. Then run the nearest relevant verification command. If it fails, fix only the root cause and rerun verification after the last edit; then answer. The final answer must name the changed file paths and the exact verification command/result. Do not continue exploring unless a concrete acceptance criterion is still missing.",
+        content: "You have changed files for a bounded direct task. If the user asked for tests and you have not changed a test/spec file, add or update the relevant test before verification. Tests must prove the requested behavior with non-trivial assertions, not only keep or rename the starter smoke/empty test. For timer code, prefer injected clocks/schedulers over brittle MockTimers; for Node CLI subprocess tests, preserve process.env and derive target file URLs directly. Then run the nearest relevant verification command. If it fails, fix only the root cause and rerun verification after the last edit; then answer. The final answer must name the changed file paths and the exact verification command/result. Do not continue exploring unless a concrete acceptance criterion is still missing.",
         display: false,
       }, { triggerTurn: false, deliverAs: "steer" });
     }
@@ -90,6 +90,7 @@ export function registerMeshAutoRouter(pi: ExtensionAPI): void {
         customType: "pi-mesh-direct-ready-to-verify-nudge",
         content: [
           "Implementation and required test/doc edits are now in place for this bounded direct task.",
+          "Before verification, sanity-check that requested tests are behavior-bearing: they should assert the requested outputs/effects and relevant edge cases, not only a starter empty/smoke path.",
           "Stop planning/exploring. Run the nearest relevant verification command now, normally `npm test` for dependency-free Node fixtures. If it passes, answer immediately.",
           "If verification fails, fix only the root cause and rerun the same nearest verification after the final edit. A final answer with a failed/stale Verification is invalid.",
         ].join("\n"),
@@ -104,7 +105,8 @@ export function registerMeshAutoRouter(pi: ExtensionAPI): void {
           `${commandText} failed after file changes.`,
           "Do NOT answer as done yet. Read the failure, fix the root cause, and rerun the nearest relevant verification after the final edit. You may not answer with a failed or stale Verification result.",
           "If this is dependency-free TypeScript scaffolding, do not add uninstalled runners; write the exact requested files, keep requested APIs/exported helpers in the requested source file, use Node's built-in test runner with `node --experimental-strip-types --test test/*.test.ts`, keep tests in `test/`, and fix imports/scripts so `npm test` passes.",
-          "If the failure involves time/window logic, remove wall-clock flakiness: inject/control the clock or make assertions tolerant before rerunning verification.",
+          "If the failure involves time/window logic, remove wall-clock flakiness: inject/control the clock or make assertions tolerant before rerunning verification. Prefer an injected scheduler over Node MockTimers unless you verify the current Node mock timer API.",
+          "If the failure is a Node CLI subprocess test, preserve the parent environment with `env: { ...process.env, ...overrides }` and derive the CLI path directly from `import.meta.url`; do not compute a parent directory twice.",
         ].join("\n"),
         display: false,
       }, { triggerTurn: false, deliverAs: "steer" });
@@ -114,10 +116,11 @@ export function registerMeshAutoRouter(pi: ExtensionAPI): void {
         customType: "pi-mesh-direct-tests-missing-nudge",
         content: [
           "The user requested tests, but the changed files so far do not include a test/spec file.",
-          "Do NOT answer as done yet. Add or update the relevant test file, rerun the nearest verification command, then answer with changed implementation and test paths.",
+          "Do NOT answer as done yet. Your next action must be an edit/write to the relevant test/spec file, not a final answer.",
+          "Add or update the test so it proves the requested behavior with non-trivial assertions and meaningful edge/failure coverage where applicable, rerun the nearest verification command, then answer with changed implementation and test paths.",
         ].join("\n"),
         display: false,
-      }, { triggerTurn: false, deliverAs: "steer" });
+      }, { triggerTurn: true, deliverAs: "steer" });
     }
     if (!shouldCompletionNudge) return;
     const commandText = verificationCommand ? `\`${verificationCommand}\`` : "the verification command";
@@ -126,7 +129,7 @@ export function registerMeshAutoRouter(pi: ExtensionAPI): void {
       content: [
         `You changed files and ${commandText} passed.`,
         "If the user's acceptance criteria are satisfied and this passing verification happened after the last edit, answer now using this exact compact evidence format:",
-        "Passing tests is not enough by itself: before answering, compare the changed files against every explicit prompt requirement, including requested package metadata, bin/scripts, docs, tests, public API, and no-dependency constraints.",
+        "Passing tests is not enough by itself: before answering, compare the changed files against every explicit prompt requirement, including requested package metadata, bin/scripts, docs, tests, public API, and no-dependency constraints. If tests were requested but they only cover a starter smoke/empty path instead of the requested behavior, do not answer yet; improve the tests and rerun verification.",
         "- Changed: `path/to/file`[, `path/to/test`]",
         `- Verification: ${commandText} passed`,
         "- Notes: one short sentence naming the requested behavior/constraint you satisfied, such as edge case covered, no external dependencies, or time reset behavior",
@@ -174,6 +177,8 @@ function compactDirectSteeringMessage(hasUI?: boolean): string {
     "pi-mesh compact preflight: this looks like bounded direct work. Prefer native tools; do not spend budget on orchestration prose or visible planning before tool calls.",
     hasUI ? undefined : "Non-interactive mode: first action should be a relevant tool call; inspect briefly, write promptly, verify, fix failures, rerun verification after the final edit, then final answer.",
     "For dependency-free TypeScript scaffolding: exact requested files, Node built-in test runner, tests under test/, no uninstalled runners/dependencies, exported requested API. If it is a CLI package, declare the requested command in package.json `bin`, not only in `scripts`; `bin` values must be executable file paths such as `./src/cli.ts` or `./bin/name`, never `node ...` command strings.",
+    "If tests are requested, make them behavior-bearing: assert requested outputs/effects and edge/failure cases instead of only preserving starter smoke/empty tests.",
+    "For timer behavior, prefer injected clocks/schedulers over brittle Node MockTimers. For Node CLI subprocess tests, preserve process.env and derive paths directly from import.meta.url.",
     "If the prompt says review-only, docs-only, no code changes, or no mutations, obey that literally: do not add tests/source files or modify code unless the user explicitly asks.",
     "Final answer must include Changed, Verification, and Notes. Do not continue exploring after verification passes.",
   ].filter((line): line is string => Boolean(line)).join("\n");

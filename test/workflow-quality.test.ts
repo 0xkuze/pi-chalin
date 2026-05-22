@@ -3,8 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
-import { createWorkflowFixture, listWorkflowEvalCases, listWorkflowHoldoutCases } from "../evals/workflow-cases.ts";
-import { assertSdkRunBudget, buildWorkflowJudgePrompt, detectWorkflowInfrastructureFailure, detectWorkflowVerification, evaluateWorkflowRegressionGates, extractFinalText, observeTerminalAssistantAnswer, resolveCaseIds, resolveVariants, resolveWorkflowIdleTimeoutMs, resolveWorkflowInfraRetries, resolveWorkflowRunCount, resolveWorkflowTimeoutMs, shouldRetainWorkflowFixture, shouldRunWorkflowJudge, shouldStoreFullWorkflowOutput, summarizeWorkflowFailures, workflowRegressionGatesEnabled, workflowReportFilename, writeWorkflowReport, DEFAULT_WORKFLOW_IDLE_TIMEOUT_MS, MAX_WORKFLOW_RUNS, MAX_WORKFLOW_TIMEOUT_MS } from "../evals/workflow-quality.eval.ts";
+import { createWorkflowFixture, listWorkflowCommunityCases, listWorkflowEvalCases, listWorkflowHoldoutCases, selectWorkflowPrompt } from "../evals/workflow-cases.ts";
+import { assertSdkRunBudget, buildWorkflowJudgePrompt, detectWorkflowInfrastructureFailure, detectWorkflowVerification, evaluateWorkflowRegressionGates, extractFinalText, observeTerminalAssistantAnswer, resolveCaseIds, resolveVariants, resolveWorkflowIdleTimeoutMs, resolveWorkflowInfraRetries, resolveWorkflowRunCount, resolveWorkflowTimeoutMs, shouldRetainWorkflowFixture, shouldRunWorkflowJudge, shouldStoreFullWorkflowOutput, summarizeComparison, summarizeWorkflowFailures, workflowRegressionGatesEnabled, workflowReportFilename, writeWorkflowReport, DEFAULT_WORKFLOW_IDLE_TIMEOUT_MS, MAX_WORKFLOW_RUNS, MAX_WORKFLOW_TIMEOUT_MS } from "../evals/workflow-quality.eval.ts";
 import { scoreWorkflowWorkspace } from "../src/workflow-quality.ts";
 
 test("workflow eval case bank covers real task types", () => {
@@ -18,8 +18,35 @@ test("workflow eval case bank covers real task types", () => {
   assert.ok(listWorkflowHoldoutCases().every((item) => item.suite === "holdout"));
 });
 
+test("workflow community case bank uses synthetic community-inspired projects only", () => {
+  const cases = listWorkflowCommunityCases();
+  assert.ok(cases.length >= 4);
+  assert.ok(cases.every((item) => item.suite === "community"));
+  assert.ok(cases.every((item) => item.sourceProfile?.kind === "community-inspired"));
+  assert.ok(cases.every((item) => item.sourceProfile?.privateData === false));
+  assert.ok(cases.every((item) => selectWorkflowPrompt(item, 0).count >= 3));
+});
+
+test("workflow prompt variants rotate deterministically by run index", () => {
+  const evalCase = listWorkflowCommunityCases()[0]!;
+  const first = selectWorkflowPrompt(evalCase, 0);
+  const second = selectWorkflowPrompt(evalCase, 1);
+  const wrapped = selectWorkflowPrompt(evalCase, first.count);
+  assert.notEqual(first.prompt, second.prompt);
+  assert.equal(first.prompt, wrapped.prompt);
+
+  const fixture = createWorkflowFixture(evalCase.id, { promptVariantIndex: 1 });
+  try {
+    assert.equal(fixture.prompt, second.prompt);
+    assert.equal(fixture.promptVariantIndex, 1);
+    assert.equal(fixture.promptVariantCount, first.count);
+  } finally {
+    fs.rmSync(fixture.cwd, { recursive: true, force: true });
+  }
+});
+
 test("workflow fixtures start with intentionally incomplete work", () => {
-  for (const item of listWorkflowEvalCases({ includeHoldout: true })) {
+  for (const item of listWorkflowEvalCases({ includeHoldout: true, includeCommunity: true })) {
     const fixture = createWorkflowFixture(item.id);
     const report = scoreWorkflowWorkspace(fixture.cwd, fixture.case, { finalText: "" });
     assert.equal(report.pass, false, item.id);
@@ -87,6 +114,29 @@ test("workflow scorer accepts CLI bin adapters separate from exported source mod
   assert.equal(report.metrics.semantic.packageBinPassed, true);
   assert.equal(report.metrics.semantic.packageBinTargetPassed, true);
   assert.equal(report.critical.some((issue) => issue.id === "missing-required-content"), false);
+  fs.rmSync(fixture.cwd, { recursive: true, force: true });
+});
+
+test("workflow scorer recognizes CommonJS module exports in community CLI cases", () => {
+  const fixture = createWorkflowFixture("community-cli-env-validator");
+  fs.writeFileSync(path.join(fixture.cwd, "package.json"), JSON.stringify({
+    name: "validate-env",
+    type: "commonjs",
+    bin: { "validate-env": "./src/cli.ts" },
+    scripts: { test: "node --experimental-strip-types --test test/*.test.ts" },
+  }, null, 2));
+  fs.mkdirSync(path.join(fixture.cwd, "src"), { recursive: true });
+  fs.mkdirSync(path.join(fixture.cwd, "test"), { recursive: true });
+  fs.writeFileSync(path.join(fixture.cwd, "src/cli.ts"), `function getMissingEnvVariables(required, env = process.env) { return required.filter((name) => !env[name]); }\nfunction runCli(argv = process.argv.slice(2), env = process.env) { const missing = getMissingEnvVariables(argv, env); return { code: missing.length ? 1 : 0, output: missing.join(",") }; }\nif (require.main === module) { const result = runCli(); console.log(result.output); process.exit(result.code); }\nmodule.exports = { getMissingEnvVariables, runCli };\n`);
+  fs.writeFileSync(path.join(fixture.cwd, "test/cli.test.ts"), `const test = require("node:test");\nconst assert = require("node:assert/strict");\nconst { getMissingEnvVariables, runCli } = require("../src/cli.ts");\ntest("missing and present env vars", () => { assert.deepEqual(getMissingEnvVariables(["API_URL", "TOKEN"], { API_URL: "x" }), ["TOKEN"]); assert.equal(runCli(["API_URL"], { API_URL: "x" }).code, 0); });\n`);
+  fs.writeFileSync(path.join(fixture.cwd, "README.md"), "# validate-env\n\n## Usage\n\nRun `validate-env API_URL TOKEN` to validate env variables.\n");
+  const report = scoreWorkflowWorkspace(fixture.cwd, fixture.case, {
+    finalText: "Changed package.json, src/cli.ts, test/cli.test.ts and README.md. Verification: npm test passed.",
+    durationMs: 1000,
+    validateTests: true,
+  });
+  assert.equal(report.pass, true);
+  assert.ok(report.matched.includes("semantic:export:src/cli.ts"));
   fs.rmSync(fixture.cwd, { recursive: true, force: true });
 });
 
@@ -429,7 +479,9 @@ test("workflow eval CLI helpers keep live runs bounded", () => {
   assert.deepEqual(resolveVariants("mesh"), ["mesh"]);
   assert.ok(resolveCaseIds("all").length >= 6);
   assert.deepEqual(resolveCaseIds("holdout"), listWorkflowHoldoutCases().map((item) => item.id));
+  assert.deepEqual(resolveCaseIds("community"), listWorkflowCommunityCases().map((item) => item.id));
   assert.ok(resolveCaseIds("all-with-holdout").length >= 10);
+  assert.ok(resolveCaseIds("all-realistic").length > resolveCaseIds("all-with-holdout").length);
   assert.deepEqual(resolveCaseIds("a,b"), ["a", "b"]);
 });
 
@@ -584,6 +636,72 @@ test("workflow comparison allows small quality and p95 variance when mesh still 
   assert.equal(gates.pass, true);
 });
 
+test("workflow regression gates warn on recovered-infra p95 when all mesh runs pass", () => {
+  const outputs = [
+    {
+      variant: "mesh",
+      runIndex: 1,
+      workspace: { caseId: "community-react-debounce-hook", pass: true, score: 100 },
+      trace: { pass: true, score: 100, warnings: [], critical: [] },
+      diagnostics: {
+        recoveredInfrastructureFailures: [{ kind: "agent-stall", message: "workflow variant timeout after 45000ms" }],
+        infrastructureFailure: undefined,
+        finalAnswerMissing: false,
+        verificationPassed: true,
+        duplicateToolCalls: 0,
+        meshRouteCalls: 0,
+        meshRouteNonExecutable: 0,
+      },
+      judge: undefined,
+    },
+  ] as never;
+  const gates = evaluateWorkflowRegressionGates(outputs, [{
+    caseId: "community-react-debounce-hook",
+    pass: true,
+    reason: "all quality checks passed",
+    variants: { mesh: { passRate: 1, avgWorkspaceScore: 100, avgTraceScore: 100, p95DurationMs: 64_000 } },
+  }] as never);
+  assert.equal(gates.pass, true);
+  assert.ok(gates.warnings.some((item) => /p95 .* recovered infrastructure retry/.test(item)));
+});
+
+test("workflow comparison does not fail p95 solely from a recovered infrastructure retry", () => {
+  const output = (variant: "simple" | "mesh", runIndex: number, durationMs: number, recovered = false) => ({
+    variant,
+    runIndex,
+    durationMs,
+    workspace: { caseId: "community-node-webhook-verifier", pass: true, score: 100 },
+    trace: { pass: true, score: 100, warnings: [], critical: [] },
+    diagnostics: {
+      recoveredInfrastructureFailures: recovered ? [{ kind: "agent-stall", message: "workflow variant timeout after 45000ms" }] : undefined,
+      infrastructureFailure: undefined,
+      finalAnswerMissing: false,
+      verificationPassed: true,
+      duplicateToolCalls: 0,
+      meshRouteCalls: 0,
+      meshRouteNonExecutable: 0,
+      toolEvents: 1,
+      readCalls: 0,
+      writeCalls: 0,
+      editCalls: 0,
+      retries: 0,
+      tokenTotal: 0,
+    },
+    judge: undefined,
+  });
+  const grouped = summarizeComparison([
+    output("simple", 1, 8_000),
+    output("simple", 2, 9_000),
+    output("simple", 3, 12_000),
+    output("mesh", 1, 8_500),
+    output("mesh", 2, 9_500),
+    output("mesh", 3, 40_000, true),
+  ] as never);
+
+  assert.equal(grouped[0]?.pass, true);
+  assert.match(grouped[0]?.reason ?? "", /meshP95RecoveredInfra=true/);
+});
+
 test("workflow fixture retention keeps failed SDK workspaces for root-cause analysis", () => {
   const passing = {
     workspace: { pass: true },
@@ -665,6 +783,12 @@ test("workflow diagnostics classify SDK idle stalls as infrastructure", () => {
   assert.match(failure?.message ?? "", /idle timeout/i);
 });
 
+test("workflow diagnostics classify bounded variant timeouts as retryable infrastructure", () => {
+  const failure = detectWorkflowInfrastructureFailure("", "", "workflow variant timeout after 45000ms");
+  assert.equal(failure?.kind, "agent-stall");
+  assert.match(failure?.message ?? "", /variant timeout/i);
+});
+
 test("workflow runner only treats terminal assistant events as final answers", () => {
   const partial = observeTerminalAssistantAnswer(JSON.stringify({
     type: "message_update",
@@ -735,4 +859,63 @@ test("workflow judge auto mode only triggers for ambiguous deterministic passes"
   const prompt = buildWorkflowJudgePrompt({ variant: "mesh", finalText: "done", workspace, trace: output.trace, diagnostics: output.diagnostics } as unknown as never, fixture.case);
   assert.match(prompt, /SOLO JSON/);
   fs.rmSync(fixture.cwd, { recursive: true, force: true });
+});
+
+test("workflow matrix sharding partitions cases deterministically and skips empty shards", async () => {
+  const { partitionWorkflowCases, selectWorkflowShard } = await import("../evals/workflow-matrix.ts");
+  const shards = partitionWorkflowCases(["a", "b", "c", "d", "e"], 3);
+  assert.deepEqual(shards.map((item) => item.caseIds), [["a", "d"], ["b", "e"], ["c"]]);
+  assert.equal(selectWorkflowShard(["a", "b", "c", "d", "e"], 3, 2).caseIds.join(","), "b,e");
+  assert.throws(() => selectWorkflowShard(["a"], 3, 3), /has no cases/);
+});
+
+test("workflow matrix aggregate uses latest row per case and reports variant efficiency", async () => {
+  const { summarizeWorkflowMatrixRows } = await import("../evals/workflow-matrix.ts");
+  const aggregate = summarizeWorkflowMatrixRows([
+    {
+      caseId: "case-a",
+      pass: false,
+      stats: { mesh: { runs: 1, passCount: 0, passRate: 0, avgWorkspaceScore: 60, p95DurationMs: 40_000, totalTokens: 10, estimatedCostUsd: 0.1, infrastructureFailures: 1 } },
+    },
+    {
+      caseId: "case-a",
+      pass: true,
+      stats: { mesh: { runs: 3, passCount: 3, passRate: 1, avgWorkspaceScore: 100, p95DurationMs: 20_000, totalTokens: 90, estimatedCostUsd: 0.9, infrastructureFailures: 0 } },
+      regressionGates: { pass: true, warnings: ["recovered infra"] },
+    },
+    {
+      caseId: "case-b",
+      pass: true,
+      stats: { simple: { runs: 3, passCount: 2, passRate: 0.667, avgWorkspaceScore: 88, p95DurationMs: 30_000, totalTokens: 60, estimatedCostUsd: 0.6, infrastructureFailures: 0 } },
+    },
+  ]);
+
+  assert.equal(aggregate.pass, true);
+  assert.equal(aggregate.cases, 2);
+  assert.equal(aggregate.variants.mesh?.runs, 3);
+  assert.equal(aggregate.variants.mesh?.passRate, 1);
+  assert.equal(aggregate.variants.mesh?.p95DurationMs, 20_000);
+  assert.equal(aggregate.variants.simple?.passRate, 0.667);
+  assert.deepEqual(aggregate.warnings, ["case-a: recovered infra"]);
+});
+
+test("workflow matrix aggregate does not spread shard-level gate failure across passing case rows", async () => {
+  const { summarizeWorkflowMatrixRows } = await import("../evals/workflow-matrix.ts");
+  const aggregate = summarizeWorkflowMatrixRows([
+    {
+      caseId: "case-a",
+      pass: true,
+      stats: { mesh: { runs: 3, passCount: 3, passRate: 1, avgWorkspaceScore: 100, p95DurationMs: 10_000, totalTokens: 10, estimatedCostUsd: 0.1 } },
+      regressionGates: { pass: false, failures: ["case-b failed in same shard"] },
+    },
+    {
+      caseId: "case-b",
+      pass: false,
+      stats: { mesh: { runs: 3, passCount: 2, passRate: 0.667, avgWorkspaceScore: 80, p95DurationMs: 20_000, totalTokens: 20, estimatedCostUsd: 0.2 } },
+      regressionGates: { pass: false, failures: ["case-b failed"] },
+    },
+  ]);
+
+  assert.equal(aggregate.pass, false);
+  assert.deepEqual(aggregate.failedCases, ["case-b"]);
 });

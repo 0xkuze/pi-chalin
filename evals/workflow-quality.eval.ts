@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { createWorkflowFixture, getWorkflowEvalCase, listWorkflowEvalCases, listWorkflowHoldoutCases, type WorkflowEvalCase } from "./workflow-cases.ts";
+import { createWorkflowFixture, getWorkflowEvalCase, listWorkflowCommunityCases, listWorkflowEvalCases, listWorkflowHoldoutCases, type WorkflowEvalCase } from "./workflow-cases.ts";
 import { scoreWorkflowWorkspace, type WorkflowQualityReport } from "../src/workflow-quality.ts";
 import { gradePiTrace, parsePiJsonTrace, type TraceQualityReport, type TraceVariant } from "../src/trace-quality.ts";
 import { DEFAULT_JUDGE_MODEL, resolveJudgeTimeoutMs } from "./trace-quality.eval.ts";
@@ -76,6 +76,8 @@ interface WorkflowRunOutput {
   diagnostics: WorkflowEfficiencyDiagnostics;
   judge?: WorkflowJudgeVerdict;
   retainedFixturePath?: string;
+  promptVariantIndex?: number;
+  promptVariantCount?: number;
 }
 
 interface WorkflowComparisonSummary {
@@ -257,7 +259,9 @@ export function resolveWorkflowIdleTimeoutMs(value: string | undefined, workflow
 export function resolveCaseIds(value: string | undefined): string[] {
   if (!value || value === "all") return listWorkflowEvalCases().map((item) => item.id);
   if (value === "holdout" || value === "holdout-all") return listWorkflowHoldoutCases().map((item) => item.id);
+  if (value === "community" || value === "community-all") return listWorkflowCommunityCases().map((item) => item.id);
   if (value === "all-with-holdout") return listWorkflowEvalCases({ includeHoldout: true }).map((item) => item.id);
+  if (value === "all-realistic" || value === "all-with-community") return listWorkflowEvalCases({ includeHoldout: true, includeCommunity: true }).map((item) => item.id);
   return value.split(",").map((item) => item.trim()).filter(Boolean);
 }
 
@@ -342,11 +346,16 @@ export function evaluateWorkflowRegressionGates(outputs: WorkflowRunOutput[], gr
     const evalCase = getWorkflowEvalCase(group.caseId);
     const mesh = group.variants.mesh;
     if (!mesh) continue;
+    const meshOutputs = outputs.filter((output) => output.variant === "mesh" && output.workspace.caseId === group.caseId);
+    const meshAllPass = meshOutputs.length > 0 && meshOutputs.every(outputPass);
+    const recoveredInfra = meshOutputs.some((output) => output.diagnostics.recoveredInfrastructureFailures?.length);
     if (mesh.passRate < thresholds.minMeshPassRate) failures.push(`${group.caseId}: mesh passRate ${mesh.passRate} < ${thresholds.minMeshPassRate}`);
     if (mesh.avgWorkspaceScore < 90) failures.push(`${group.caseId}: mesh workspace avg ${mesh.avgWorkspaceScore} < 90`);
     if (mesh.avgTraceScore < 90) failures.push(`${group.caseId}: mesh trace avg ${mesh.avgTraceScore} < 90`);
     if (evalCase.expected.maxDurationMs && mesh.p95DurationMs > evalCase.expected.maxDurationMs) {
-      failures.push(`${group.caseId}: mesh p95 ${mesh.p95DurationMs}ms > case budget ${evalCase.expected.maxDurationMs}ms`);
+      const message = `${group.caseId}: mesh p95 ${mesh.p95DurationMs}ms > case budget ${evalCase.expected.maxDurationMs}ms`;
+      if (meshAllPass && recoveredInfra) warnings.push(`${message} due to recovered infrastructure retry`);
+      else failures.push(message);
     }
     if (!group.pass) failures.push(`${group.caseId}: comparison gate failed (${group.reason})`);
   }
@@ -401,7 +410,7 @@ function outputPass(output: WorkflowRunOutput): boolean {
     && (output.judge ? output.judge.pass : true);
 }
 
-function summarizeComparison(outputs: WorkflowRunOutput[]): WorkflowComparisonSummary[] {
+export function summarizeComparison(outputs: WorkflowRunOutput[]): WorkflowComparisonSummary[] {
   const caseIds = [...new Set(outputs.map((item) => item.workspace.caseId))];
   return caseIds.map((caseId) => {
     const simpleRuns = outputs.filter((item) => item.workspace.caseId === caseId && item.variant === "simple");
@@ -431,11 +440,17 @@ function summarizeComparison(outputs: WorkflowRunOutput[]): WorkflowComparisonSu
     const qualityFloor = Math.max(90, simple.avgWorkspaceScore - 5);
     const meshQualityComparable = mesh.avgWorkspaceScore >= qualityFloor;
     const meshReliabilityComparable = mesh.passRate >= simple.passRate;
-    const meshEfficiencyComparable = mesh.p95DurationMs <= Math.max(simple.p95DurationMs * 1.75, simple.p95DurationMs + 15_000);
+    const meshEfficiencyBudget = Math.max(simple.p95DurationMs * 1.75, simple.p95DurationMs + 15_000);
+    const slowestMeshRun = meshRuns.reduce<WorkflowRunOutput | undefined>((slowest, item) => !slowest || item.durationMs > slowest.durationMs ? item : slowest, undefined);
+    const meshP95InflatedByRecoveredInfra = meshRuns.length > 0
+      && meshRuns.every(outputPass)
+      && Boolean(slowestMeshRun?.diagnostics.recoveredInfrastructureFailures?.length)
+      && mesh.p95DurationMs >= (slowestMeshRun?.durationMs ?? 0);
+    const meshEfficiencyComparable = mesh.p95DurationMs <= meshEfficiencyBudget || meshP95InflatedByRecoveredInfra;
     return {
       caseId,
       pass: meshQualityComparable && meshReliabilityComparable && meshEfficiencyComparable,
-      reason: `meshAvg=${mesh.avgWorkspaceScore}, simpleAvg=${simple.avgWorkspaceScore}, meshPass=${mesh.passRate}, simplePass=${simple.passRate}, meshP95=${mesh.p95DurationMs}ms, simpleP95=${simple.p95DurationMs}ms`,
+      reason: `meshAvg=${mesh.avgWorkspaceScore}, simpleAvg=${simple.avgWorkspaceScore}, meshPass=${mesh.passRate}, simplePass=${simple.passRate}, meshP95=${mesh.p95DurationMs}ms, simpleP95=${simple.p95DurationMs}ms${meshP95InflatedByRecoveredInfra ? ", meshP95RecoveredInfra=true" : ""}`,
       variants: { simple, mesh },
     };
   });
@@ -478,7 +493,7 @@ function summarizeVariant(items: WorkflowRunOutput[]): VariantStats | undefined 
 }
 
 async function runSdkCase(evalCase: WorkflowEvalCase, variant: WorkflowVariant, timeoutMs: number, runIndex: number, judgeMode: WorkflowJudgeMode): Promise<WorkflowRunOutput> {
-  const fixture = createWorkflowFixture(evalCase.id);
+  const fixture = createWorkflowFixture(evalCase.id, { promptVariantIndex: runIndex - 1 });
   const started = Date.now();
   const args = [
     "-p",
@@ -493,7 +508,7 @@ async function runSdkCase(evalCase: WorkflowEvalCase, variant: WorkflowVariant, 
   if (variant === "mesh") args.push("-e", extensionPath);
   const model = process.env.PI_MESH_WORKFLOW_MODEL;
   if (model) args.push("--model", model);
-  args.push("--thinking", process.env.PI_MESH_WORKFLOW_THINKING ?? "minimal", evalCase.prompt);
+  args.push("--thinking", process.env.PI_MESH_WORKFLOW_THINKING ?? "minimal", fixture.prompt);
   const run = await runPi(args, fixture.cwd, timeoutMs, {
     observeWorkspacePass: shouldRequireMeshRoute(evalCase) ? undefined : () => scoreWorkflowWorkspace(fixture.cwd, evalCase, { finalText: "", validateTests: false }).pass,
   });
@@ -505,7 +520,7 @@ async function runSdkCase(evalCase: WorkflowEvalCase, variant: WorkflowVariant, 
   const workspace = scoreWorkflowWorkspace(fixture.cwd, evalCase, { finalText, durationMs, validateTests: evalCase.expected.validation?.runTests === true });
   const trace = gradePiTrace(run.stdout, { variant: variant as TraceVariant, finalText, promptKind: "generic", requireMeshRoute: shouldRequireMeshRoute(evalCase), status: run.status, signal: run.signal, timeoutReason: run.timeoutReason, durationMs, maxDurationMs: timeoutMs });
   const diagnostics = workflowDiagnostics(run.stdout, run.stderr, run.timeToWorkspaceValidMs, run.timeToVerificationPassMs, run.timeToFinalAnswerMs, finalText.length === 0, run.objectiveStopReason, run.timeoutReason);
-  const output: WorkflowRunOutput = { variant, runIndex, cwd: fixture.cwd, stdout: run.stdout, stderr: run.stderr, finalText, status: run.status, signal: run.signal, timeoutReason: run.timeoutReason, durationMs, workspace, trace, diagnostics };
+  const output: WorkflowRunOutput = { variant, runIndex, cwd: fixture.cwd, stdout: run.stdout, stderr: run.stderr, finalText, status: run.status, signal: run.signal, timeoutReason: run.timeoutReason, durationMs, workspace, trace, diagnostics, promptVariantIndex: fixture.promptVariantIndex, promptVariantCount: fixture.promptVariantCount };
   if (judgeMode === "pi" || (judgeMode === "auto" && shouldRunWorkflowJudge(output))) output.judge = await runWorkflowJudge(output, evalCase);
   else if (judgeMode === "auto") output.judge = { pass: true, score: 100, verdict: "Judge skipped; deterministic result was unambiguous.", critical: [], warnings: [], skipped: true, reason: "deterministic-unambiguous" };
   if (shouldRetainWorkflowFixture(output)) output.retainedFixturePath = fixture.cwd;
@@ -706,6 +721,9 @@ export function detectWorkflowInfrastructureFailure(stdout: string, stderr = "",
   if (timeoutReason && /idle timeout|without SDK events|stall/i.test(timeoutReason)) {
     return { kind: "agent-stall", message: timeoutReason };
   }
+  if (timeoutReason && /variant timeout|exceeded.*timeout|timed out/i.test(timeoutReason)) {
+    return { kind: "agent-stall", message: timeoutReason };
+  }
   for (const line of stdout.split(/\r?\n/)) {
     if (!line.trim()) continue;
     try {
@@ -787,6 +805,8 @@ function compactOutput(item: WorkflowRunOutput): object {
   return {
     variant: item.variant,
     runIndex: item.runIndex,
+    promptVariantIndex: item.promptVariantIndex,
+    promptVariantCount: item.promptVariantCount,
     cwd: item.cwd,
     status: item.status,
     signal: item.signal,

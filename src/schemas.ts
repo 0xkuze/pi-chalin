@@ -169,6 +169,8 @@ export interface RunStepMetrics {
   policyViolations?: string[];
   budgetStopCount?: number;
   duplicateReadCount?: number;
+  crossStepDuplicateReadCount?: number;
+  crossStepDuplicateReads?: string[];
   filesRead?: string[];
   readBytes?: number;
   outputChars?: number;
@@ -247,6 +249,8 @@ export interface RunState {
     policyViolations?: string[];
     budgetStopCount?: number;
     duplicateReadCount?: number;
+    crossStepDuplicateReadCount?: number;
+    crossStepDuplicateReads?: string[];
     filesRead?: string[];
   };
 }
