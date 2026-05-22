@@ -54,7 +54,7 @@ export class MeshKernel {
   }
 
   /**
-   * pi-mesh is LLM-routed: the primary Pi agent decides whether to call the
+   * pi-chalin is LLM-routed: the primary Pi agent decides whether to call the
    * mesh_route tool and provides the topology/steps. This method remains as a
    * safe legacy preview path, but it intentionally does not infer workflows from
    * hard-coded prompt keywords.
@@ -69,7 +69,7 @@ export class MeshKernel {
       ambiguity: "low",
       needsMemory: false,
       needsArtifacts: false,
-      reason: "pi-mesh uses LLM-first routing: the primary Pi agent decides when to call mesh_route and which agents/topology to use.",
+      reason: "pi-chalin uses LLM-first routing: the primary Pi agent decides when to call mesh_route and which agents/topology to use.",
     };
   }
 
@@ -92,9 +92,9 @@ export class MeshKernel {
     if (missing.length > 0) {
       return {
         route,
-        approval: { action: "block", reason: `Unknown pi-mesh agent(s): ${missing.join(", ")}.` },
+        approval: { action: "block", reason: `Unknown pi-chalin agent(s): ${missing.join(", ")}.` },
         memories,
-        diagnostics: [...diagnostics, `Unknown pi-mesh agent(s): ${missing.join(", ")}.`],
+        diagnostics: [...diagnostics, `Unknown pi-chalin agent(s): ${missing.join(", ")}.`],
       };
     }
 
@@ -146,12 +146,12 @@ export class MeshKernel {
   }
 
   private persistMemoriesAfterToolResult(candidates: NonNullable<RunState["steps"][number]["output"]>["memoryCandidates"], runId: string, hasUI: boolean): void {
-    const configuredDelay = Number(process.env.PI_MESH_MEMORY_PERSIST_DELAY_MS);
+    const configuredDelay = Number(process.env.PI_CHALIN_MEMORY_PERSIST_DELAY_MS);
     const delayMs = Number.isFinite(configuredDelay) && configuredDelay >= 0 ? configuredDelay : hasUI ? 0 : 30_000;
     const timer = setTimeout(() => {
       void this.memory.submitCandidates(candidates).catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
-        console.warn(`pi-mesh memory persistence failed after run ${runId}: ${message}`);
+        console.warn(`pi-chalin memory persistence failed after run ${runId}: ${message}`);
       });
     }, delayMs);
     timer.unref?.();
@@ -180,7 +180,7 @@ export function routeFromPlan(input: {
       ambiguity: "low",
       needsMemory: true,
       needsArtifacts: false,
-      reason: input.reason?.trim() || "Primary Pi agent requested pi-mesh memory lookup.",
+      reason: input.reason?.trim() || "Primary Pi agent requested pi-chalin memory lookup.",
     };
   }
   if (input.topology === "dag") {

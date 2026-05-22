@@ -23,7 +23,7 @@ function writeAgent(filePath: string, name: string, description: string): void {
 }
 
 test("AgentCatalog loads built-in agents", () => {
-  const cwd = tempDir("pi-mesh-cwd-");
+  const cwd = tempDir("pi-chalin-cwd-");
   const catalog = AgentCatalog.load({ cwd });
   const names = catalog.list("built-in").map((agent) => agent.name);
 
@@ -33,7 +33,7 @@ test("AgentCatalog loads built-in agents", () => {
 });
 
 test("AgentCatalog loads explicit concern capabilities", () => {
-  const cwd = tempDir("pi-mesh-cwd-");
+  const cwd = tempDir("pi-chalin-cwd-");
   const catalog = AgentCatalog.load({ cwd });
   const worker = catalog.resolve("worker").agent;
   const conflictResolver = catalog.resolve("conflict-resolver").agent;
@@ -51,10 +51,10 @@ test("AgentCatalog loads explicit concern capabilities", () => {
 });
 
 test("AgentCatalog validates per-agent thinking frontmatter", () => {
-  const cwd = tempDir("pi-mesh-cwd-");
-  fs.mkdirSync(path.join(cwd, ".pi-mesh", "agents"), { recursive: true });
-  fs.writeFileSync(path.join(cwd, ".pi-mesh", "agents", "thinker.md"), `---\nname: thinker\ndescription: custom thinker\nconcern: planning\nmodel: inherit\nthinking: xhigh\ntools: read\n---\nThink carefully.\n`, "utf-8");
-  fs.writeFileSync(path.join(cwd, ".pi-mesh", "agents", "bad-thinker.md"), `---\nname: bad-thinker\ndescription: bad thinker\nconcern: planning\nmodel: inherit\nthinking: huge\ntools: read\n---\nThink badly.\n`, "utf-8");
+  const cwd = tempDir("pi-chalin-cwd-");
+  fs.mkdirSync(path.join(cwd, ".pi-chalin", "agents"), { recursive: true });
+  fs.writeFileSync(path.join(cwd, ".pi-chalin", "agents", "thinker.md"), `---\nname: thinker\ndescription: custom thinker\nconcern: planning\nmodel: inherit\nthinking: xhigh\ntools: read\n---\nThink carefully.\n`, "utf-8");
+  fs.writeFileSync(path.join(cwd, ".pi-chalin", "agents", "bad-thinker.md"), `---\nname: bad-thinker\ndescription: bad thinker\nconcern: planning\nmodel: inherit\nthinking: huge\ntools: read\n---\nThink badly.\n`, "utf-8");
 
   const catalog = AgentCatalog.load({ cwd });
 
@@ -64,10 +64,10 @@ test("AgentCatalog validates per-agent thinking frontmatter", () => {
 });
 
 test("AgentCatalog default resolution prefers project over user over built-in", () => {
-  const cwd = tempDir("pi-mesh-cwd-");
-  const userRoot = tempDir("pi-mesh-user-");
+  const cwd = tempDir("pi-chalin-cwd-");
+  const userRoot = tempDir("pi-chalin-user-");
   writeAgent(path.join(userRoot, "agents", "worker.md"), "worker", "user worker");
-  writeAgent(path.join(cwd, ".pi-mesh", "agents", "worker.md"), "worker", "project worker");
+  writeAgent(path.join(cwd, ".pi-chalin", "agents", "worker.md"), "worker", "project worker");
 
   const catalog = AgentCatalog.load({ cwd, userRoot });
   assert.equal(catalog.resolve("worker").agent?.scope, "project");
@@ -76,7 +76,7 @@ test("AgentCatalog default resolution prefers project over user over built-in", 
 });
 
 test("AgentCatalog reports invalid explicit scope clearly", () => {
-  const cwd = tempDir("pi-mesh-cwd-");
+  const cwd = tempDir("pi-chalin-cwd-");
   const catalog = AgentCatalog.load({ cwd });
   const result = catalog.resolve("team/worker");
   assert.match(result.error ?? "", /Unknown agent scope/);

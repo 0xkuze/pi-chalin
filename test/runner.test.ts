@@ -71,15 +71,15 @@ test("MockWorkerRunner runs chain plans in order", async () => {
     reason: "test",
     plan: { kind: "chain", steps: [{ agent: "scout", task: "scan" }, { agent: "planner", task: "plan" }] },
   };
-  const run = await new MockWorkerRunner().run(route, { cwd: tempDir("pi-mesh-runner-"), agents: new Map() });
+  const run = await new MockWorkerRunner().run(route, { cwd: tempDir("pi-chalin-runner-"), agents: new Map() });
   assert.equal(run.status, "complete");
   assert.deepEqual(run.steps.map((step) => step.status), ["complete", "complete"]);
   assert.match(run.steps[1]?.output?.raw ?? "", /Previous handoff/);
 });
 
 test("MockWorkerRunner stops promptly when Pi abort signal is raised", async () => {
-  const previousDelay = process.env.PI_MESH_MOCK_STEP_DELAY_MS;
-  process.env.PI_MESH_MOCK_STEP_DELAY_MS = "100";
+  const previousDelay = process.env.PI_CHALIN_MOCK_STEP_DELAY_MS;
+  process.env.PI_CHALIN_MOCK_STEP_DELAY_MS = "100";
   try {
     const route: RouteDecision = {
       kind: "multi-agent-chain",
@@ -94,7 +94,7 @@ test("MockWorkerRunner stops promptly when Pi abort signal is raised", async () 
     const controller = new AbortController();
     const updates: string[] = [];
     const promise = new MockWorkerRunner().run(route, {
-      cwd: tempDir("pi-mesh-runner-abort-"),
+      cwd: tempDir("pi-chalin-runner-abort-"),
       agents: new Map(),
       signal: controller.signal,
       onUpdate: (run) => updates.push(run.status),
@@ -108,16 +108,16 @@ test("MockWorkerRunner stops promptly when Pi abort signal is raised", async () 
     assert.match(run.warnings.join("\n"), /stopped by user/);
     assert.ok(updates.includes("paused"));
   } finally {
-    if (previousDelay === undefined) delete process.env.PI_MESH_MOCK_STEP_DELAY_MS;
-    else process.env.PI_MESH_MOCK_STEP_DELAY_MS = previousDelay;
+    if (previousDelay === undefined) delete process.env.PI_CHALIN_MOCK_STEP_DELAY_MS;
+    else process.env.PI_CHALIN_MOCK_STEP_DELAY_MS = previousDelay;
   }
 });
 
 test("MockWorkerRunner persists in-flight run state for terminal/process recovery", async () => {
-  const previousDelay = process.env.PI_MESH_MOCK_STEP_DELAY_MS;
-  process.env.PI_MESH_MOCK_STEP_DELAY_MS = "100";
+  const previousDelay = process.env.PI_CHALIN_MOCK_STEP_DELAY_MS;
+  process.env.PI_CHALIN_MOCK_STEP_DELAY_MS = "100";
   try {
-    const cwd = tempDir("pi-mesh-runner-live-persist-");
+    const cwd = tempDir("pi-chalin-runner-live-persist-");
     const route: RouteDecision = {
       kind: "multi-agent-chain",
       agents: ["scout", "planner"],
@@ -145,16 +145,16 @@ test("MockWorkerRunner persists in-flight run state for terminal/process recover
     assert.ok(recoveredDuringRun?.steps.some((step) => step.status === "running" || step.status === "pending"));
     assert.equal(finalRun.status, "paused");
   } finally {
-    if (previousDelay === undefined) delete process.env.PI_MESH_MOCK_STEP_DELAY_MS;
-    else process.env.PI_MESH_MOCK_STEP_DELAY_MS = previousDelay;
+    if (previousDelay === undefined) delete process.env.PI_CHALIN_MOCK_STEP_DELAY_MS;
+    else process.env.PI_CHALIN_MOCK_STEP_DELAY_MS = previousDelay;
   }
 });
 
 test("MockWorkerRunner prepares and cleans isolated worktrees for parallel writer routes", async () => {
-  const cwd = tempDir("pi-mesh-runner-worktrees-");
+  const cwd = tempDir("pi-chalin-runner-worktrees-");
   git(cwd, ["init"]);
-  git(cwd, ["config", "user.email", "pi-mesh@example.com"]);
-  git(cwd, ["config", "user.name", "pi-mesh"]);
+  git(cwd, ["config", "user.email", "pi-chalin@example.com"]);
+  git(cwd, ["config", "user.name", "pi-chalin"]);
   fs.writeFileSync(path.join(cwd, "a.txt"), "one\n");
   git(cwd, ["add", "."]);
   git(cwd, ["commit", "-m", "init"]);
@@ -179,7 +179,7 @@ test("MockWorkerRunner prepares and cleans isolated worktrees for parallel write
   assert.equal(run.status, "complete");
   assert.match(run.warnings.join("\n"), /worktree isolation active/i);
   assert.doesNotMatch(run.warnings.join("\n"), /gated|before real concurrent writes/i);
-  assert.equal(git(cwd, ["branch", "--list", "pi-mesh/*"]), "");
+  assert.equal(git(cwd, ["branch", "--list", "pi-chalin/*"]), "");
 });
 
 test("MockWorkerRunner runs staged DAGs with parallel fan-out and downstream synthesis", async () => {
@@ -201,7 +201,7 @@ test("MockWorkerRunner runs staged DAGs with parallel fan-out and downstream syn
     },
   };
 
-  const run = await new MockWorkerRunner().run(route, { cwd: tempDir("pi-mesh-runner-dag-"), agents: new Map() });
+  const run = await new MockWorkerRunner().run(route, { cwd: tempDir("pi-chalin-runner-dag-"), agents: new Map() });
 
   assert.equal(run.status, "complete");
   assert.deepEqual(run.steps.map((step) => step.status), ["complete", "complete", "complete", "complete"]);
@@ -211,7 +211,7 @@ test("MockWorkerRunner runs staged DAGs with parallel fan-out and downstream syn
 });
 
 test("MockWorkerRunner resumes paused DAG runs without rerunning completed steps", async () => {
-  const cwd = tempDir("pi-mesh-runner-resume-dag-");
+  const cwd = tempDir("pi-chalin-runner-resume-dag-");
   const route: RouteDecision = {
     kind: "multi-agent-dag",
     agents: ["scout", "context-builder", "context-builder"],
@@ -236,7 +236,7 @@ test("MockWorkerRunner resumes paused DAG runs without rerunning completed steps
   run.steps[0]!.output = { agent: "scout", text: "Scout handoff", handoff: "Scout mapped README and src.", memoryCandidates: [], raw: "Scout handoff", warnings: [] };
   for (const step of run.steps.slice(1)) {
     step.status = "paused";
-    step.error = "pi-mesh run stopped by user.";
+    step.error = "pi-chalin run stopped by user.";
   }
   run.status = "paused";
 
@@ -246,12 +246,12 @@ test("MockWorkerRunner resumes paused DAG runs without rerunning completed steps
   assert.equal(resumed.status, "complete");
   assert.deepEqual(resumed.steps.map((step) => step.status), ["complete", "complete", "complete", "complete"]);
   assert.equal(resumed.steps[0]?.output?.handoff, "Scout mapped README and src.");
-  assert.match(resumed.warnings.join("\n"), /Resumed paused pi-mesh run/);
+  assert.match(resumed.warnings.join("\n"), /Resumed paused pi-chalin run/);
   assert.match(fs.readFileSync(resumed.logsPath!, "utf-8"), /Synthesize final answer/);
 });
 
 test("loadResumableRunState recovers latest paused or stale running run from disk", () => {
-  const cwd = tempDir("pi-mesh-resumable-load-");
+  const cwd = tempDir("pi-chalin-resumable-load-");
   const paused = createRunState({
     kind: "multi-agent-chain",
     agents: ["scout", "reviewer"],
@@ -299,7 +299,7 @@ test("loadResumableRunState recovers latest paused or stale running run from dis
 });
 
 test("prepareRunForResume resets interrupted work but keeps completed handoffs", () => {
-  const cwd = tempDir("pi-mesh-prepare-resume-");
+  const cwd = tempDir("pi-chalin-prepare-resume-");
   const run = createRunState({
     kind: "multi-agent-chain",
     agents: ["scout", "reviewer"],
@@ -454,7 +454,7 @@ test("buildSdkPrompt compresses repeated policy when previous handoff is availab
     systemPrompt: "You are verbose.\n\nRules:\n- Keep facts.\n- Do not edit.\n\nTool discipline:\n- duplicated tool rule.\n\nStop condition:\n- duplicated stop.",
     diagnostics: [],
   };
-  const prompt = buildSdkPrompt(agent, "Summarize scout handoff.", tempDir("pi-mesh-prompt-"), "Scout found package.json and src/index.ts.");
+  const prompt = buildSdkPrompt(agent, "Summarize scout handoff.", tempDir("pi-chalin-prompt-"), "Scout found package.json and src/index.ts.");
   assert.match(prompt, /Packages repo facts/);
   assert.match(prompt, /Previous Handoff/);
   assert.match(prompt, /Discovery index omitted/i);
@@ -479,7 +479,7 @@ test("buildSdkPrompt puts context-builder into handoff-first gap-read mode", () 
   const prompt = buildSdkPrompt(
     agent,
     "A partir del handoff del scout, sintetiza qué hace el proyecto en profundidad.",
-    tempDir("pi-mesh-gap-read-prompt-"),
+    tempDir("pi-chalin-gap-read-prompt-"),
     "Coverage Matrix: runtime covered with evidence in src/index.ts.",
     120,
     "deep",
@@ -510,7 +510,7 @@ test("buildSdkPrompt puts reviewer into sampled audit mode after handoff", () =>
   const prompt = buildSdkPrompt(
     agent,
     "Review risks/gaps in this deep project analysis.",
-    tempDir("pi-mesh-review-gap-prompt-"),
+    tempDir("pi-chalin-review-gap-prompt-"),
     "Coverage Matrix: runtime covered with evidence in nuxt.config.js; auth covered in middleware/auth.js.",
     120,
     "deep",
@@ -541,7 +541,7 @@ test("buildSdkPrompt adds a coverage and evidence contract for deep project anal
   const prompt = buildSdkPrompt(
     agent,
     "Revisa este proyecto en profundidad y sintetiza qué hace, módulos, riesgos y cómo se testea.",
-    tempDir("pi-mesh-deep-analysis-prompt-"),
+    tempDir("pi-chalin-deep-analysis-prompt-"),
     undefined,
     120,
     "deep",
@@ -627,7 +627,7 @@ test("resolveAgentModel records fallback attempts and selects next configured ca
   agentDef.model = "anthropic/missing-model";
 
   const resolved = resolveAgentModel(agentDef, "reviewer", {
-    cwd: tempDir("pi-mesh-model-resolution-"),
+    cwd: tempDir("pi-chalin-model-resolution-"),
     agents: new Map(),
     modelOverrides: { "tier/balanced": "openai/gpt-5-mini" },
     extensionContext: { model: { provider: "openai", id: "fallback-active" }, modelRegistry: registry } as never,
@@ -645,16 +645,16 @@ test("resolveAgentThinking uses overrides, agent defaults, and model suffixes", 
   agentDef.thinking = "medium";
 
   const modelSuffix = resolveAgentThinking({ ...agentDef, thinking: "inherit" }, "reviewer", {
-    cwd: tempDir("pi-mesh-thinking-suffix-"),
+    cwd: tempDir("pi-chalin-thinking-suffix-"),
     agents: new Map(),
   }, {
     selected: "openai/gpt-5-mini",
     tier: "balanced",
     attempts: [{ source: "agent", ref: "openai/gpt-5-mini:high", status: "selected", model: "openai/gpt-5-mini" }],
   });
-  const agentDefault = resolveAgentThinking(agentDef, "reviewer", { cwd: tempDir("pi-mesh-thinking-agent-"), agents: new Map() });
+  const agentDefault = resolveAgentThinking(agentDef, "reviewer", { cwd: tempDir("pi-chalin-thinking-agent-"), agents: new Map() });
   const override = resolveAgentThinking(agentDef, "reviewer", {
-    cwd: tempDir("pi-mesh-thinking-override-"),
+    cwd: tempDir("pi-chalin-thinking-override-"),
     agents: new Map(),
     thinkingOverrides: { "built-in/reviewer": "xhigh" },
   });

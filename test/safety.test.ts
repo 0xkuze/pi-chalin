@@ -27,11 +27,11 @@ test("child policy compresses oversized tool output and records output/read budg
   const result = policy.afterTool("read", {
     content: [{ type: "text", text: "x".repeat(20_000) }],
     details: {},
-  }) as { content: Array<{ text: string }>; details: { piMeshCompressed?: boolean } };
+  }) as { content: Array<{ text: string }>; details: { piChalinCompressed?: boolean } };
 
-  assert.equal(result.details.piMeshCompressed, true);
+  assert.equal(result.details.piChalinCompressed, true);
   assert.ok(result.content[0]!.text.length < 7000);
-  assert.match(result.content[0]!.text, /compressed by pi-mesh/);
+  assert.match(result.content[0]!.text, /compressed by pi-chalin/);
   assert.equal(policy.metrics().outputTruncatedCount, 1);
   assert.ok(policy.metrics().readBytes < 7000);
 });

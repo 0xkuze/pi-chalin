@@ -143,7 +143,7 @@ function autoPromptVariants(prompt: string): string[] {
 
 export function createWorkflowFixture(id: string, options: { promptVariantIndex?: number } = {}): WorkflowFixture {
   const evalCase = getWorkflowEvalCase(id);
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `pi-mesh-workflow-${id}-`));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `pi-chalin-workflow-${id}-`));
   evalCase.setup(cwd);
   const prompt = selectWorkflowPrompt(evalCase, options.promptVariantIndex ?? 0);
   return { case: evalCase, cwd, prompt: prompt.prompt, promptVariantIndex: prompt.index, promptVariantCount: prompt.count };

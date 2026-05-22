@@ -4,7 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 import { createWorkflowFixture, listWorkflowCommunityCases, listWorkflowEvalCases, listWorkflowHoldoutCases, selectWorkflowPrompt } from "../evals/workflow-cases.ts";
-import { assertSdkRunBudget, buildWorkflowJudgePrompt, detectWorkflowInfrastructureFailure, detectWorkflowVerification, evaluateWorkflowRegressionGates, extractFinalText, observeTerminalAssistantAnswer, resolveCaseIds, resolveVariants, resolveWorkflowIdleTimeoutMs, resolveWorkflowInfraRetries, resolveWorkflowRunCount, resolveWorkflowTimeoutMs, shouldRetainWorkflowFixture, shouldRunWorkflowJudge, shouldStoreFullWorkflowOutput, summarizeComparison, summarizeWorkflowFailures, workflowRegressionGatesEnabled, workflowReportFilename, writeWorkflowReport, DEFAULT_WORKFLOW_IDLE_TIMEOUT_MS, MAX_WORKFLOW_RUNS, MAX_WORKFLOW_TIMEOUT_MS } from "../evals/workflow-quality.eval.ts";
+import { resolveWorkflowShardArgs } from "../evals/workflow-sharded.eval.ts";
+import { assertSdkRunBudget, buildWorkflowJudgePrompt, detectWorkflowInfrastructureFailure, detectWorkflowVerification, evaluateWorkflowRegressionGates, extractFinalText, observeTerminalAssistantAnswer, resolveCaseIds, resolveVariants, resolveWorkflowArgs, resolveWorkflowIdleTimeoutMs, resolveWorkflowInfraRetries, resolveWorkflowRunCount, resolveWorkflowTimeoutMs, shouldRetainWorkflowFixture, shouldRunWorkflowJudge, shouldStoreFullWorkflowOutput, summarizeComparison, summarizeWorkflowFailures, workflowRegressionGatesEnabled, workflowReportFilename, writeWorkflowReport, DEFAULT_WORKFLOW_IDLE_TIMEOUT_MS, MAX_WORKFLOW_RUNS, MAX_WORKFLOW_TIMEOUT_MS } from "../evals/workflow-quality.eval.ts";
 import { scoreWorkflowWorkspace } from "../src/workflow-quality.ts";
 
 test("workflow eval case bank covers real task types", () => {
@@ -485,6 +486,33 @@ test("workflow eval CLI helpers keep live runs bounded", () => {
   assert.deepEqual(resolveCaseIds("a,b"), ["a", "b"]);
 });
 
+test("workflow presets expand long package scripts without environment variables", () => {
+  const matrix = resolveWorkflowArgs({ preset: "matrix" });
+  assert.equal(matrix.mode, "sdk");
+  assert.equal(matrix.case, "all-with-holdout");
+  assert.equal(matrix.allowMulti, "1");
+  assert.equal(matrix.allowLong, "1");
+  assert.equal(matrix.gates, "1");
+  assert.equal(matrix.model, "openai-codex/gpt-5.3-codex-spark");
+  assert.equal(matrix.thinking, "low");
+  assert.equal(matrix.matrixPath, "evals/results/workflow-quality-full-matrix.jsonl");
+  assert.equal(resolveWorkflowArgs({ preset: "matrix", runs: "1" }).runs, "1");
+
+  const community = resolveWorkflowArgs({ preset: "community" });
+  assert.equal(community.case, "community");
+  assert.equal(community.allowLong, "1");
+  assert.equal(community.matrixPath, "evals/results/workflow-quality-community-matrix.jsonl");
+
+  const sharded = resolveWorkflowShardArgs({ preset: "community" });
+  assert.equal(sharded.case, "community");
+  assert.equal(sharded.runs, "3");
+  assert.equal(sharded.matrixPath, "evals/results/workflow-quality-community-sharded-matrix.jsonl");
+  assert.equal(resolveWorkflowShardArgs({ preset: "community", concurrency: "2" }).concurrency, "2");
+
+  assert.throws(() => resolveWorkflowArgs({ preset: "unknown" }), /Unsupported workflow preset/);
+  assert.throws(() => resolveWorkflowShardArgs({ preset: "unknown" }), /Unsupported workflow shard preset/);
+});
+
 test("workflow SDK budget guard rejects accidental long matrices", () => {
   assert.throws(() => assertSdkRunBudget({
     caseIds: resolveCaseIds("all-with-holdout"),
@@ -522,7 +550,7 @@ test("workflow report filenames include case variant run and unique token", () =
 });
 
 test("workflow report writer uses exclusive creation and retries on collision", () => {
-  const reportDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-mesh-report-"));
+  const reportDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-chalin-report-"));
   const report = {
     startedAt: "2026-05-20T22:47:43.785Z",
     mode: "sdk",
@@ -717,8 +745,8 @@ test("workflow fixture retention keeps failed SDK workspaces for root-cause anal
   } as never;
   assert.equal(shouldRetainWorkflowFixture(passing, {}), false);
   assert.equal(shouldRetainWorkflowFixture(failing, {}), true);
-  assert.equal(shouldRetainWorkflowFixture(failing, { PI_MESH_WORKFLOW_KEEP_FAILED_FIXTURE: "0" }), false);
-  assert.equal(shouldRetainWorkflowFixture(passing, { PI_MESH_WORKFLOW_KEEP_FIXTURE: "1" }), true);
+  assert.equal(shouldRetainWorkflowFixture(failing, { PI_CHALIN_WORKFLOW_KEEP_FAILED_FIXTURE: "0" }), false);
+  assert.equal(shouldRetainWorkflowFixture(passing, { PI_CHALIN_WORKFLOW_KEEP_FIXTURE: "1" }), true);
 });
 
 
@@ -729,7 +757,7 @@ test("workflow failure UX summarizes what happened and the next step", () => {
   const failures = summarizeWorkflowFailures([{
     variant: "mesh",
     runIndex: 2,
-    retainedFixturePath: "/tmp/pi-mesh-fixture",
+    retainedFixturePath: "/tmp/pi-chalin-fixture",
     workspace: { caseId: "holdout-scaffold-config-loader", pass: true, score: 100 },
     trace: { pass: false, score: 75, critical: [] },
     diagnostics: {
@@ -745,7 +773,7 @@ test("workflow failure UX summarizes what happened and the next step", () => {
   assert.equal(failures[0]?.mode, "final-answer-evidence");
   assert.match(failures[0]?.userMessage ?? "", /trace\/final-answer evidence|final-answer evidence|evidence/i);
   assert.match(failures[0]?.nextStep ?? "", /Inspect retained fixture/);
-  assert.equal(failures[0]?.retainedFixturePath, "/tmp/pi-mesh-fixture");
+  assert.equal(failures[0]?.retainedFixturePath, "/tmp/pi-chalin-fixture");
 });
 
 test("workflow reports keep full output for failed SDK runs by default", () => {
@@ -763,8 +791,8 @@ test("workflow reports keep full output for failed SDK runs by default", () => {
   } as never;
   assert.equal(shouldStoreFullWorkflowOutput(passing, {}), false);
   assert.equal(shouldStoreFullWorkflowOutput(failing, {}), true);
-  assert.equal(shouldStoreFullWorkflowOutput(failing, { PI_MESH_WORKFLOW_STORE_FAILED_OUTPUT: "0" }), false);
-  assert.equal(shouldStoreFullWorkflowOutput(passing, { PI_MESH_WORKFLOW_STORE_FULL_OUTPUT: "1" }), true);
+  assert.equal(shouldStoreFullWorkflowOutput(failing, { PI_CHALIN_WORKFLOW_STORE_FAILED_OUTPUT: "0" }), false);
+  assert.equal(shouldStoreFullWorkflowOutput(passing, { PI_CHALIN_WORKFLOW_STORE_FULL_OUTPUT: "1" }), true);
 });
 
 test("workflow diagnostics classify provider failures as infrastructure", () => {

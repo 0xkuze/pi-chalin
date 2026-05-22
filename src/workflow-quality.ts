@@ -57,7 +57,7 @@ export interface WorkflowQualityReport {
   suggestions: WorkflowQualityIssue[];
 }
 
-const IGNORED_DIRS = new Set([".git", "node_modules", ".pi-mesh", "dist", "coverage"]);
+const IGNORED_DIRS = new Set([".git", "node_modules", ".pi-chalin", "dist", "coverage"]);
 
 export function scoreWorkflowWorkspace(cwd: string, evalCase: WorkflowEvalCase, options: { finalText?: string; durationMs?: number; validateTests?: boolean; validationTimeoutMs?: number } = {}): WorkflowQualityReport {
   const scoringCwd = resolveScoringRoot(cwd, evalCase);

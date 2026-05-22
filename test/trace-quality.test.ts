@@ -69,7 +69,7 @@ test("gradePiTrace flags repeated mesh_route and parent exploration after mesh",
 });
 
 test("gradePiTrace treats tools after approval-blocked mesh_route as recovery", () => {
-  const blockedMesh = "pi-mesh completed: scout → planner → worker\nstatus: ask\nApproval: ask — Route risk 'medium' meets approval threshold 'medium'.";
+  const blockedMesh = "pi-chalin completed: scout → planner → worker\nstatus: ask\nApproval: ask — Route risk 'medium' meets approval threshold 'medium'.";
   const stdout = [
     event({ type: "tool_execution_end", toolName: "mesh_route", result: { content: [{ type: "text", text: blockedMesh }] } }),
     event({ type: "tool_execution_start", toolName: "read", args: { path: "src/pricing.ts" } }),
@@ -88,7 +88,7 @@ test("gradePiTrace treats tools after approval-blocked mesh_route as recovery", 
 });
 
 test("gradePiTrace treats direct-recommended mesh_route as non-executable recovery", () => {
-  const directRecommended = "pi-mesh direct execution recommended\nstatus: direct-recommended\nDirect execution recommended: this is a bounded explicit-file mutation.";
+  const directRecommended = "pi-chalin direct execution recommended\nstatus: direct-recommended\nDirect execution recommended: this is a bounded explicit-file mutation.";
   const final = "Cambios: `src/pricing.ts`. Verificación: `npm test` passed.";
   const stdout = [
     event({ type: "tool_execution_end", toolName: "mesh_route", result: { content: [{ type: "text", text: directRecommended }] } }),
@@ -106,7 +106,7 @@ test("gradePiTrace treats direct-recommended mesh_route as non-executable recove
 });
 
 test("gradePiTrace does not treat approval-blocked mesh_route as final answer", () => {
-  const blockedMesh = "pi-mesh completed: scout → planner → worker\nstatus: ask\nApproval: ask — Route risk 'medium' meets approval threshold 'medium'.";
+  const blockedMesh = "pi-chalin completed: scout → planner → worker\nstatus: ask\nApproval: ask — Route risk 'medium' meets approval threshold 'medium'.";
   const report = gradePiTrace(event({ type: "tool_execution_end", toolName: "mesh_route", result: { content: [{ type: "text", text: blockedMesh }] } }), { variant: "mesh", promptKind: "generic" });
 
   assert.equal(report.effectiveAnswerSource, "none");

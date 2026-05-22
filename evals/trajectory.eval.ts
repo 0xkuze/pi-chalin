@@ -17,7 +17,7 @@ interface TrajectoryEvalResult {
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const startedAt = new Date().toISOString();
-const threshold = positiveFloat(process.env.PI_MESH_TRAJECTORY_EVAL_MIN_SCORE, 0.86);
+const threshold = positiveFloat(process.env.PI_CHALIN_TRAJECTORY_EVAL_MIN_SCORE, 0.86);
 const cases = [
   {
     id: "healthy-verified-mutation",
@@ -56,17 +56,17 @@ const report = {
   results,
 };
 
-const reportDir = path.join(repoRoot, ".pi-mesh", "evals");
+const reportDir = path.join(repoRoot, ".pi-chalin", "evals");
 fs.mkdirSync(reportDir, { recursive: true });
 const reportPath = path.join(reportDir, `trajectory-${stamp(startedAt)}.json`);
 fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
 
-console.log(`pi-mesh trajectory evals: ${passed}/${results.length} passed`);
+console.log(`pi-chalin trajectory evals: ${passed}/${results.length} passed`);
 for (const result of results) {
   console.log(`${result.pass ? "✓" : "✗"} ${result.id} · score=${result.score} · findings=${result.failedFindings.join(",") || "none"}`);
 }
 console.log(`report: ${reportPath}`);
-if (failed > 0 && process.env.PI_MESH_TRAJECTORY_EVAL_ALLOW_FAIL !== "1") process.exit(1);
+if (failed > 0 && process.env.PI_CHALIN_TRAJECTORY_EVAL_ALLOW_FAIL !== "1") process.exit(1);
 
 function healthyRun(): RunState {
   return baseRun("complete", [

@@ -358,14 +358,14 @@ export function createGuardedBashTool(policy: ChildToolPolicy): ToolDefinition {
       const gate = policy.beforeTool("bash", params);
       if (!gate.allowed) {
         return {
-          content: [{ type: "text" as const, text: `Blocked by pi-mesh child policy: ${gate.reason}\nUse Pi-native read/find/grep/ls/edit tools instead, or stop and report partial findings.` }],
+          content: [{ type: "text" as const, text: `Blocked by pi-chalin child policy: ${gate.reason}\nUse Pi-native read/find/grep/ls/edit tools instead, or stop and report partial findings.` }],
           details: { blocked: true, reason: gate.reason, command: params.command },
         };
       }
       const verdict = classifyBashCommand(params.command);
       if (!verdict.allowed) {
         return {
-          content: [{ type: "text" as const, text: `Blocked by pi-mesh child bash guard: ${verdict.reason}\nUse Pi-native read/find/grep/ls/edit tools instead.` }],
+          content: [{ type: "text" as const, text: `Blocked by pi-chalin child bash guard: ${verdict.reason}\nUse Pi-native read/find/grep/ls/edit tools instead.` }],
           details: { blocked: true, reason: verdict.reason, command: params.command },
         };
       }
@@ -412,7 +412,7 @@ export function createMeshArtifactWriteTool(policy: ChildToolPolicy): ToolDefini
   return defineTool<typeof MeshArtifactWriteParams, unknown>({
     name: "mesh_artifact_write",
     label: "Mesh Artifact Write",
-    description: "Write controlled pi-mesh checkpoints, validation contracts, worker skills, or feature state for long-running work.",
+    description: "Write controlled pi-chalin checkpoints, validation contracts, worker skills, or feature state for long-running work.",
     promptSnippet: "mesh_artifact_write: save compact task artifacts for resumable mesh workflows; never store raw logs or code dumps.",
     promptGuidelines: [
       "Use after a meaningful handoff, validation boundary, or worker-specific convention is discovered.",
@@ -479,10 +479,10 @@ function artifactToolResult(text: string, details: unknown) {
 function guardTool(base: ToolDefinition<any, any, any>, toolName: string, policy: ChildToolPolicy): ToolDefinition<any, any, any> {
   return {
     ...base,
-    description: `${base.description} Guarded by pi-mesh child policy: bounded calls, no script-driven inspection, and surgical writes only.`,
+    description: `${base.description} Guarded by pi-chalin child policy: bounded calls, no script-driven inspection, and surgical writes only.`,
     promptGuidelines: [
       ...(base.promptGuidelines ?? []),
-      "Stay within the pi-mesh child tool budget.",
+      "Stay within the pi-chalin child tool budget.",
       "Prefer targeted inspection over broad crawls.",
     ],
     async execute(toolCallId, params, signal, onUpdate, ctx) {
@@ -497,7 +497,7 @@ function guardTool(base: ToolDefinition<any, any, any>, toolName: string, policy
 
 function blockedToolResult(reason: string) {
   return {
-    content: [{ type: "text" as const, text: `Blocked by pi-mesh child policy: ${reason}\nStop if you have enough evidence; otherwise use fewer, more targeted Pi-native tools.` }],
+    content: [{ type: "text" as const, text: `Blocked by pi-chalin child policy: ${reason}\nStop if you have enough evidence; otherwise use fewer, more targeted Pi-native tools.` }],
     details: { blocked: true, reason },
     isError: true,
   };
@@ -574,7 +574,7 @@ function runGuardedCommand(command: string, cwd: string, timeoutSeconds: number,
       clearTimeout(timeout);
       signal?.removeEventListener("abort", onAbort);
       const text = output.trim();
-      resolve({ exitCode, text: compressTextTail(text, 8000, "pi-mesh guarded bash") });
+      resolve({ exitCode, text: compressTextTail(text, 8000, "pi-chalin guarded bash") });
     });
   });
 }
@@ -595,7 +595,7 @@ function compressToolResult(result: unknown, toolName: string, maxChars: number)
     return { ...part, text: compressed };
   });
   const details = isRecord(result.details) ? result.details : {};
-  return { result: { ...result, content, details: { ...details, piMeshCompressed: truncated } }, outputChars, truncated };
+  return { result: { ...result, content, details: { ...details, piChalinCompressed: truncated } }, outputChars, truncated };
 }
 
 function compressTextTail(text: string, maxChars: number, label: string): string {
@@ -605,7 +605,7 @@ function compressTextTail(text: string, maxChars: number, label: string): string
   return [
     text.slice(0, headSize).trimEnd(),
     "",
-    `[${label} compressed by pi-mesh: ${text.length} chars → ${maxChars} chars; middle omitted]`,
+    `[${label} compressed by pi-chalin: ${text.length} chars → ${maxChars} chars; middle omitted]`,
     "",
     text.slice(-tailSize).trimStart(),
   ].join("\n");

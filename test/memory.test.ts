@@ -10,12 +10,12 @@ afterEach(() => { while (tempDirs.length > 0) fs.rmSync(tempDirs.pop()!, { recur
 function tempDir(prefix: string): string { const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); tempDirs.push(dir); return dir; }
 
 test("MemoryStore evaluates important candidates as pending", async () => {
-  const cwd = tempDir("pi-mesh-memory-");
+  const cwd = tempDir("pi-chalin-memory-");
   const store = new MemoryStore({ cwd });
   const [record] = await store.submitCandidates([
     createMemoryCandidate({
       category: "decision",
-      content: "Use a modular monolith for pi-mesh so routing, memory, runner, and TUI stay in one deployable extension while modules remain independently testable.",
+      content: "Use a modular monolith for pi-chalin so routing, memory, runner, and TUI stay in one deployable extension while modules remain independently testable.",
       sourceAgent: "planner",
       confidence: 0.9,
       scope: "project",
@@ -26,12 +26,12 @@ test("MemoryStore evaluates important candidates as pending", async () => {
 });
 
 test("MemoryStore activates curated high-confidence project facts and searches them", async () => {
-  const cwd = tempDir("pi-mesh-memory-");
+  const cwd = tempDir("pi-chalin-memory-");
   const store = new MemoryStore({ cwd });
   const [record] = await store.submitCandidates([
     createMemoryCandidate({
       category: "project-fact",
-      content: "pi-mesh stores project memory in .pi-mesh/memory.sqlite using SQLite FTS5, and only active records are indexed for retrieval.",
+      content: "pi-chalin stores project memory in .pi-chalin/memory.sqlite using SQLite FTS5, and only active records are indexed for retrieval.",
       sourceAgent: "reviewer",
       confidence: 0.9,
       scope: "project",
@@ -44,7 +44,7 @@ test("MemoryStore activates curated high-confidence project facts and searches t
 });
 
 test("MemoryStore keeps generic agent notes pending for human review", async () => {
-  const cwd = tempDir("pi-mesh-memory-");
+  const cwd = tempDir("pi-chalin-memory-");
   const store = new MemoryStore({ cwd });
   const [record] = await store.submitCandidates([
     createMemoryCandidate({
@@ -60,7 +60,7 @@ test("MemoryStore keeps generic agent notes pending for human review", async () 
 });
 
 test("MemoryStore rejects logs code snippets and task completion noise", async () => {
-  const cwd = tempDir("pi-mesh-memory-");
+  const cwd = tempDir("pi-chalin-memory-");
   const store = new MemoryStore({ cwd });
   const records = await store.submitCandidates([
     createMemoryCandidate({ category: "agent-note", content: "cmd = ['pi', '-e', '/Users/me/project/src/index.ts']", sourceAgent: "scout", confidence: 0.9, scope: "project" }),
@@ -73,7 +73,7 @@ test("MemoryStore rejects logs code snippets and task completion noise", async (
 });
 
 test("MemoryStore deduplicates normalized candidates before writing", async () => {
-  const cwd = tempDir("pi-mesh-memory-");
+  const cwd = tempDir("pi-chalin-memory-");
   const store = new MemoryStore({ cwd });
   const content = "This project uses Bun for tests, and tests should avoid setTimeout-based waits because they make the suite flaky.";
   const records = await store.submitCandidates([
@@ -86,12 +86,12 @@ test("MemoryStore deduplicates normalized candidates before writing", async () =
 });
 
 test("MemoryStore approve reject and delete mutate records", async () => {
-  const cwd = tempDir("pi-mesh-memory-");
+  const cwd = tempDir("pi-chalin-memory-");
   const store = new MemoryStore({ cwd });
   const [record] = await store.submitCandidates([
     createMemoryCandidate({
       category: "preference",
-      content: "Ask before risky writes whenever a pi-mesh route is medium risk or higher, especially when the worker would modify multiple files.",
+      content: "Ask before risky writes whenever a pi-chalin route is medium risk or higher, especially when the worker would modify multiple files.",
       sourceAgent: "planner",
       confidence: 0.9,
       scope: "project",
@@ -104,12 +104,12 @@ test("MemoryStore approve reject and delete mutate records", async () => {
 });
 
 test("MemoryStore does not persist duplicate candidates across agents", async () => {
-  const cwd = tempDir("pi-mesh-memory-");
+  const cwd = tempDir("pi-chalin-memory-");
   const store = new MemoryStore({ cwd });
   const first = await store.submitCandidates([
     createMemoryCandidate({
       category: "project-fact",
-      content: "pi-mesh is a Pi Coding Agent extension that routes normal prompts through specialized subagents for project analysis and review.",
+      content: "pi-chalin is a Pi Coding Agent extension that routes normal prompts through specialized subagents for project analysis and review.",
       sourceAgent: "scout",
       confidence: 0.9,
       scope: "project",
@@ -118,7 +118,7 @@ test("MemoryStore does not persist duplicate candidates across agents", async ()
   const second = await store.submitCandidates([
     createMemoryCandidate({
       category: "project-fact",
-      content: "pi-mesh is a Pi Coding Agent extension that routes normal prompts through specialized subagents for project analysis and review.",
+      content: "pi-chalin is a Pi Coding Agent extension that routes normal prompts through specialized subagents for project analysis and review.",
       sourceAgent: "context-builder",
       confidence: 0.9,
       scope: "project",
@@ -131,19 +131,19 @@ test("MemoryStore does not persist duplicate candidates across agents", async ()
 });
 
 test("MemoryStore collapses near-duplicate legacy records in review lists", async () => {
-  const cwd = tempDir("pi-mesh-memory-");
+  const cwd = tempDir("pi-chalin-memory-");
   const store = new MemoryStore({ cwd });
   await store.submitCandidates([
     createMemoryCandidate({
       category: "project-fact",
-      content: "pi-mesh is a Pi Coding Agent extension that routes normal prompts through specialized subagents for project analysis and review.",
+      content: "pi-chalin is a Pi Coding Agent extension that routes normal prompts through specialized subagents for project analysis and review.",
       sourceAgent: "scout",
       confidence: 0.9,
       scope: "project",
     }),
     createMemoryCandidate({
       category: "project-fact",
-      content: "pi-mesh is a Pi Coding Agent extension package for routed subagent workflows that analyze and review normal project prompts.",
+      content: "pi-chalin is a Pi Coding Agent extension package for routed subagent workflows that analyze and review normal project prompts.",
       sourceAgent: "context-builder",
       confidence: 0.9,
       scope: "project",
@@ -153,11 +153,11 @@ test("MemoryStore collapses near-duplicate legacy records in review lists", asyn
 
   const records = await store.list();
   assert.equal(records.length, 1);
-  assert.match(records[0]?.content ?? "", /pi-mesh/);
+  assert.match(records[0]?.content ?? "", /pi-chalin/);
 });
 
 test("MemoryStore revisions topic-key memories instead of duplicating them", async () => {
-  const cwd = tempDir("pi-mesh-memory-");
+  const cwd = tempDir("pi-chalin-memory-");
   const store = new MemoryStore({ cwd });
   await store.submitCandidates([
     createMemoryCandidate({
@@ -187,7 +187,7 @@ test("MemoryStore revisions topic-key memories instead of duplicating them", asy
 });
 
 test("MemoryStore counts exact duplicate sightings without cluttering review", async () => {
-  const cwd = tempDir("pi-mesh-memory-");
+  const cwd = tempDir("pi-chalin-memory-");
   const store = new MemoryStore({ cwd });
   const content = "The project uses node:test for extension regression tests, so new tests should import from node:assert/strict and keep temporary project roots isolated.";
   await store.submitCandidates([createMemoryCandidate({ category: "testing", content, sourceAgent: "scout", confidence: 0.91, scope: "project" })]);
@@ -200,12 +200,12 @@ test("MemoryStore counts exact duplicate sightings without cluttering review", a
 });
 
 test("MemoryStore stores decision metadata for explainable review", async () => {
-  const cwd = tempDir("pi-mesh-memory-");
+  const cwd = tempDir("pi-chalin-memory-");
   const store = new MemoryStore({ cwd });
   const [record] = await store.submitCandidates([
     createMemoryCandidate({
       category: "workflow",
-      content: "Long-running pi-mesh tasks should write resumable checkpoints after each agent handoff so a later run can continue from the last completed step instead of restarting.",
+      content: "Long-running pi-chalin tasks should write resumable checkpoints after each agent handoff so a later run can continue from the last completed step instead of restarting.",
       sourceAgent: "planner",
       confidence: 0.9,
       evidence: "Artifact design review",

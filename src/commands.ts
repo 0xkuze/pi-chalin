@@ -18,7 +18,7 @@ import { listWebFetchAudit } from "./webfetch.ts";
 
 export function registerMeshCommands(pi: ExtensionAPI): void {
   pi.registerCommand("mesh", {
-    description: "Open pi-mesh Smart Panel or toggle autonomous routing with: /mesh on|off",
+    description: "Open pi-chalin Smart Panel or toggle autonomous routing with: /mesh on|off",
     getArgumentCompletions: (prefix) => {
       const values = ["on", "off", "agents", "memory", "artifacts", "activity", "web", "status"];
       const filtered = values.filter((value) => value.startsWith(prefix.trim()));
@@ -32,7 +32,7 @@ export function registerMeshCommands(pi: ExtensionAPI): void {
         const enabled = command === "on";
         const loaded = writeProjectConfig({ cwd: ctx.cwd }, { enabled });
         setMeshStatus(ctx, { kind: enabled ? "on" : "off" });
-        ctx.ui.notify(`pi-mesh autonomous routing ${enabled ? "enabled" : "disabled"} for this project.`, "info");
+        ctx.ui.notify(`pi-chalin autonomous routing ${enabled ? "enabled" : "disabled"} for this project.`, "info");
         if (loaded.diagnostics.length > 0) ctx.ui.notify(loaded.diagnostics.join("\n"), "warning");
         return;
       }

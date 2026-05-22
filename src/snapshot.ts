@@ -97,7 +97,7 @@ export function formatProjectSnapshot(snapshot: ProjectSnapshot): string {
 }
 
 export function projectSnapshotCachePath(options: MeshPathsOptions): string {
-  return path.join(resolveMeshPaths(options).projectRoot, ".pi-mesh", "cache", "project-snapshot.json");
+  return path.join(resolveMeshPaths(options).projectRoot, ".pi-chalin", "cache", "project-snapshot.json");
 }
 
 function createProjectSnapshot(cwd: string, cacheKey: string): ProjectSnapshot {
@@ -251,7 +251,7 @@ function readCachedSnapshot(cachePath: string): ProjectSnapshot | undefined {
 
 function safeReaddir(dir: string): string[] {
   try {
-    return fs.readdirSync(dir).filter((entry) => !["node_modules", ".git", ".pi-mesh", "dist", "coverage"].includes(entry));
+    return fs.readdirSync(dir).filter((entry) => !["node_modules", ".git", ".pi-chalin", "dist", "coverage"].includes(entry));
   } catch {
     return [];
   }
@@ -270,7 +270,7 @@ function mtime(filePath: string): number {
 }
 
 function snapshotMaxAgeMs(): number {
-  const parsed = Number(process.env.PI_MESH_SNAPSHOT_MAX_AGE_MS);
+  const parsed = Number(process.env.PI_CHALIN_SNAPSHOT_MAX_AGE_MS);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 10 * 60 * 1000;
 }
 

@@ -15,18 +15,18 @@ interface MemoryEvalResult {
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = parseArgs(process.argv.slice(2));
-const repeats = positiveInt(args.repeats ?? process.env.PI_MESH_MEMORY_EVAL_REPEATS, 5);
+const repeats = positiveInt(args.repeats ?? process.env.PI_CHALIN_MEMORY_EVAL_REPEATS, 5);
 const thresholds = {
-  minRecall: positiveFloat(args.minRecall ?? process.env.PI_MESH_MEMORY_EVAL_MIN_RECALL, 0.95),
-  minReliabilityDelta: positiveFloat(args.minDelta ?? process.env.PI_MESH_MEMORY_EVAL_MIN_DELTA, 0.75),
-  minDuplicateSuppression: positiveFloat(args.minDuplicateSuppression ?? process.env.PI_MESH_MEMORY_EVAL_MIN_DEDUPE, 0.95),
-  minRevisionAccuracy: positiveFloat(args.minRevisionAccuracy ?? process.env.PI_MESH_MEMORY_EVAL_MIN_REVISION, 1),
-  minNoiseRejection: positiveFloat(args.minNoiseRejection ?? process.env.PI_MESH_MEMORY_EVAL_MIN_NOISE, 1),
-  maxAvgSearchMs: positiveFloat(args.maxAvgSearchMs ?? process.env.PI_MESH_MEMORY_EVAL_MAX_SEARCH_MS, 25),
-  maxAvgWriteMs: positiveFloat(args.maxAvgWriteMs ?? process.env.PI_MESH_MEMORY_EVAL_MAX_WRITE_MS, 90),
+  minRecall: positiveFloat(args.minRecall ?? process.env.PI_CHALIN_MEMORY_EVAL_MIN_RECALL, 0.95),
+  minReliabilityDelta: positiveFloat(args.minDelta ?? process.env.PI_CHALIN_MEMORY_EVAL_MIN_DELTA, 0.75),
+  minDuplicateSuppression: positiveFloat(args.minDuplicateSuppression ?? process.env.PI_CHALIN_MEMORY_EVAL_MIN_DEDUPE, 0.95),
+  minRevisionAccuracy: positiveFloat(args.minRevisionAccuracy ?? process.env.PI_CHALIN_MEMORY_EVAL_MIN_REVISION, 1),
+  minNoiseRejection: positiveFloat(args.minNoiseRejection ?? process.env.PI_CHALIN_MEMORY_EVAL_MIN_NOISE, 1),
+  maxAvgSearchMs: positiveFloat(args.maxAvgSearchMs ?? process.env.PI_CHALIN_MEMORY_EVAL_MAX_SEARCH_MS, 25),
+  maxAvgWriteMs: positiveFloat(args.maxAvgWriteMs ?? process.env.PI_CHALIN_MEMORY_EVAL_MAX_WRITE_MS, 90),
 };
 
-const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-mesh-memory-eval-"));
+const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-chalin-memory-eval-"));
 const startedAt = new Date().toISOString();
 try {
   const store = new MemoryStore({ cwd });
@@ -59,12 +59,12 @@ try {
     },
     results,
   };
-  const reportDir = path.join(repoRoot, ".pi-mesh", "evals");
+  const reportDir = path.join(repoRoot, ".pi-chalin", "evals");
   fs.mkdirSync(reportDir, { recursive: true });
   const reportPath = path.join(reportDir, `memory-${stamp(startedAt)}.json`);
   fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
   printReport(reportPath, report);
-  if (failed > 0 && process.env.PI_MESH_MEMORY_EVAL_ALLOW_FAIL !== "1") process.exit(1);
+  if (failed > 0 && process.env.PI_CHALIN_MEMORY_EVAL_ALLOW_FAIL !== "1") process.exit(1);
 } finally {
   fs.rmSync(cwd, { recursive: true, force: true });
 }
@@ -85,8 +85,8 @@ async function evaluateRecall(store: MemoryStore, writeSamples: number[], search
     },
     {
       category: "workflow",
-      content: "Long-running pi-mesh features should write checkpoints after every agent handoff and validation contract before reviewer synthesis.",
-      query: "long-running pi-mesh checkpoints validation contract reviewer",
+      content: "Long-running pi-chalin features should write checkpoints after every agent handoff and validation contract before reviewer synthesis.",
+      query: "long-running pi-chalin checkpoints validation contract reviewer",
       expected: /write checkpoints after every agent handoff/i,
     },
   ];
@@ -152,7 +152,7 @@ async function evaluateNoiseRejection(store: MemoryStore, writeSamples: number[]
 async function evaluateReliabilityDelta(store: MemoryStore, searchSamples: number[]): Promise<MemoryEvalResult> {
   const queries = [
     { query: "checkout isolated temporary directories", expected: /checkout module/i },
-    { query: "pi-mesh checkpoints validation contract", expected: /Long-running pi-mesh features/i },
+    { query: "pi-chalin checkpoints validation contract", expected: /Long-running pi-chalin features/i },
     { query: "payments adapter retry rules", expected: /payments adapter/i },
     { query: "Bun fake timers retry assertions", expected: /Bun/i },
   ];
@@ -217,7 +217,7 @@ function stamp(value: string): string {
 }
 
 function printReport(reportPath: string, report: { passed: number; failed: number; results: MemoryEvalResult[]; metrics: unknown }): void {
-  console.log(`pi-mesh memory evals: ${report.passed}/${report.results.length} passed`);
+  console.log(`pi-chalin memory evals: ${report.passed}/${report.results.length} passed`);
   console.log(`report: ${reportPath}`);
   console.log(`metrics: ${JSON.stringify(report.metrics)}`);
   for (const item of report.results) {

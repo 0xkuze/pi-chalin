@@ -274,7 +274,7 @@ async function mergeIsolatedStage(run: RunState, context: WorkerRunnerContext, e
 
 export function buildConflictResolverTask(conflict: { agent: string; reason: string; patch?: string; worktreePath?: string }): string {
   return [
-    `Resolve a pi-mesh isolated worktree merge conflict from agent '${conflict.agent}'.`,
+    `Resolve a pi-chalin isolated worktree merge conflict from agent '${conflict.agent}'.`,
     `Conflict reason: ${conflict.reason}`,
     conflict.worktreePath ? `Isolated worktree path for reference: ${conflict.worktreePath}` : undefined,
     "",
@@ -295,7 +295,7 @@ async function runSdkDag(
   let previous = "";
   for (const stage of stages) {
     if (context.signal?.aborted) {
-      markRunAborted(run, context, "pi-mesh run stopped by user.");
+      markRunAborted(run, context, "pi-chalin run stopped by user.");
       break;
     }
     const stageSteps = run.steps.filter((step) => step.id.startsWith(`${stage.id}:`));
@@ -389,7 +389,7 @@ async function runSdkStep(
   options: { cwd: string; previous?: string },
 ): Promise<{ aborted: boolean; handoff?: string }> {
   if (context.signal?.aborted) {
-    markRunAborted(run, context, "pi-mesh run stopped by user.");
+    markRunAborted(run, context, "pi-chalin run stopped by user.");
     return { aborted: true };
   }
   step.status = "running";
@@ -501,10 +501,10 @@ const childEnv = { active: 0, previousChild: undefined as string | undefined, pr
 
 function enterChildEnv(): () => void {
   if (childEnv.active === 0) {
-    childEnv.previousChild = process.env.PI_MESH_CHILD;
-    childEnv.previousDisabled = process.env.PI_MESH_DISABLED;
-    process.env.PI_MESH_CHILD = "1";
-    process.env.PI_MESH_DISABLED = "1";
+    childEnv.previousChild = process.env.PI_CHALIN_CHILD;
+    childEnv.previousDisabled = process.env.PI_CHALIN_DISABLED;
+    process.env.PI_CHALIN_CHILD = "1";
+    process.env.PI_CHALIN_DISABLED = "1";
   }
   childEnv.active += 1;
   let released = false;
@@ -513,10 +513,10 @@ function enterChildEnv(): () => void {
     released = true;
     childEnv.active = Math.max(0, childEnv.active - 1);
     if (childEnv.active > 0) return;
-    if (childEnv.previousChild === undefined) delete process.env.PI_MESH_CHILD;
-    else process.env.PI_MESH_CHILD = childEnv.previousChild;
-    if (childEnv.previousDisabled === undefined) delete process.env.PI_MESH_DISABLED;
-    else process.env.PI_MESH_DISABLED = childEnv.previousDisabled;
+    if (childEnv.previousChild === undefined) delete process.env.PI_CHALIN_CHILD;
+    else process.env.PI_CHALIN_CHILD = childEnv.previousChild;
+    if (childEnv.previousDisabled === undefined) delete process.env.PI_CHALIN_DISABLED;
+    else process.env.PI_CHALIN_DISABLED = childEnv.previousDisabled;
     childEnv.previousChild = undefined;
     childEnv.previousDisabled = undefined;
   };
@@ -562,7 +562,7 @@ export function createRunState(route: RouteDecision, cwd: string): RunState {
     status: "running",
     startedAt: new Date().toISOString(),
     steps: route.plan ? planSteps(route.plan) : [],
-    logsPath: path.join(resolveMeshPaths({ cwd }).projectRoot, ".pi-mesh", "runs", `${id}.json`),
+    logsPath: path.join(resolveMeshPaths({ cwd }).projectRoot, ".pi-chalin", "runs", `${id}.json`),
     warnings: [],
     budgetPreflight: estimateBudgetPreflight({
       task: route.reason,
@@ -577,7 +577,7 @@ export function createRunState(route: RouteDecision, cwd: string): RunState {
 export function prepareRunForResume(run: RunState): RunState {
   run.status = "running";
   run.endedAt = undefined;
-  run.warnings = [...run.warnings, `Resumed paused pi-mesh run ${run.id}.`];
+  run.warnings = [...run.warnings, `Resumed paused pi-chalin run ${run.id}.`];
   for (const step of run.steps) {
     if (isUsableStepHandoff(step) || step.status === "failed") continue;
     step.status = "pending";
@@ -597,7 +597,7 @@ function aggregateCompletedHandoffBefore(steps: RunStepState[], endIndex: number
 }
 
 export function loadResumableRunState(options: MeshPathsOptions & { runId?: string }): RunState | undefined {
-  const runsDir = path.join(resolveMeshPaths(options).projectRoot, ".pi-mesh", "runs");
+  const runsDir = path.join(resolveMeshPaths(options).projectRoot, ".pi-chalin", "runs");
   if (!fs.existsSync(runsDir)) return undefined;
   const files = fs.readdirSync(runsDir)
     .filter((name) => name.endsWith(".json"))
@@ -785,7 +785,7 @@ function mockMemoryCandidates(step: RunStepState, snapshotSummary: string): stri
 }
 
 async function maybeMockDelay(signal?: AbortSignal): Promise<void> {
-  const parsed = Number(process.env.PI_MESH_MOCK_STEP_DELAY_MS);
+  const parsed = Number(process.env.PI_CHALIN_MOCK_STEP_DELAY_MS);
   if (!Number.isFinite(parsed) || parsed <= 0) return;
   await abortableSleep(parsed, signal);
 }
@@ -833,11 +833,11 @@ function persistRun(run: RunState): void {
 }
 
 function shouldUseMockSdkFallback(context: WorkerRunnerContext): boolean {
-  return process.env.PI_MESH_RUNNER === "mock" || process.env.PI_OFFLINE === "1" || !context.extensionContext?.model;
+  return process.env.PI_CHALIN_RUNNER === "mock" || process.env.PI_OFFLINE === "1" || !context.extensionContext?.model;
 }
 
 function mockFallbackReason(context: WorkerRunnerContext): string {
-  if (process.env.PI_MESH_RUNNER === "mock") return "SDK runner fallback: PI_MESH_RUNNER=mock requested.";
+  if (process.env.PI_CHALIN_RUNNER === "mock") return "SDK runner fallback: PI_CHALIN_RUNNER=mock requested.";
   if (process.env.PI_OFFLINE === "1") return "SDK runner fallback: PI_OFFLINE=1 avoids model calls during smoke tests.";
   if (!context.extensionContext?.model) return "SDK runner fallback: no active Pi model is available in extension context.";
   return "SDK runner fallback requested.";
@@ -875,7 +875,7 @@ function sessionActivitySignature(messages: unknown[], policy: ChildToolPolicy):
 }
 
 function sdkStepIdleTimeoutMs(): number {
-  const parsed = Number(process.env.PI_MESH_SDK_STEP_IDLE_TIMEOUT_MS ?? process.env.PI_MESH_SDK_STEP_TIMEOUT_MS);
+  const parsed = Number(process.env.PI_CHALIN_SDK_STEP_IDLE_TIMEOUT_MS ?? process.env.PI_CHALIN_SDK_STEP_TIMEOUT_MS);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 180_000;
 }
 
@@ -904,7 +904,7 @@ export async function withIdleTimeout<T>(
       options.signal?.removeEventListener("abort", onAbort);
       callback();
     };
-    const onAbort = () => finish(() => reject(new Error("pi-mesh run stopped by user.")));
+    const onAbort = () => finish(() => reject(new Error("pi-chalin run stopped by user.")));
     const timer = setInterval(() => {
       const signature = options.pollActivitySignature?.();
       if (signature !== undefined && signature !== lastSignature) {
@@ -947,7 +947,7 @@ function markRunAborted(run: RunState, context: WorkerRunnerContext, reason: str
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw new Error("pi-mesh run stopped by user.");
+  if (signal?.aborted) throw new Error("pi-chalin run stopped by user.");
 }
 
 function isAbortError(error: unknown): boolean {
@@ -962,7 +962,7 @@ function errorMessage(error: unknown): string {
 function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
-      reject(new Error("pi-mesh run stopped by user."));
+      reject(new Error("pi-chalin run stopped by user."));
       return;
     }
     const timeout = setTimeout(() => {
@@ -971,7 +971,7 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
     }, ms);
     const onAbort = () => {
       clearTimeout(timeout);
-      reject(new Error("pi-mesh run stopped by user."));
+      reject(new Error("pi-chalin run stopped by user."));
     };
     signal?.addEventListener("abort", onAbort, { once: true });
   });
@@ -990,12 +990,12 @@ export function buildSdkPrompt(agent: AgentDefinition | undefined, task: string,
   return [
     compactAgentInstructions(agent),
     "",
-    "## pi-mesh concern/capability policy",
+    "## pi-chalin concern/capability policy",
     `- Concern: ${agent?.concern ?? "delegation"}.`,
     `- Capabilities: ${capabilities.join(", ") || "inspect-files, search-files"}.`,
     "- Runtime tools are derived from capabilities; do not assume a tool exists because another agent has it.",
     "",
-    "## pi-mesh child tool policy",
+    "## pi-chalin child tool policy",
     "- Use Pi-native tools directly: read/find/grep/ls for inspection, edit for minimal line-level changes.",
     "- Use mesh_project_discovery first for broad project understanding. It is a raw file index, not semantic truth; read evidence files before making claims.",
     "- Use mesh_project_snapshot only as legacy compact stack/git context or for branch-summary reconnaissance; never treat it as proof of architecture.",
@@ -1004,7 +1004,7 @@ export function buildSdkPrompt(agent: AgentDefinition | undefined, task: string,
     "- Never modify files through bash. No redirection, tee, sed -i, rm/cp/mv/mkdir/touch/chmod, or generated scripts.",
     "- For existing files, never rewrite the whole file when a targeted edit is possible. Use edit with the smallest exact old/new block. Use write only for new files.",
     "",
-    "## pi-mesh runtime budget",
+    "## pi-chalin runtime budget",
     `- Tool budget profile: ${profile}. Max tool calls for this child turn: ${maxTools}.`,
     `- Budget caps: ${budgetPolicy.caps.maxSeconds}s, $${budgetPolicy.caps.maxUsd}, ${budgetPolicy.caps.maxTurns} turns, ${budgetPolicy.caps.maxOutputChars} output chars, ${budgetPolicy.caps.maxReadBytes} read bytes, ${budgetPolicy.caps.maxFilesTouched} files touched, ${budgetPolicy.caps.maxRetriesPerTool} retries/tool.`,
     "- Stay bounded. Do not perform an exhaustive repository crawl unless the task explicitly requires it.",
@@ -1073,7 +1073,7 @@ function compactAgentInstructions(agent: AgentDefinition | undefined): string | 
     .filter((line) => line.startsWith("-"))
     .slice(0, 4);
   return [
-    `You are pi-mesh ${agent.name}: ${agent.description}`,
+    `You are pi-chalin ${agent.name}: ${agent.description}`,
     rules.length ? "Role rules:" : undefined,
     ...rules,
   ].filter(Boolean).join("\n");
@@ -1146,13 +1146,13 @@ export function childToolNames(agent: AgentDefinition | undefined, task = "", ne
 }
 
 function toolBudgetForAgent(agent: AgentDefinition | undefined, fallbackName?: string): number {
-  const env = Number(process.env.PI_MESH_CHILD_TOOL_BUDGET);
+  const env = Number(process.env.PI_CHALIN_CHILD_TOOL_BUDGET);
   if (Number.isFinite(env) && env > 0) return Math.floor(env);
   return baseToolBudget(agent, fallbackName);
 }
 
 export function toolBudgetForStep(agent: AgentDefinition | undefined, step: Pick<RunStepState, "agent" | "task" | "budget">, routeKind: RouteKind = "single-agent"): number {
-  const env = Number(process.env.PI_MESH_CHILD_TOOL_BUDGET);
+  const env = Number(process.env.PI_CHALIN_CHILD_TOOL_BUDGET);
   if (Number.isFinite(env) && env > 0) return Math.floor(env);
   return policyForStep(agent, step, routeKind).caps.maxToolCalls;
 }
@@ -1240,22 +1240,22 @@ function isHandoffGapReadMode(agent: AgentDefinition | undefined, task: string, 
 }
 
 function synthesisToolCallLimit(): number {
-  const parsed = Number(process.env.PI_MESH_SYNTHESIS_TOOL_LIMIT);
+  const parsed = Number(process.env.PI_CHALIN_SYNTHESIS_TOOL_LIMIT);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 35;
 }
 
 function handoffReviewToolCallLimit(): number {
-  const parsed = Number(process.env.PI_MESH_REVIEW_TOOL_LIMIT);
+  const parsed = Number(process.env.PI_CHALIN_REVIEW_TOOL_LIMIT);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 12;
 }
 
 function synthesisGapReadLimit(): number {
-  const parsed = Number(process.env.PI_MESH_SYNTHESIS_GAP_READ_LIMIT);
+  const parsed = Number(process.env.PI_CHALIN_SYNTHESIS_GAP_READ_LIMIT);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 12;
 }
 
 function synthesisCrossStepDuplicateReadLimit(agent?: AgentDefinition): number {
-  const parsed = Number(process.env.PI_MESH_SYNTHESIS_CROSS_READ_LIMIT);
+  const parsed = Number(process.env.PI_CHALIN_SYNTHESIS_CROSS_READ_LIMIT);
   return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : agent?.concern === "review" ? 1 : 3;
 }
 
@@ -1307,7 +1307,7 @@ export function resolveAgentModel(agent: AgentDefinition | undefined, agentName:
   const candidates: Array<{ source: ModelResolutionAttempt["source"]; ref?: string }> = [
     { source: "session-override", ref: context.modelOverrides?.[`${agent?.scope ?? "built-in"}/${agentName}`] ?? context.modelOverrides?.[agentName] },
     { source: "agent", ref: agent?.model && agent.model !== "inherit" ? agent.model : undefined },
-    { source: "tier", ref: context.modelOverrides?.[`tier/${tier}`] ?? process.env[`PI_MESH_${tier.toUpperCase()}_MODEL`] },
+    { source: "tier", ref: context.modelOverrides?.[`tier/${tier}`] ?? process.env[`PI_CHALIN_${tier.toUpperCase()}_MODEL`] },
   ];
   const attempts: ModelResolutionAttempt[] = [];
 
@@ -1633,17 +1633,17 @@ function truncateText(text: string, max: number): string {
 }
 
 function handoffBudgetChars(agent?: string): number {
-  const parsed = Number(process.env.PI_MESH_HANDOFF_BUDGET_CHARS);
+  const parsed = Number(process.env.PI_CHALIN_HANDOFF_BUDGET_CHARS);
   if (Number.isFinite(parsed) && parsed > 200) return parsed;
   return agent === "scout" || agent === "context-builder" ? 2200 : 1200;
 }
 
 function rawOutputBudgetChars(): number {
-  const parsed = Number(process.env.PI_MESH_RAW_OUTPUT_BUDGET_CHARS);
+  const parsed = Number(process.env.PI_CHALIN_RAW_OUTPUT_BUDGET_CHARS);
   return Number.isFinite(parsed) && parsed > 500 ? parsed : 6000;
 }
 
 function memoryCandidateBudget(): number {
-  const parsed = Number(process.env.PI_MESH_MEMORY_CANDIDATE_BUDGET);
+  const parsed = Number(process.env.PI_CHALIN_MEMORY_CANDIDATE_BUDGET);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 3;
 }

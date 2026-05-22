@@ -19,6 +19,12 @@ export const MAX_WORKFLOW_RUNS = 5;
 export const DEFAULT_MAX_INTERACTIVE_SDK_WALL_MS = 120_000;
 export const DEFAULT_WORKFLOW_IDLE_TIMEOUT_MS = 25_000;
 
+interface WorkflowRunOptions {
+  judgeMode: WorkflowJudgeMode;
+  model?: string;
+  thinking: string;
+}
+
 interface WorkflowEfficiencyDiagnostics {
   jsonEvents: number;
   toolEvents: number;
@@ -131,18 +137,51 @@ interface WorkflowRegressionGates {
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const extensionPath = path.join(repoRoot, "src", "index.ts");
 const defaultMatrixPath = path.join(repoRoot, "evals", "results", "workflow-quality-matrix.jsonl");
+const workflowPresetArgs = {
+  matrix: {
+    mode: "sdk",
+    case: "all-with-holdout",
+    variant: "both",
+    runs: "3",
+    timeoutMs: "60000",
+    allowMulti: "1",
+    allowLong: "1",
+    gates: "1",
+    model: "openai-codex/gpt-5.3-codex-spark",
+    thinking: "low",
+    matrixPath: "evals/results/workflow-quality-full-matrix.jsonl",
+  },
+  community: {
+    mode: "sdk",
+    case: "community",
+    variant: "both",
+    runs: "3",
+    timeoutMs: "60000",
+    allowMulti: "1",
+    allowLong: "1",
+    gates: "1",
+    model: "openai-codex/gpt-5.3-codex-spark",
+    thinking: "low",
+    matrixPath: "evals/results/workflow-quality-community-matrix.jsonl",
+  },
+} satisfies Record<string, Record<string, string>>;
 
 if (isMain()) await main();
 
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
+  const args = resolveWorkflowArgs(parseArgs(process.argv.slice(2)));
   const startedAt = new Date().toISOString();
   const mode = args.mode ?? "fixtures";
   const timeoutMs = resolveWorkflowTimeoutMs(args.timeoutMs);
-  const runs = resolveWorkflowRunCount(args.runs ?? process.env.PI_MESH_WORKFLOW_RUNS);
+  const runs = resolveWorkflowRunCount(args.runs ?? process.env.PI_CHALIN_WORKFLOW_RUNS);
   const caseIds = resolveCaseIds(args.case);
   const variants = resolveVariants(args.variant);
-  const judgeMode = resolveJudgeMode(args.judge ?? process.env.PI_MESH_WORKFLOW_JUDGE ?? "none");
+  const judgeMode = resolveJudgeMode(args.judge ?? process.env.PI_CHALIN_WORKFLOW_JUDGE ?? "none");
+  const runOptions: WorkflowRunOptions = {
+    judgeMode,
+    model: args.model ?? process.env.PI_CHALIN_WORKFLOW_MODEL,
+    thinking: args.thinking ?? process.env.PI_CHALIN_WORKFLOW_THINKING ?? "minimal",
+  };
   const outputs: WorkflowRunOutput[] = [];
 
   if (mode === "fixtures") {
@@ -152,18 +191,18 @@ async function main(): Promise<void> {
       const workspace = scoreWorkflowWorkspace(fixture.cwd, fixture.case, { finalText, durationMs: 0 });
       const trace = gradePiTrace(finalText, { variant: "simple", finalText, promptKind: "generic", durationMs: 0 });
       outputs.push({ variant: "simple", runIndex: 1, cwd: fixture.cwd, stdout: finalText, stderr: "", finalText, status: 0, signal: null, durationMs: 0, workspace, trace, diagnostics: emptyDiagnostics() });
-      if (process.env.PI_MESH_WORKFLOW_KEEP_FIXTURE !== "1") fs.rmSync(fixture.cwd, { recursive: true, force: true });
+      if (process.env.PI_CHALIN_WORKFLOW_KEEP_FIXTURE !== "1") fs.rmSync(fixture.cwd, { recursive: true, force: true });
     }
   } else if (mode === "sdk") {
-    if ((caseIds.length > 1 || runs > 1) && process.env.PI_MESH_WORKFLOW_ALLOW_MULTI_SDK !== "1") {
-      throw new Error("SDK mode runs one case/run by default to avoid long waits. Pass --case=<id> --runs=1, or set PI_MESH_WORKFLOW_ALLOW_MULTI_SDK=1 knowingly.");
+    if ((caseIds.length > 1 || runs > 1) && !sdkMultiAllowed(args)) {
+      throw new Error("SDK mode runs one case/run by default to avoid long waits. Pass --case=<id> --runs=1, or set --allowMulti=1 knowingly.");
     }
     assertSdkRunBudget({ caseIds, variants, runs, timeoutMs, args });
     for (const caseId of caseIds) {
       for (let runIndex = 1; runIndex <= runs; runIndex += 1) {
         for (const variant of variants) {
           console.log(`progress: ${variant} ${caseId}#${runIndex} start timeout=${timeoutMs}ms`);
-          const output = await runSdkCaseWithRetries(getWorkflowEvalCase(caseId), variant, timeoutMs, runIndex, judgeMode);
+          const output = await runSdkCaseWithRetries(getWorkflowEvalCase(caseId), variant, timeoutMs, runIndex, runOptions);
           const rowPass = outputPass(output);
           const retained = output.retainedFixturePath ? ` retained=${output.retainedFixturePath}` : "";
           console.log(`progress: ${variant} ${caseId}#${runIndex} done workspace=${output.workspace.score} trace=${output.trace.score} duration=${output.durationMs}ms pass=${rowPass}${retained}`);
@@ -202,7 +241,7 @@ async function main(): Promise<void> {
     runs,
     judgeMode,
     git: gitMetadata(),
-    model: process.env.PI_MESH_WORKFLOW_MODEL ?? "default-pi-model",
+    model: runOptions.model ?? "default-pi-model",
     regressionGates,
     pass,
     grouped,
@@ -211,12 +250,12 @@ async function main(): Promise<void> {
     outputs: outputs.map((item) => compactOutput(item)),
   };
 
-  const reportDir = path.join(repoRoot, ".pi-mesh", "evals");
+  const reportDir = path.join(repoRoot, ".pi-chalin", "evals");
   fs.mkdirSync(reportDir, { recursive: true });
   const reportPath = writeWorkflowReport(reportDir, report);
   if (mode === "sdk" && shouldPersistMatrix(args)) appendMatrixRows(args.matrixPath ? path.resolve(args.matrixPath) : defaultMatrixPath, report);
 
-  console.log(`pi-mesh workflow quality: ${pass ? "PASS" : "FAIL"}`);
+  console.log(`pi-chalin workflow quality: ${pass ? "PASS" : "FAIL"}`);
   for (const item of outputs) {
     const retained = item.retainedFixturePath ? ` retained=${item.retainedFixturePath}` : "";
     if (mode === "fixtures") {
@@ -237,7 +276,14 @@ async function main(): Promise<void> {
   }
   console.log(`report: ${reportPath}`);
   if (mode === "sdk" && shouldPersistMatrix(args)) console.log(`matrix: ${args.matrixPath ? path.resolve(args.matrixPath) : defaultMatrixPath}`);
-  if (!pass && process.env.PI_MESH_WORKFLOW_ALLOW_FAIL !== "1") process.exit(1);
+  if (!pass && process.env.PI_CHALIN_WORKFLOW_ALLOW_FAIL !== "1") process.exit(1);
+}
+
+export function resolveWorkflowArgs(args: Record<string, string>): Record<string, string> {
+  if (!args.preset) return args;
+  const preset = workflowPresetArgs[args.preset as keyof typeof workflowPresetArgs];
+  if (!preset) throw new Error(`Unsupported workflow preset: ${args.preset}`);
+  return { ...preset, ...args };
 }
 
 export function resolveWorkflowTimeoutMs(value: string | undefined): number {
@@ -282,19 +328,23 @@ export function shouldRunWorkflowJudge(output: Pick<WorkflowRunOutput, "workspac
 }
 
 export function workflowRegressionGatesEnabled(args: Record<string, string>): boolean {
-  return args.gates === "1" || process.env.PI_MESH_WORKFLOW_GATES === "1";
+  return args.gates === "1" || process.env.PI_CHALIN_WORKFLOW_GATES === "1";
+}
+
+function sdkMultiAllowed(args: Record<string, string>): boolean {
+  return args.allowMulti === "1" || process.env.PI_CHALIN_WORKFLOW_ALLOW_MULTI_SDK === "1";
 }
 
 export function assertSdkRunBudget(options: { caseIds: string[]; variants: WorkflowVariant[]; runs: number; timeoutMs: number; args: Record<string, string> }): void {
-  if (options.args.allowLong === "1" || process.env.PI_MESH_WORKFLOW_ALLOW_LONG_SDK === "1") return;
+  if (options.args.allowLong === "1" || process.env.PI_CHALIN_WORKFLOW_ALLOW_LONG_SDK === "1") return;
   const totalRuns = options.caseIds.length * options.variants.length * options.runs;
   const estimatedWorstCaseMs = totalRuns * options.timeoutMs;
-  const maxWallMs = Number(options.args.maxWallMs ?? process.env.PI_MESH_WORKFLOW_MAX_WALL_MS ?? DEFAULT_MAX_INTERACTIVE_SDK_WALL_MS);
+  const maxWallMs = Number(options.args.maxWallMs ?? process.env.PI_CHALIN_WORKFLOW_MAX_WALL_MS ?? DEFAULT_MAX_INTERACTIVE_SDK_WALL_MS);
   if (estimatedWorstCaseMs <= maxWallMs) return;
   throw new Error([
     `Refusing long SDK matrix by default: ${options.caseIds.length} case(s) × ${options.variants.length} variant(s) × ${options.runs} run(s) = ${totalRuns} SDK run(s).`,
     `Worst-case budget is ${estimatedWorstCaseMs}ms with timeoutMs=${options.timeoutMs}, above maxWallMs=${maxWallMs}.`,
-    "Shard the matrix into smaller --case groups, lower --runs/--timeoutMs, or set PI_MESH_WORKFLOW_ALLOW_LONG_SDK=1/--allowLong=1 intentionally.",
+    "Shard the matrix into smaller --case groups, lower --runs/--timeoutMs, or set PI_CHALIN_WORKFLOW_ALLOW_LONG_SDK=1/--allowLong=1 intentionally.",
   ].join(" "));
 }
 
@@ -364,8 +414,8 @@ export function evaluateWorkflowRegressionGates(outputs: WorkflowRunOutput[], gr
 }
 
 export function shouldRetainWorkflowFixture(output: Pick<WorkflowRunOutput, "workspace" | "trace" | "diagnostics" | "judge">, env: NodeJS.ProcessEnv = process.env): boolean {
-  if (env.PI_MESH_WORKFLOW_KEEP_FIXTURE === "1") return true;
-  if (env.PI_MESH_WORKFLOW_KEEP_FAILED_FIXTURE === "0") return false;
+  if (env.PI_CHALIN_WORKFLOW_KEEP_FIXTURE === "1") return true;
+  if (env.PI_CHALIN_WORKFLOW_KEEP_FAILED_FIXTURE === "0") return false;
   return !outputPass(output as WorkflowRunOutput);
 }
 
@@ -492,7 +542,7 @@ function summarizeVariant(items: WorkflowRunOutput[]): VariantStats | undefined 
   };
 }
 
-async function runSdkCase(evalCase: WorkflowEvalCase, variant: WorkflowVariant, timeoutMs: number, runIndex: number, judgeMode: WorkflowJudgeMode): Promise<WorkflowRunOutput> {
+async function runSdkCase(evalCase: WorkflowEvalCase, variant: WorkflowVariant, timeoutMs: number, runIndex: number, options: WorkflowRunOptions): Promise<WorkflowRunOutput> {
   const fixture = createWorkflowFixture(evalCase.id, { promptVariantIndex: runIndex - 1 });
   const started = Date.now();
   const args = [
@@ -506,9 +556,9 @@ async function runSdkCase(evalCase: WorkflowEvalCase, variant: WorkflowVariant, 
     variant === "mesh" ? "read,bash,grep,find,ls,edit,write,mesh_route" : "read,bash,grep,find,ls,edit,write",
   ];
   if (variant === "mesh") args.push("-e", extensionPath);
-  const model = process.env.PI_MESH_WORKFLOW_MODEL;
+  const model = options.model;
   if (model) args.push("--model", model);
-  args.push("--thinking", process.env.PI_MESH_WORKFLOW_THINKING ?? "minimal", fixture.prompt);
+  args.push("--thinking", options.thinking, fixture.prompt);
   const run = await runPi(args, fixture.cwd, timeoutMs, {
     observeWorkspacePass: shouldRequireMeshRoute(evalCase) ? undefined : () => scoreWorkflowWorkspace(fixture.cwd, evalCase, { finalText: "", validateTests: false }).pass,
   });
@@ -521,19 +571,19 @@ async function runSdkCase(evalCase: WorkflowEvalCase, variant: WorkflowVariant, 
   const trace = gradePiTrace(run.stdout, { variant: variant as TraceVariant, finalText, promptKind: "generic", requireMeshRoute: shouldRequireMeshRoute(evalCase), status: run.status, signal: run.signal, timeoutReason: run.timeoutReason, durationMs, maxDurationMs: timeoutMs });
   const diagnostics = workflowDiagnostics(run.stdout, run.stderr, run.timeToWorkspaceValidMs, run.timeToVerificationPassMs, run.timeToFinalAnswerMs, finalText.length === 0, run.objectiveStopReason, run.timeoutReason);
   const output: WorkflowRunOutput = { variant, runIndex, cwd: fixture.cwd, stdout: run.stdout, stderr: run.stderr, finalText, status: run.status, signal: run.signal, timeoutReason: run.timeoutReason, durationMs, workspace, trace, diagnostics, promptVariantIndex: fixture.promptVariantIndex, promptVariantCount: fixture.promptVariantCount };
-  if (judgeMode === "pi" || (judgeMode === "auto" && shouldRunWorkflowJudge(output))) output.judge = await runWorkflowJudge(output, evalCase);
-  else if (judgeMode === "auto") output.judge = { pass: true, score: 100, verdict: "Judge skipped; deterministic result was unambiguous.", critical: [], warnings: [], skipped: true, reason: "deterministic-unambiguous" };
+  if (options.judgeMode === "pi" || (options.judgeMode === "auto" && shouldRunWorkflowJudge(output))) output.judge = await runWorkflowJudge(output, evalCase);
+  else if (options.judgeMode === "auto") output.judge = { pass: true, score: 100, verdict: "Judge skipped; deterministic result was unambiguous.", critical: [], warnings: [], skipped: true, reason: "deterministic-unambiguous" };
   if (shouldRetainWorkflowFixture(output)) output.retainedFixturePath = fixture.cwd;
   else fs.rmSync(fixture.cwd, { recursive: true, force: true });
   return output;
 }
 
-async function runSdkCaseWithRetries(evalCase: WorkflowEvalCase, variant: WorkflowVariant, timeoutMs: number, runIndex: number, judgeMode: WorkflowJudgeMode): Promise<WorkflowRunOutput> {
-  const maxRetries = resolveWorkflowInfraRetries(process.env.PI_MESH_WORKFLOW_INFRA_RETRIES);
+async function runSdkCaseWithRetries(evalCase: WorkflowEvalCase, variant: WorkflowVariant, timeoutMs: number, runIndex: number, options: WorkflowRunOptions): Promise<WorkflowRunOutput> {
+  const maxRetries = resolveWorkflowInfraRetries(process.env.PI_CHALIN_WORKFLOW_INFRA_RETRIES);
   const failedAttempts: WorkflowRunOutput[] = [];
 
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-    const output = await runSdkCase(evalCase, variant, timeoutMs, runIndex, judgeMode);
+    const output = await runSdkCase(evalCase, variant, timeoutMs, runIndex, options);
     const retryable = shouldRetryWorkflowRun(output);
     if (!retryable || attempt === maxRetries) return withRetryDiagnostics(output, failedAttempts);
     failedAttempts.push(output);
@@ -579,8 +629,8 @@ function shouldRequireMeshRoute(_evalCase: WorkflowEvalCase): boolean {
 }
 
 async function runWorkflowJudge(output: WorkflowRunOutput, evalCase: WorkflowEvalCase): Promise<WorkflowJudgeVerdict> {
-  const model = process.env.PI_MESH_WORKFLOW_JUDGE_MODEL ?? DEFAULT_JUDGE_MODEL;
-  const timeoutMs = resolveJudgeTimeoutMs(process.env.PI_MESH_WORKFLOW_JUDGE_TIMEOUT_MS);
+  const model = process.env.PI_CHALIN_WORKFLOW_JUDGE_MODEL ?? DEFAULT_JUDGE_MODEL;
+  const timeoutMs = resolveJudgeTimeoutMs(process.env.PI_CHALIN_WORKFLOW_JUDGE_TIMEOUT_MS);
   const prompt = buildWorkflowJudgePrompt(output, evalCase);
   try {
     const text = await runPiJsonPrompt(prompt, { cwd: repoRoot, model, timeoutMs });
@@ -600,7 +650,7 @@ async function runWorkflowJudge(output: WorkflowRunOutput, evalCase: WorkflowEva
 function runPi(args: string[], cwd: string, timeoutMs: number, options: { observeWorkspacePass?: () => boolean } = {}): Promise<{ stdout: string; stderr: string; status: number | null; signal: NodeJS.Signals | null; timeoutReason?: string; timeToWorkspaceValidMs?: number; timeToVerificationPassMs?: number; timeToFinalAnswerMs?: number; objectiveStopReason?: string }> {
   return new Promise((resolve, reject) => {
     const started = Date.now();
-    const idleTimeoutMs = resolveWorkflowIdleTimeoutMs(process.env.PI_MESH_WORKFLOW_IDLE_TIMEOUT_MS, timeoutMs);
+    const idleTimeoutMs = resolveWorkflowIdleTimeoutMs(process.env.PI_CHALIN_WORKFLOW_IDLE_TIMEOUT_MS, timeoutMs);
     let lastProgressAt = started;
     const child = spawn("pi", args, { cwd, stdio: ["ignore", "pipe", "pipe"], detached: true, env: { ...process.env, PI_TELEMETRY: "0" } });
     let stdout = "";
@@ -824,13 +874,13 @@ function compactOutput(item: WorkflowRunOutput): object {
 }
 
 export function shouldStoreFullWorkflowOutput(output: Pick<WorkflowRunOutput, "workspace" | "trace" | "diagnostics" | "judge">, env: NodeJS.ProcessEnv = process.env): boolean {
-  if (env.PI_MESH_WORKFLOW_STORE_FULL_OUTPUT === "1") return true;
-  if (env.PI_MESH_WORKFLOW_STORE_FAILED_OUTPUT === "0") return false;
+  if (env.PI_CHALIN_WORKFLOW_STORE_FULL_OUTPUT === "1") return true;
+  if (env.PI_CHALIN_WORKFLOW_STORE_FAILED_OUTPUT === "0") return false;
   return !outputPass(output as WorkflowRunOutput);
 }
 
 function shouldPersistMatrix(args: Record<string, string>): boolean {
-  return args.persistMatrix !== "0" && process.env.PI_MESH_WORKFLOW_PERSIST_MATRIX !== "0";
+  return args.persistMatrix !== "0" && process.env.PI_CHALIN_WORKFLOW_PERSIST_MATRIX !== "0";
 }
 
 function appendMatrixRows(matrixPath: string, report: { startedAt: string; finishedAt: string; mode: string; cases: string[]; variants: WorkflowVariant[]; runs: number; pass: boolean; grouped: WorkflowComparisonSummary[]; git: object; model: string; regressionGates: WorkflowRegressionGates; categorySummary?: unknown; failureUx?: unknown }): void {

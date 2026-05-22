@@ -180,7 +180,7 @@ export function summarizeToolUtility(input: ToolUtilityInput): ToolUtilityMetric
 export async function recordBudgetCheckpoint(store: ArtifactStore, featureId: string, step: RunStepState, reason: string): Promise<ArtifactCheckpoint> {
   await store.initFeature({
     featureId,
-    goal: `Continue budget-capped pi-mesh step ${step.agent}`,
+    goal: `Continue budget-capped pi-chalin step ${step.agent}`,
     chain: [step.agent],
     currentStep: step.task,
   });

@@ -64,30 +64,30 @@ interface EvalResult {
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const extensionPath = path.join(repoRoot, "src", "index.ts");
 const cli = parseCliArgs(process.argv.slice(2));
-const evalRunner = cli.runner ?? process.env.PI_MESH_EVAL_RUNNER ?? "mock";
+const evalRunner = cli.runner ?? process.env.PI_CHALIN_EVAL_RUNNER ?? "mock";
 const sdkRunner = evalRunner === "sdk";
-const timeoutMs = positiveInt(cli.timeoutMs ?? process.env.PI_MESH_EVAL_TIMEOUT_MS, sdkRunner ? 75_000 : 60_000);
-const startTimeoutMs = positiveInt(cli.startTimeoutMs ?? process.env.PI_MESH_EVAL_START_TIMEOUT_MS, timeoutMs);
-const idleTimeoutMs = positiveInt(cli.idleTimeoutMs ?? process.env.PI_MESH_EVAL_IDLE_TIMEOUT_MS, sdkRunner ? 30_000 : 30_000);
-const postMeshIdleTimeoutMs = positiveInt(cli.postMeshIdleTimeoutMs ?? process.env.PI_MESH_EVAL_POST_MESH_IDLE_TIMEOUT_MS, sdkRunner ? 8_000 : 5_000);
-const meshToolTimeoutMs = positiveInt(cli.meshToolTimeoutMs ?? process.env.PI_MESH_EVAL_MESH_TOOL_TIMEOUT_MS, sdkRunner ? 60_000 : 30_000);
+const timeoutMs = positiveInt(cli.timeoutMs ?? process.env.PI_CHALIN_EVAL_TIMEOUT_MS, sdkRunner ? 75_000 : 60_000);
+const startTimeoutMs = positiveInt(cli.startTimeoutMs ?? process.env.PI_CHALIN_EVAL_START_TIMEOUT_MS, timeoutMs);
+const idleTimeoutMs = positiveInt(cli.idleTimeoutMs ?? process.env.PI_CHALIN_EVAL_IDLE_TIMEOUT_MS, sdkRunner ? 30_000 : 30_000);
+const postMeshIdleTimeoutMs = positiveInt(cli.postMeshIdleTimeoutMs ?? process.env.PI_CHALIN_EVAL_POST_MESH_IDLE_TIMEOUT_MS, sdkRunner ? 8_000 : 5_000);
+const meshToolTimeoutMs = positiveInt(cli.meshToolTimeoutMs ?? process.env.PI_CHALIN_EVAL_MESH_TOOL_TIMEOUT_MS, sdkRunner ? 60_000 : 30_000);
 const thresholds = {
-  maxDurationMs: positiveInt(process.env.PI_MESH_EVAL_MAX_DURATION_MS, timeoutMs),
-  maxCombinedCost: positiveFloat(process.env.PI_MESH_EVAL_MAX_COMBINED_COST, sdkRunner ? 0.25 : Number.POSITIVE_INFINITY),
-  maxChildToolCalls: positiveInt(process.env.PI_MESH_EVAL_MAX_CHILD_TOOL_CALLS, sdkRunner ? 30 : Number.POSITIVE_INFINITY),
-  maxChildTokens: positiveInt(process.env.PI_MESH_EVAL_MAX_CHILD_TOKENS, sdkRunner ? 20_000 : Number.POSITIVE_INFINITY),
-  maxPolicyViolations: positiveInt(process.env.PI_MESH_EVAL_MAX_POLICY_VIOLATIONS, 0),
-  maxDuplicateReads: positiveInt(process.env.PI_MESH_EVAL_MAX_DUPLICATE_READS, 0),
-  maxBuiltInsBeforeMesh: positiveInt(process.env.PI_MESH_EVAL_MAX_BUILTINS_BEFORE_MESH, 0),
+  maxDurationMs: positiveInt(process.env.PI_CHALIN_EVAL_MAX_DURATION_MS, timeoutMs),
+  maxCombinedCost: positiveFloat(process.env.PI_CHALIN_EVAL_MAX_COMBINED_COST, sdkRunner ? 0.25 : Number.POSITIVE_INFINITY),
+  maxChildToolCalls: positiveInt(process.env.PI_CHALIN_EVAL_MAX_CHILD_TOOL_CALLS, sdkRunner ? 30 : Number.POSITIVE_INFINITY),
+  maxChildTokens: positiveInt(process.env.PI_CHALIN_EVAL_MAX_CHILD_TOKENS, sdkRunner ? 20_000 : Number.POSITIVE_INFINITY),
+  maxPolicyViolations: positiveInt(process.env.PI_CHALIN_EVAL_MAX_POLICY_VIOLATIONS, 0),
+  maxDuplicateReads: positiveInt(process.env.PI_CHALIN_EVAL_MAX_DUPLICATE_READS, 0),
+  maxBuiltInsBeforeMesh: positiveInt(process.env.PI_CHALIN_EVAL_MAX_BUILTINS_BEFORE_MESH, 0),
 };
-const limit = positiveInt(cli.limit ?? process.env.PI_MESH_EVAL_LIMIT, ORCHESTRATION_EVAL_CASES.length);
+const limit = positiveInt(cli.limit ?? process.env.PI_CHALIN_EVAL_LIMIT, ORCHESTRATION_EVAL_CASES.length);
 const selected = selectCases(ORCHESTRATION_EVAL_CASES).slice(0, limit);
 const fixture = makeFixtureRepo();
 const startedAt = new Date().toISOString();
 const results: EvalResult[] = [];
 
 for (const testCase of selected) {
-  console.log(`pi-mesh orchestration eval: ${testCase.id}…`);
+  console.log(`pi-chalin orchestration eval: ${testCase.id}…`);
   const result = await runCase(testCase);
   results.push(result);
   console.log(`${result.pass ? "✓" : "✗"} ${testCase.id} · ${result.actualDecision}/${result.actualTopology} · ${result.durationMs}ms`);
@@ -112,14 +112,14 @@ const report = {
   results,
 };
 
-const reportDir = path.join(repoRoot, ".pi-mesh", "evals");
+const reportDir = path.join(repoRoot, ".pi-chalin", "evals");
 fs.mkdirSync(reportDir, { recursive: true });
 const reportPath = path.join(reportDir, `orchestration-${stamp(startedAt)}.json`);
 fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf-8");
 
 printReport(reportPath, results);
 
-if (failed > 0 && process.env.PI_MESH_EVAL_ALLOW_FAIL !== "1") process.exit(1);
+if (failed > 0 && process.env.PI_CHALIN_EVAL_ALLOW_FAIL !== "1") process.exit(1);
 
 async function runCase(testCase: MeshOrchestrationEvalCase): Promise<EvalResult> {
   const started = Date.now();
@@ -135,9 +135,9 @@ async function runCase(testCase: MeshOrchestrationEvalCase): Promise<EvalResult>
     "-e",
     extensionPath,
   ];
-  const model = process.env.PI_MESH_EVAL_MODEL;
+  const model = process.env.PI_CHALIN_EVAL_MODEL;
   if (model) args.push("--model", model);
-  const thinking = process.env.PI_MESH_EVAL_THINKING ?? "minimal";
+  const thinking = process.env.PI_CHALIN_EVAL_THINKING ?? "minimal";
   if (thinking) args.push("--thinking", thinking);
   args.push(testCase.prompt);
 
@@ -187,8 +187,8 @@ function runPi(args: string[]): Promise<{ stdout: string; stderr: string; status
       detached: true,
       env: {
       ...process.env,
-      PI_MESH_RUNNER: evalRunner,
-      PI_MESH_MOCK_STEP_DELAY_MS: "0",
+      PI_CHALIN_RUNNER: evalRunner,
+      PI_CHALIN_MOCK_STEP_DELAY_MS: "0",
       PI_TELEMETRY: "0",
     },
   });
@@ -251,7 +251,7 @@ function runPi(args: string[]): Promise<{ stdout: string; stderr: string; status
       if (!meshToolStartedAt && /\"(?:name|toolName)\":\"mesh_route\"|Mesh workflow:/i.test(recent)) {
         meshToolStartedAt = Date.now();
       }
-      if (/\"role\":\"toolResult\"[\s\S]*\"toolName\":\"mesh_route\"|\"toolName\":\"mesh_route\"[\s\S]*\"role\":\"toolResult\"|\"type\":\"tool_execution_end\"[\s\S]*\"toolName\":\"mesh_route\"|pi-mesh completed:/i.test(recent)) {
+      if (/\"role\":\"toolResult\"[\s\S]*\"toolName\":\"mesh_route\"|\"toolName\":\"mesh_route\"[\s\S]*\"role\":\"toolResult\"|\"type\":\"tool_execution_end\"[\s\S]*\"toolName\":\"mesh_route\"|pi-chalin completed:/i.test(recent)) {
         sawMeshResult = true;
         finishAfterMeshResult();
       }
@@ -360,28 +360,28 @@ function parseCliArgs(args: string[]): {
 }
 
 function selectCases(cases: MeshOrchestrationEvalCase[]): MeshOrchestrationEvalCase[] {
-  const ids = process.env.PI_MESH_EVAL_CASES?.split(",").map((id) => id.trim()).filter(Boolean);
+  const ids = process.env.PI_CHALIN_EVAL_CASES?.split(",").map((id) => id.trim()).filter(Boolean);
   if (!ids?.length) return cases;
   const allowed = new Set(ids);
   return cases.filter((testCase) => allowed.has(testCase.id));
 }
 
 function makeFixtureRepo(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-mesh-eval-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-chalin-eval-"));
   fs.mkdirSync(path.join(dir, "src", "auth"), { recursive: true });
   fs.mkdirSync(path.join(dir, "components"), { recursive: true });
   fs.mkdirSync(path.join(dir, "cmd", "api"), { recursive: true });
   fs.mkdirSync(path.join(dir, "internal", "auth"), { recursive: true });
   fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ scripts: { test: "vitest run" }, dependencies: { vue: "^3.5.0", nuxt: "^3.15.0" }, devDependencies: { vitest: "^2.0.0" } }, null, 2));
   fs.writeFileSync(path.join(dir, "go.mod"), "module example.com/eval\n\ngo 1.24\n");
-  fs.writeFileSync(path.join(dir, "README.md"), "# Eval fixture\n\nSmall Nuxt/Vue project used by pi-mesh orchestration evals.\n");
+  fs.writeFileSync(path.join(dir, "README.md"), "# Eval fixture\n\nSmall Nuxt/Vue project used by pi-chalin orchestration evals.\n");
   fs.writeFileSync(path.join(dir, "src", "auth", "keycloak.ts"), "export function refreshToken(url: string) { return `${url}/token`; }\n");
   fs.writeFileSync(path.join(dir, "components", "LegacyWidget.vue"), "<script>export default { name: 'LegacyWidget', data: () => ({ open: false }) }</script>\n<template><button>Legacy</button></template>\n");
   fs.writeFileSync(path.join(dir, "cmd", "api", "main.go"), "package main\n\nfunc main() {}\n");
   fs.writeFileSync(path.join(dir, "internal", "auth", "refresh.go"), "package auth\n\nfunc RefreshURL(base string) string { return base + \"/token\" }\n");
   git(dir, ["init"]);
-  git(dir, ["config", "user.email", "pi-mesh-eval@example.com"]);
-  git(dir, ["config", "user.name", "pi-mesh Eval"]);
+  git(dir, ["config", "user.email", "pi-chalin-eval@example.com"]);
+  git(dir, ["config", "user.name", "pi-chalin Eval"]);
   git(dir, ["add", "."]);
   git(dir, ["commit", "-m", "initial fixture"]);
   fs.writeFileSync(path.join(dir, "src", "auth", "keycloak.ts"), "export function refreshToken(url: string) {\n  const normalized = url.replace(/\\/protocol\\/openid-connect\\/token$/, '');\n  return `${normalized}/protocol/openid-connect/token`;\n}\n");
@@ -655,7 +655,7 @@ function escapeRegExp(value: string): string {
 
 function printReport(reportPath: string, results: EvalResult[]): void {
   const passed = results.filter((result) => result.pass).length;
-  console.log(`pi-mesh orchestration evals: ${passed}/${results.length} passed`);
+  console.log(`pi-chalin orchestration evals: ${passed}/${results.length} passed`);
   console.log(`report: ${reportPath}`);
   for (const result of results) {
     const icon = result.pass ? "✓" : "✖";

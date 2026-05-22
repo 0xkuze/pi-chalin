@@ -127,7 +127,7 @@ test("summarizeToolUtility exposes waste and signal metrics", () => {
 });
 
 test("recordBudgetCheckpoint persists partial handoff when a step is budget-capped", async () => {
-  const cwd = tempDir("pi-mesh-budget-checkpoint-");
+  const cwd = tempDir("pi-chalin-budget-checkpoint-");
   try {
     const step: RunStepState = {
       id: "stage-1:step-1",

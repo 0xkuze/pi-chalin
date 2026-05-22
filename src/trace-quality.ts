@@ -349,7 +349,7 @@ function countNonExecutableMeshRoutes(toolEvents: TraceToolEvent[]): number {
 }
 
 function isNonExecutableMeshResult(text: string): boolean {
-  return isApprovalBlockedMeshResult(text) || /\bstatus:\s*direct-recommended\b|direct execution recommended|pi-mesh direct execution recommended/i.test(text);
+  return isApprovalBlockedMeshResult(text) || /\bstatus:\s*direct-recommended\b|direct execution recommended|pi-chalin direct execution recommended/i.test(text);
 }
 
 function isApprovalBlockedMeshResult(text: string): boolean {

@@ -11,7 +11,7 @@ let footerFrame = 0;
 let footerTarget: Pick<ExtensionContext, "hasUI" | "ui"> | undefined;
 let footerState: MeshFooterState = { kind: "idle" };
 
-const LEGACY_CONTROL_WIDGET_KEY = "pi-mesh-control";
+const LEGACY_CONTROL_WIDGET_KEY = "pi-chalin-control";
 
 export function clearLegacyMeshControlWidget(ctx: Pick<ExtensionContext, "hasUI" | "ui">): void {
   if (!ctx.hasUI) return;
@@ -32,7 +32,7 @@ export function setMeshStatus(ctx: Pick<ExtensionContext, "hasUI" | "ui">, state
   if (!ctx.hasUI) return;
   if (state === undefined) {
     stopFooterAnimation();
-    ctx.ui.setStatus("pi-mesh", undefined);
+    ctx.ui.setStatus("pi-chalin", undefined);
     return;
   }
   footerTarget = ctx;
@@ -83,7 +83,7 @@ function stopFooterAnimation(render = true): void {
 }
 
 function renderMeshFooterStatus(): void {
-  footerTarget?.ui.setStatus("pi-mesh", meshFooterText(footerState, footerFrame));
+  footerTarget?.ui.setStatus("pi-chalin", meshFooterText(footerState, footerFrame));
 }
 
 function routeShortName(kind: RouteDecision["kind"]): string {
@@ -92,7 +92,7 @@ function routeShortName(kind: RouteDecision["kind"]): string {
 
 export async function openSafetyApproval(ctx: ExtensionContext, route: RouteDecision, approval: ApprovalDecision): Promise<boolean> {
   const lines = [
-    "pi-mesh Safety Approval",
+    "pi-chalin Safety Approval",
     `risk: ${route.risk}`,
     `route: ${route.kind}`,
     `agents: ${route.agents.join(" → ") || "none"}`,
@@ -108,12 +108,12 @@ export async function openSafetyApproval(ctx: ExtensionContext, route: RouteDeci
     ctx.ui.notify(lines.join("\n"), "error");
     return false;
   }
-  return ctx.ui.confirm("pi-mesh Safety Approval", `${lines.slice(1).join("\n")}\n\nApprove this mesh route once?`);
+  return ctx.ui.confirm("pi-chalin Safety Approval", `${lines.slice(1).join("\n")}\n\nApprove this mesh route once?`);
 }
 
 export function summarizeMeshHome(state: MeshRuntimeState, agentCount: number): string[] {
   return [
-    "pi-mesh",
+    "pi-chalin",
     `routing: ${state.autoRoutingEnabled ? "on" : "off"}`,
     `agents: ${agentCount}`,
     `activity: ${summarizeActivity(state)}`,
@@ -146,7 +146,7 @@ export async function openSmartPanel(
   }
 
   if (options.state.pendingApprovals > 0) {
-    ctx.ui.notify("pi-mesh has pending approvals.", "warning");
+    ctx.ui.notify("pi-chalin has pending approvals.", "warning");
     return;
   }
   if (options.state.activeRuns > 0) return options.onSelectActivity();
@@ -161,7 +161,7 @@ export async function openSmartPanel(
     ...(options.diagnostics.length > 0 ? ["Diagnostics"] : []),
     "Close",
   ];
-  const selected = await ctx.ui.select("pi-mesh Smart Panel", actions);
+  const selected = await ctx.ui.select("pi-chalin Smart Panel", actions);
   if (selected === "Agents") return options.onSelectAgents();
   if (selected === "Activity") return options.onSelectActivity();
   if (selected?.startsWith("Memory")) return options.onSelectMemory();
@@ -178,7 +178,7 @@ export async function openWebFetchAuditPanel(ctx: ExtensionContext, entries: Web
     return;
   }
   const format = (entry: WebFetchAuditEntry) => `${entry.freshness} · ${entry.kind} · ${entry.sourceCount} sources · ${truncateUi(entry.label, 70)}`;
-  const selected = await ctx.ui.select("pi-mesh WebFetch Audit", [...entries.map(format), "Summary", "Close"]);
+  const selected = await ctx.ui.select("pi-chalin WebFetch Audit", [...entries.map(format), "Summary", "Close"]);
   if (selected === "Summary") {
     ctx.ui.notify(summary, "info");
     return;
@@ -192,7 +192,7 @@ export async function openWebFetchAuditPanel(ctx: ExtensionContext, entries: Web
 export async function openArtifactPanel(ctx: ExtensionContext, store: ArtifactStore): Promise<void> {
   const features = await store.listFeatures();
   if (features.length === 0) {
-    ctx.ui.notify("No pi-mesh artifacts yet.", "info");
+    ctx.ui.notify("No pi-chalin artifacts yet.", "info");
     return;
   }
 
@@ -202,7 +202,7 @@ export async function openArtifactPanel(ctx: ExtensionContext, store: ArtifactSt
     return;
   }
 
-  const selected = await ctx.ui.select("pi-mesh Artifacts", [...features.map(format), "Close"]);
+  const selected = await ctx.ui.select("pi-chalin Artifacts", [...features.map(format), "Close"]);
   const feature = features.find((candidate) => selected === format(candidate));
   if (!feature) return;
 
@@ -292,7 +292,7 @@ export async function openAgentManager(
     return;
   }
 
-  const selected = await ctx.ui.select("pi-mesh Agents", agents.map(format));
+  const selected = await ctx.ui.select("pi-chalin Agents", agents.map(format));
   if (!selected) return;
   const agent = agents.find((candidate) => selected.startsWith(`${candidate.scope}/${candidate.name} ·`));
   if (!agent) return;
@@ -382,7 +382,7 @@ export async function openAgentModelPicker(
 export async function openActivityMonitor(ctx: ExtensionContext, run: RunState | undefined): Promise<void> {
   clearLegacyMeshControlWidget(ctx);
   if (!run) {
-    ctx.ui.notify("No pi-mesh activity yet.", "info");
+    ctx.ui.notify("No pi-chalin activity yet.", "info");
     return;
   }
   setMeshStatus(ctx, run.status === "running"
@@ -399,7 +399,7 @@ export async function openActivityMonitor(ctx: ExtensionContext, run: RunState |
   }
 
   if (run.status === "running") {
-    const selected = await ctx.ui.select("pi-mesh Control", ["Live status", "Current agent", "Guards", "Close"]);
+    const selected = await ctx.ui.select("pi-chalin Control", ["Live status", "Current agent", "Guards", "Close"]);
     if (selected === "Current agent") {
       const current = run.steps.find((step) => step.status === "running") ?? run.steps.find((step) => step.status === "pending");
       if (current) ctx.ui.notify(formatActivityStep(current), current.status === "failed" ? "error" : "info");
@@ -418,7 +418,7 @@ export async function openActivityMonitor(ctx: ExtensionContext, run: RunState |
     ...(run.logsPath ? ["Log path"] : []),
     "Close",
   ];
-  const selected = await ctx.ui.select("pi-mesh Activity", items);
+  const selected = await ctx.ui.select("pi-chalin Activity", items);
   if (selected === "Summary") ctx.ui.notify(lines.join("\n"), run.status === "failed" ? "error" : "info");
   else if (selected === "Log path") ctx.ui.notify(run.logsPath ?? "No log path recorded.", "info");
   else if (selected && selected !== "Close") {
@@ -442,7 +442,7 @@ export async function openMemoryReview(
     ctx.ui.notify(sorted.map(format).join("\n"), "info");
     return;
   }
-  const selected = await ctx.ui.select("pi-mesh Memory", [...sorted.map(format), "Close"]);
+  const selected = await ctx.ui.select("pi-chalin Memory", [...sorted.map(format), "Close"]);
   if (!selected || selected === "Close") return;
   const record = sorted.find((candidate) => selected === format(candidate));
   if (!record) return;
@@ -521,7 +521,7 @@ function formatActivity(run: RunState): string[] {
   const active = run.steps.find((step) => step.status === "running" || step.status === "pending");
   const elapsed = formatElapsed(run.startedAt, run.endedAt);
   return [
-    `pi-mesh Activity · ${statusIcon(run.status)} ${displayActivityStatus(run.status)} · ${completed}/${run.steps.length} · ${elapsed}`,
+    `pi-chalin Activity · ${statusIcon(run.status)} ${displayActivityStatus(run.status)} · ${completed}/${run.steps.length} · ${elapsed}`,
     `route: ${run.route.kind} · risk: ${run.route.risk}`,
     `agents: ${run.route.agents.join(" → ") || "none"}`,
     active ? `current: ${active.agent} — ${truncateUi(active.task, 100)}` : undefined,

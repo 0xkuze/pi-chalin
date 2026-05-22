@@ -53,16 +53,16 @@ async function main(): Promise<void> {
     judge,
   };
 
-  const reportDir = path.join(repoRoot, ".pi-mesh", "evals");
+  const reportDir = path.join(repoRoot, ".pi-chalin", "evals");
   fs.mkdirSync(reportDir, { recursive: true });
   const reportPath = path.join(reportDir, `trace-quality-${stamp(startedAt)}.json`);
   fs.writeFileSync(reportPath, `${JSON.stringify(output, null, 2)}\n`);
 
-  console.log(`pi-mesh trace quality: ${pass ? "PASS" : "FAIL"}`);
+  console.log(`pi-chalin trace quality: ${pass ? "PASS" : "FAIL"}`);
   console.log(`deterministic=${report.score} critical=${report.critical.length} warnings=${report.warnings.length} source=${report.effectiveAnswerSource}`);
   if (judge) console.log(`judge=${judge.score} pass=${judge.pass} verdict=${judge.verdict}`);
   console.log(`report: ${reportPath}`);
-  if (!pass && process.env.PI_MESH_TRACE_ALLOW_FAIL !== "1") process.exit(1);
+  if (!pass && process.env.PI_CHALIN_TRACE_ALLOW_FAIL !== "1") process.exit(1);
 }
 
 export function resolveJudgeTimeoutMs(value: string | undefined): number {
@@ -91,7 +91,7 @@ function readTraceInput(args: Record<string, string>): { stdout: string; finalTe
     if (!output) throw new Error(`Report does not contain output for variant ${variant}`);
     if (output.stdout) return { stdout: output.stdout, finalText: output.finalText };
     if (args.allowFinalOnly === "1" && output.finalText) return { stdout: output.finalText, finalText: output.finalText };
-    throw new Error("Report output lacks stdout. Re-run quality eval with PI_MESH_QUALITY_STORE_FULL_OUTPUT=1 for real trace grading, or pass --allowFinalOnly=1 knowingly for degraded final-text-only grading.");
+    throw new Error("Report output lacks stdout. Re-run quality eval with PI_CHALIN_QUALITY_STORE_FULL_OUTPUT=1 for real trace grading, or pass --allowFinalOnly=1 knowingly for degraded final-text-only grading.");
   }
   throw new Error("trace-quality eval requires --stdout=<file> or --report=<quality-report.json>");
 }

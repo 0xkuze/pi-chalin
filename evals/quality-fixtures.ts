@@ -14,7 +14,7 @@ export interface SyntheticQualityFixture {
 const DEFAULT_PROMPT = "revisa este proyecto dime que hace, en profundidad";
 
 export function createSyntheticQualityFixture(profile: SyntheticQualityFixtureProfile): SyntheticQualityFixture {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `pi-mesh-quality-${profile}-`));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `pi-chalin-quality-${profile}-`));
 
   switch (profile) {
     case "go-service":

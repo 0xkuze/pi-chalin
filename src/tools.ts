@@ -16,7 +16,7 @@ import type { AgentStep, RouteDecision, RunState, RunStatus } from "./schemas.ts
 
 const AgentStepParams = Type.Object({
   id: Type.Optional(Type.String({ description: "Optional stable step id for DAG stages." })),
-  agent: Type.String({ description: "Agent name from the pi-mesh catalog, e.g. scout, planner, worker, reviewer." }),
+  agent: Type.String({ description: "Agent name from the pi-chalin catalog, e.g. scout, planner, worker, reviewer." }),
   task: Type.String({ description: "Concrete bounded task and success criteria for this subagent." }),
   budget: Type.Optional(Type.Union([
     Type.Literal("tight"),
@@ -66,7 +66,7 @@ const MeshRouteParams = Type.Object({
   steps: Type.Optional(Type.Array(AgentStepParams, { description: "Ordered steps for single/chain, independent tasks for parallel. Omit for memory-only." })),
   stages: Type.Optional(Type.Array(AgentStageParams, { description: "For dag topology: ordered stages; tasks inside each stage run in parallel after prior stage completes." })),
   risk: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"), Type.Literal("critical")], { description: "Risk estimated by the primary Pi agent." })),
-  needsMemory: Type.Optional(Type.Boolean({ description: "Whether pi-mesh should retrieve relevant project/user memory before running." })),
+  needsMemory: Type.Optional(Type.Boolean({ description: "Whether pi-chalin should retrieve relevant project/user memory before running." })),
   needsArtifacts: Type.Optional(Type.Boolean({ description: "Whether the workflow is expected to inspect or create artifacts/files." })),
   reason: Type.Optional(Type.String({ description: "Short rationale for using mesh instead of answering directly." })),
   dryRun: Type.Optional(Type.Boolean({ description: "If true, validate and preview the chosen route without running subagents." })),
@@ -127,7 +127,7 @@ const MeshArtifactResumeParams = Type.Object({
 });
 
 const MeshResumeParams = Type.Object({
-  runId: Type.Optional(Type.String({ description: "Optional pi-mesh run id. If omitted, resumes the latest paused/stale run." })),
+  runId: Type.Optional(Type.String({ description: "Optional pi-chalin run id. If omitted, resumes the latest paused/stale run." })),
 });
 
 type MeshArtifactResumeToolParams = {
@@ -151,7 +151,7 @@ export function registerMeshTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "mesh_interview",
     label: "Mesh Interview",
-    description: "Ask blocking clarification questions in the TUI and persist answers as pi-mesh artifacts before planning or running subagents.",
+    description: "Ask blocking clarification questions in the TUI and persist answers as pi-chalin artifacts before planning or running subagents.",
     promptSnippet: "mesh_interview: when the request is ambiguous or missing critical information, ask concise multiple-choice questions before mesh_route.",
     promptGuidelines: [
       "Use mesh_interview before mesh_route when the user's request has unknown terms, missing scope, uncovered constraints, destructive/risky choices, or multiple valid directions with meaningful tradeoffs.",
@@ -171,11 +171,11 @@ export function registerMeshTools(pi: ExtensionAPI): void {
     name: "mesh_route",
     label: "Mesh Route",
     description: [
-      "Run a pi-mesh workflow chosen by the primary Pi agent.",
+      "Run a pi-chalin workflow chosen by the primary Pi agent.",
       "The caller decides whether mesh is needed, which agents to use, and whether the workflow is single, chained, parallel, DAG/staged, or memory-only.",
-      "Do not use for bounded explicit-file refactors/bugfixes; native tools are faster and pi-mesh will recommend direct execution for those.",
+      "Do not use for bounded explicit-file refactors/bugfixes; native tools are faster and pi-chalin will recommend direct execution for those.",
     ].join(" "),
-    promptSnippet: "mesh_route: delegate broad/risky/deep workflows to pi-mesh subagents; do not use for bounded explicit-file edits.",
+    promptSnippet: "mesh_route: delegate broad/risky/deep workflows to pi-chalin subagents; do not use for bounded explicit-file edits.",
     promptGuidelines: [
       "Use mesh_route only when subagents materially improve quality, confidence, context isolation, or review; do not use it for simple direct answers.",
       "Do not call mesh_route for explicit-file refactor/fix/add-test tasks with one to three named files unless the prompt says broad, risky, long-file, security/auth, migration, or no-rewrite.",
@@ -205,10 +205,10 @@ export function registerMeshTools(pi: ExtensionAPI): void {
       const unknownAgents = route.agents.filter((agent) => !catalog.resolve(agent).agent);
 
       if (!loaded.config.enabled) {
-        return textResult("pi-mesh is disabled for this project. Answer directly or ask the user to run /mesh on.", { route, diagnostics: loaded.diagnostics });
+        return textResult("pi-chalin is disabled for this project. Answer directly or ask the user to run /mesh on.", { route, diagnostics: loaded.diagnostics });
       }
       if (unknownAgents.length > 0) {
-        return textResult(`Unknown pi-mesh agent(s): ${unknownAgents.join(", ")}\nAvailable agents: ${agents.map((agent) => agent.name).join(", ")}`, { route, diagnostics: catalog.diagnostics });
+        return textResult(`Unknown pi-chalin agent(s): ${unknownAgents.join(", ")}\nAvailable agents: ${agents.map((agent) => agent.name).join(", ")}`, { route, diagnostics: catalog.diagnostics });
       }
       if (route.kind === "ask-user") {
         return textResult(route.reason, { route });
@@ -243,7 +243,7 @@ export function registerMeshTools(pi: ExtensionAPI): void {
 
       const preApproval = await kernel.approvalFor(route);
       const approvalOverride = preApproval.action === "ask" && await openSafetyApproval(ctx, route, preApproval)
-        ? { action: "allow" as const, reason: "Approved once through pi-mesh Safety Approval." }
+        ? { action: "allow" as const, reason: "Approved once through pi-chalin Safety Approval." }
         : undefined;
       if (preApproval.action === "block" || (preApproval.action === "ask" && !approvalOverride)) {
         finishMeshRouteInvocation(guard.invocationId, preApproval.action);
@@ -306,8 +306,8 @@ export function registerMeshTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "mesh_resume",
     label: "Mesh Resume",
-    description: "Resume the latest paused or stale pi-mesh subagent run, preserving completed steps and continuing pending DAG/chain work.",
-    promptSnippet: "mesh_resume: resume an interrupted pi-mesh run when the user says continue/resume after ESC, abort, terminal close, or a paused run.",
+    description: "Resume the latest paused or stale pi-chalin subagent run, preserving completed steps and continuing pending DAG/chain work.",
+    promptSnippet: "mesh_resume: resume an interrupted pi-chalin run when the user says continue/resume after ESC, abort, terminal close, or a paused run.",
     promptGuidelines: [
       "Use this before answering from partial findings when the user asks to continue a paused/interrupted mesh run.",
       "Do not create a new mesh_route for a paused run; resume the persisted run instead.",
@@ -317,7 +317,7 @@ export function registerMeshTools(pi: ExtensionAPI): void {
     async execute(_toolCallId, params: MeshResumeToolParams, signal, onUpdate, ctx) {
       const loaded = loadEffectiveConfig({ cwd: ctx.cwd });
       const run = loadResumableRunState({ cwd: ctx.cwd, runId: params.runId });
-      if (!run) return textResult(params.runId ? `No resumable pi-mesh run found for '${params.runId}'.` : "No paused or stale pi-mesh run found to resume.", { runId: params.runId });
+      if (!run) return textResult(params.runId ? `No resumable pi-chalin run found for '${params.runId}'.` : "No paused or stale pi-chalin run found to resume.", { runId: params.runId });
       const catalog = AgentCatalog.load({ cwd: ctx.cwd });
       const memory = new MemoryStore({ cwd: ctx.cwd });
       const kernel = new MeshKernel({
@@ -372,10 +372,10 @@ export function registerMeshTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "mesh_artifact_resume",
     label: "Mesh Artifact Resume",
-    description: "Load compact resumable pi-mesh artifact context for a long-running feature/task.",
+    description: "Load compact resumable pi-chalin artifact context for a long-running feature/task.",
     promptSnippet: "mesh_artifact_resume: load prior checkpoints, validation contracts, and worker skills for a long-running mesh task.",
     promptGuidelines: [
-      "Use this before continuing a long-running or previously interrupted pi-mesh task.",
+      "Use this before continuing a long-running or previously interrupted pi-chalin task.",
       "Use the returned checkpoints and validation contracts as the source of truth for continuation.",
     ],
     parameters: MeshArtifactResumeParams,
@@ -423,7 +423,7 @@ export function formatMeshRoutePlanWidget(params: MeshRouteToolParams): string {
   const title = routeTitle(params.topology, params.task);
   const agents = steps.map((step) => step.agent).filter(Boolean);
   return [
-    `pi-mesh · ${title}`,
+    `pi-chalin · ${title}`,
     agents.length ? `agents: ${compactAgentPath(agents)} · 0/${steps.length || 1}` : "agents: memory · 0/1",
     ...steps.slice(0, 8).map((step, index) => `${treePrefix(index, steps.length)} ${statusGlyph(step.status ?? "pending")} ${step.agent} — ${truncate(step.task ?? "waiting", 76)}`),
     steps.length > 8 ? `└ … +${steps.length - 8} more` : undefined,
@@ -436,7 +436,7 @@ export function formatMeshRunWidget(run: RunState): string {
 
 function formatMeshRunWidgetFromDetails(details: MeshRouteWidgetDetails): string {
   const run = details.run;
-  if (!run) return "pi-mesh · no run";
+  if (!run) return "pi-chalin · no run";
   const route = details.route;
   const steps = run.steps;
   const completed = steps.filter((step) => isUsableStepStatus(step.status)).length;
@@ -445,7 +445,7 @@ function formatMeshRunWidgetFromDetails(details: MeshRouteWidgetDetails): string
   const displayStatus = run.status === "budget-capped" && completed === (steps.length || 1) ? "done" : statusLabel(run.status);
   const activeLabel = run.status === "failed" ? "blocked" : "current";
   return [
-    `pi-mesh · ${title} · ${displayStatus} · ${completed}/${steps.length || 1}`,
+    `pi-chalin · ${title} · ${displayStatus} · ${completed}/${steps.length || 1}`,
     active ? `${activeLabel}: ${active.agent} — ${truncate(active.error ?? active.task ?? statusLabel(active.status ?? "pending"), 86)}` : undefined,
     ...steps.slice(0, 8).map((step, index) => formatWidgetStep(step, index, steps.length, run.status)),
     steps.length > 8 ? `└ … +${steps.length - 8} more` : undefined,
@@ -584,8 +584,8 @@ function formatWidgetGuards(metrics: RunState["metrics"] | undefined): string {
 }
 
 function scheduleNonInteractiveShutdown(ctx: { hasUI: boolean; abort(): void; shutdown(): void }): void {
-  if (ctx.hasUI || process.env.PI_MESH_NONINTERACTIVE_SHUTDOWN === "0") return;
-  const configuredDelay = Number(process.env.PI_MESH_NONINTERACTIVE_SHUTDOWN_DELAY_MS);
+  if (ctx.hasUI || process.env.PI_CHALIN_NONINTERACTIVE_SHUTDOWN === "0") return;
+  const configuredDelay = Number(process.env.PI_CHALIN_NONINTERACTIVE_SHUTDOWN_DELAY_MS);
   const delayMs = Number.isFinite(configuredDelay) && configuredDelay >= 0 ? configuredDelay : 0;
   const timer = setTimeout(() => {
     try {
@@ -613,11 +613,11 @@ function formatRoute(route: RouteDecision, result: Awaited<ReturnType<MeshKernel
   const finalMaterial = finalAnswerMaterial(result.run);
   const supportingFindings = supportingAgentFindings(result.run);
   const lines = [
-    `pi-mesh completed: ${route.agents.join(" → ") || route.kind}`,
+    `pi-chalin completed: ${route.agents.join(" → ") || route.kind}`,
     `status: ${result.run?.status ?? result.approval.action}`,
     result.approval.action === "allow"
       ? "Instruction for the primary Pi agent: answer the user now from the Final answer material below. Do not call more tools unless it explicitly says a critical gap remains."
-      : "Instruction for the primary Pi agent: pi-mesh did not execute because approval is required. Do not claim completion. If this is a safe explicit user-requested edit, continue directly with native tools; otherwise explain that approval is required.",
+      : "Instruction for the primary Pi agent: pi-chalin did not execute because approval is required. Do not claim completion. If this is a safe explicit user-requested edit, continue directly with native tools; otherwise explain that approval is required.",
     result.approval.action !== "allow" ? `Approval: ${result.approval.action} — ${result.approval.reason}` : undefined,
     result.memories.length > 0 ? `Memory used: ${result.memories.length}` : undefined,
     finalMaterial ? "\nFinal answer material:" : undefined,
@@ -656,7 +656,7 @@ function shouldAggregateFinalMaterial(run: RunState, completeSteps: RunState["st
 }
 
 function finalAnswerMaterialBudget(run: RunState): number {
-  const parsed = Number(process.env.PI_MESH_FINAL_MATERIAL_CHARS);
+  const parsed = Number(process.env.PI_CHALIN_FINAL_MATERIAL_CHARS);
   if (Number.isFinite(parsed) && parsed > 500) return Math.floor(parsed);
   if (run.route.kind === "multi-agent-dag") return 12000;
   if (/\b(deep|in[- ]depth|profundidad|profundo|an[aá]lisis|project analysis|Coverage Matrix|Evidence Table)\b/i.test(run.route.reason)) return 10000;
@@ -703,7 +703,7 @@ export function ensureMutationRouteHasWorker(route: RouteDecision, task: string)
     ].join(" "),
     budget: "normal",
   };
-  const reason = `${route.reason} Mutation task normalized by pi-mesh: added a worker step because implementation routes must include an executor.`;
+  const reason = `${route.reason} Mutation task normalized by pi-chalin: added a worker step because implementation routes must include an executor.`;
 
   if (route.plan.kind === "dag") {
     return {
@@ -782,7 +782,7 @@ function hasBroadOrRiskyScope(task: string): boolean {
 
 function formatDirectRecommendation(route: RouteDecision, reason: string): string {
   return [
-    "pi-mesh direct execution recommended",
+    "pi-chalin direct execution recommended",
     "status: direct-recommended",
     reason,
     `Original route: ${route.kind} · ${route.agents.join(" → ") || "none"}`,

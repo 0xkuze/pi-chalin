@@ -13,7 +13,7 @@ afterEach(() => { while (tempDirs.length > 0) fs.rmSync(tempDirs.pop()!, { recur
 function tempDir(prefix: string): string { const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); tempDirs.push(dir); return dir; }
 
 test("MeshKernel no longer hard-codes prompt routing decisions", () => {
-  const route = new MeshKernel({ cwd: tempDir("pi-mesh-kernel-") }).classify("review this project");
+  const route = new MeshKernel({ cwd: tempDir("pi-chalin-kernel-") }).classify("review this project");
   assert.equal(route.kind, "bypass");
   assert.deepEqual(route.agents, []);
   assert.match(route.reason, /LLM-first routing/i);
@@ -79,7 +79,7 @@ test("routeFromPlan builds staged DAG workflows chosen by the primary Pi agent",
 });
 
 test("MeshKernel executes an LLM-planned mock route", async () => {
-  const cwd = tempDir("pi-mesh-kernel-");
+  const cwd = tempDir("pi-chalin-kernel-");
   const route = routeFromPlan({ topology: "single", steps: [{ agent: "reviewer", task: "Review this diff for bugs." }] });
   const result = await new MeshKernel({ cwd }).handleRoute(route, "review this diff for bugs", { cwd });
   assert.equal(result.route.kind, "single-agent");
@@ -89,10 +89,10 @@ test("MeshKernel executes an LLM-planned mock route", async () => {
 });
 
 test("MeshKernel does not block SDK tool results on memory persistence", async () => {
-  const cwd = tempDir("pi-mesh-kernel-memory-");
+  const cwd = tempDir("pi-chalin-kernel-memory-");
   const route = routeFromPlan({ topology: "single", steps: [{ agent: "reviewer", task: "Summarize findings." }] });
-  const previousDelay = process.env.PI_MESH_MEMORY_PERSIST_DELAY_MS;
-  process.env.PI_MESH_MEMORY_PERSIST_DELAY_MS = "0";
+  const previousDelay = process.env.PI_CHALIN_MEMORY_PERSIST_DELAY_MS;
+  process.env.PI_CHALIN_MEMORY_PERSIST_DELAY_MS = "0";
   let memoryPersisted = false;
   try {
     class SlowMemoryStore extends MemoryStore {
@@ -146,7 +146,7 @@ test("MeshKernel does not block SDK tool results on memory persistence", async (
     await new Promise((resolve) => setTimeout(resolve, 170));
     assert.equal(memoryPersisted, true);
   } finally {
-    if (previousDelay === undefined) delete process.env.PI_MESH_MEMORY_PERSIST_DELAY_MS;
-    else process.env.PI_MESH_MEMORY_PERSIST_DELAY_MS = previousDelay;
+    if (previousDelay === undefined) delete process.env.PI_CHALIN_MEMORY_PERSIST_DELAY_MS;
+    else process.env.PI_CHALIN_MEMORY_PERSIST_DELAY_MS = previousDelay;
   }
 });

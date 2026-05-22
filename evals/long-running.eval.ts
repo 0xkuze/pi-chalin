@@ -20,7 +20,7 @@ if (isMain()) await main();
 
 async function main(): Promise<void> {
   const startedAt = new Date().toISOString();
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-mesh-long-running-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-chalin-long-running-"));
   const checks: LongRunningCheck[] = [];
 
   try {
@@ -64,7 +64,7 @@ async function main(): Promise<void> {
       id: "stale-run-recovers-as-paused",
       pass: loaded?.status === "paused",
       evidence: loaded ? `${loaded.id}:${loaded.status}:${loaded.warnings.join(" | ")}` : "no resumable run loaded",
-      nextStep: "Verify .pi-mesh/runs contains a paused or stale running run with unfinished steps.",
+      nextStep: "Verify .pi-chalin/runs contains a paused or stale running run with unfinished steps.",
     });
 
     const resumed = loaded ? await new MockWorkerRunner().resume(loaded, { cwd, agents: new Map() }) : undefined;
@@ -114,12 +114,12 @@ async function main(): Promise<void> {
       })),
     };
     const reportPath = writeReport(report);
-    console.log(`pi-mesh long-running eval: ${pass ? "PASS" : "FAIL"}`);
+    console.log(`pi-chalin long-running eval: ${pass ? "PASS" : "FAIL"}`);
     for (const check of checks) console.log(`${check.pass ? "PASS" : "FAIL"} ${check.id}: ${compact(check.evidence, 180)}`);
     console.log(`report: ${reportPath}`);
-    if (!pass && process.env.PI_MESH_LONG_EVAL_ALLOW_FAIL !== "1") process.exit(1);
+    if (!pass && process.env.PI_CHALIN_LONG_EVAL_ALLOW_FAIL !== "1") process.exit(1);
   } finally {
-    if (process.env.PI_MESH_LONG_EVAL_KEEP_FIXTURE !== "1") fs.rmSync(cwd, { recursive: true, force: true });
+    if (process.env.PI_CHALIN_LONG_EVAL_KEEP_FIXTURE !== "1") fs.rmSync(cwd, { recursive: true, force: true });
   }
 }
 
@@ -191,7 +191,7 @@ function write(cwd: string, relativePath: string, content: string): void {
 }
 
 function writeReport(report: object): string {
-  const dir = path.join(repoRoot, ".pi-mesh", "evals");
+  const dir = path.join(repoRoot, ".pi-chalin", "evals");
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, `long-running-${new Date().toISOString().replace(/[:.]/g, "-")}-${process.pid}.json`);
   fs.writeFileSync(file, `${JSON.stringify(report, null, 2)}\n`);

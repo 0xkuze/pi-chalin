@@ -17,7 +17,7 @@ interface MutationEvalCheck {
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const startedAt = new Date().toISOString();
-const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-mesh-mutation-eval-"));
+const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-chalin-mutation-eval-"));
 const checks: MutationEvalCheck[] = [];
 const warnings: string[] = [];
 
@@ -113,14 +113,14 @@ try {
   const report = buildReport();
   writeReport(report);
   printReport(report);
-  if (report.failed > 0 && process.env.PI_MESH_MUTATION_EVAL_ALLOW_FAIL !== "1") process.exit(1);
+  if (report.failed > 0 && process.env.PI_CHALIN_MUTATION_EVAL_ALLOW_FAIL !== "1") process.exit(1);
 } catch (error) {
   const message = error instanceof Error ? error.stack ?? error.message : String(error);
   checks.push(check("mutation-eval-unhandled-error", false, { message }));
   const report = buildReport();
   writeReport(report);
   printReport(report);
-  if (process.env.PI_MESH_MUTATION_EVAL_ALLOW_FAIL !== "1") process.exit(1);
+  if (process.env.PI_CHALIN_MUTATION_EVAL_ALLOW_FAIL !== "1") process.exit(1);
 }
 
 function createFixture(dir: string): void {
@@ -135,8 +135,8 @@ function createFixture(dir: string): void {
     "",
   ].join("\n"));
   git(dir, ["init"]);
-  git(dir, ["config", "user.email", "pi-mesh@example.com"]);
-  git(dir, ["config", "user.name", "pi-mesh"]);
+  git(dir, ["config", "user.email", "pi-chalin@example.com"]);
+  git(dir, ["config", "user.name", "pi-chalin"]);
   git(dir, ["add", "."]);
   git(dir, ["commit", "-m", "init"]);
 }
@@ -179,13 +179,13 @@ function buildReport() {
 }
 
 function writeReport(report: ReturnType<typeof buildReport>): void {
-  const reportDir = path.join(repoRoot, ".pi-mesh", "evals");
+  const reportDir = path.join(repoRoot, ".pi-chalin", "evals");
   fs.mkdirSync(reportDir, { recursive: true });
   fs.writeFileSync(path.join(reportDir, `mutation-${stamp(startedAt)}.json`), `${JSON.stringify(report, null, 2)}\n`);
 }
 
 function printReport(report: ReturnType<typeof buildReport>): void {
-  console.log(`pi-mesh mutation evals: ${report.passed}/${report.checks.length} passed`);
+  console.log(`pi-chalin mutation evals: ${report.passed}/${report.checks.length} passed`);
   for (const item of report.checks) console.log(`${item.pass ? "✓" : "✗"} ${item.id}`);
   if (report.failed > 0) console.log(JSON.stringify(report.checks.filter((item) => !item.pass), null, 2));
 }

@@ -1,6 +1,6 @@
 .DS_Store
 node_modules/
-.pi-mesh/
+.pi-chalin/
 *.tgz
 dist/
 coverage/

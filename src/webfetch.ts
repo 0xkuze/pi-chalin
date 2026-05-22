@@ -145,7 +145,7 @@ export function formatWebBundle(bundle: WebContextBundle): string {
 }
 
 export async function listWebFetchAudit(options: WebFetchAuditOptions): Promise<WebFetchAuditEntry[]> {
-  const dir = path.join(resolveMeshPaths(options).projectRoot, ".pi-mesh", "cache", "webfetch");
+  const dir = path.join(resolveMeshPaths(options).projectRoot, ".pi-chalin", "cache", "webfetch");
   if (!fs.existsSync(dir)) return [];
   const now = options.now ?? Date.now();
   const entries: WebFetchAuditEntry[] = [];
@@ -178,9 +178,9 @@ export async function listWebFetchAudit(options: WebFetchAuditOptions): Promise<
 }
 
 export function formatWebFetchAudit(entries: WebFetchAuditEntry[]): string {
-  if (entries.length === 0) return "pi-mesh WebFetch Audit\nNo cached WebFetch bundles yet.";
+  if (entries.length === 0) return "pi-chalin WebFetch Audit\nNo cached WebFetch bundles yet.";
   const lines = [
-    "pi-mesh WebFetch Audit",
+    "pi-chalin WebFetch Audit",
     `cached bundles: ${entries.length}`,
     "",
     ...entries.flatMap((entry) => [
@@ -260,7 +260,7 @@ function writeCache(options: MeshPathsOptions, key: string, bundle: WebContextBu
 }
 
 function cachePath(options: MeshPathsOptions, key: string): string {
-  return path.join(resolveMeshPaths(options).projectRoot, ".pi-mesh", "cache", "webfetch", `${key}.json`);
+  return path.join(resolveMeshPaths(options).projectRoot, ".pi-chalin", "cache", "webfetch", `${key}.json`);
 }
 
 function cacheKey(kind: string, payload: unknown): string {

@@ -39,7 +39,7 @@ const IGNORED_DIRS = new Set([
   ".git",
   ".hg",
   ".svn",
-  ".pi-mesh",
+  ".pi-chalin",
   "node_modules",
   "vendor",
   "dist",

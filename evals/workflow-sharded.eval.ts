@@ -9,19 +9,33 @@ import { resolveCaseIds, resolveVariants, resolveWorkflowRunCount, resolveWorkfl
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const workflowEvalPath = path.join(repoRoot, "evals", "workflow-quality.eval.ts");
+const workflowShardPresetArgs = {
+  community: {
+    case: "community",
+    variant: "both",
+    runs: "3",
+    timeoutMs: "45000",
+    shards: "5",
+    concurrency: "1",
+    shardRetries: "1",
+    model: "openai-codex/gpt-5.3-codex-spark",
+    thinking: "low",
+    matrixPath: "evals/results/workflow-quality-community-sharded-matrix.jsonl",
+  },
+} satisfies Record<string, Record<string, string>>;
 
 if (isMain()) await main();
 
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
+  const args = resolveWorkflowShardArgs(parseArgs(process.argv.slice(2)));
   const startedAt = new Date().toISOString();
   const allCaseIds = resolveCaseIds(args.case);
   const variants = resolveVariants(args.variant);
-  const runs = resolveWorkflowRunCount(args.runs ?? process.env.PI_MESH_WORKFLOW_RUNS);
+  const runs = resolveWorkflowRunCount(args.runs ?? process.env.PI_CHALIN_WORKFLOW_RUNS);
   const timeoutMs = resolveWorkflowTimeoutMs(args.timeoutMs);
-  const shardCount = Number(args.shards ?? process.env.PI_MESH_WORKFLOW_SHARDS ?? Math.min(5, allCaseIds.length || 1));
-  const concurrency = Math.max(1, Number(args.concurrency ?? process.env.PI_MESH_WORKFLOW_SHARD_CONCURRENCY ?? 1));
-  const shardRetries = Math.max(0, Number(args.shardRetries ?? process.env.PI_MESH_WORKFLOW_SHARD_RETRIES ?? 1));
+  const shardCount = Number(args.shards ?? process.env.PI_CHALIN_WORKFLOW_SHARDS ?? Math.min(5, allCaseIds.length || 1));
+  const concurrency = Math.max(1, Number(args.concurrency ?? process.env.PI_CHALIN_WORKFLOW_SHARD_CONCURRENCY ?? 1));
+  const shardRetries = Math.max(0, Number(args.shardRetries ?? process.env.PI_CHALIN_WORKFLOW_SHARD_RETRIES ?? 1));
   const matrixPath = path.resolve(args.matrixPath ?? path.join(repoRoot, "evals", "results", "workflow-quality-sharded-matrix.jsonl"));
   const runId = slugSegment(args.runId ?? `${stamp(startedAt)}-${randomUUID().slice(0, 8)}`);
   const shardDir = path.join(path.dirname(matrixPath), `.workflow-shards-${runId}`);
@@ -55,7 +69,7 @@ async function main(): Promise<void> {
     aggregate,
     shards: results,
   };
-  const reportDir = path.join(repoRoot, ".pi-mesh", "evals");
+  const reportDir = path.join(repoRoot, ".pi-chalin", "evals");
   fs.mkdirSync(reportDir, { recursive: true });
   const reportPath = path.join(reportDir, `workflow-sharded-${runId}.json`);
   fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
@@ -132,21 +146,17 @@ function runShardAttempt(shard: WorkflowMatrixShard, options: ShardRunOptions, a
     `--runs=${options.runs}`,
     `--timeoutMs=${options.timeoutMs}`,
     `--matrixPath=${matrixPath}`,
+    "--allowMulti=1",
     "--allowLong=1",
     "--gates=1",
+    `--model=${options.extraArgs.model ?? process.env.PI_CHALIN_WORKFLOW_MODEL ?? "openai-codex/gpt-5.3-codex-spark"}`,
+    `--thinking=${options.extraArgs.thinking ?? process.env.PI_CHALIN_WORKFLOW_THINKING ?? "low"}`,
   ];
   if (options.extraArgs.judge) childArgs.push(`--judge=${options.extraArgs.judge}`);
   console.log(`shard ${shard.index}/${shard.total} attempt ${attempt}: ${shard.caseIds.join(",")}`);
   const child = spawn(process.execPath, childArgs, {
     cwd: repoRoot,
-    env: {
-      ...process.env,
-      PI_MESH_WORKFLOW_ALLOW_MULTI_SDK: "1",
-      PI_MESH_WORKFLOW_ALLOW_LONG_SDK: "1",
-      PI_MESH_WORKFLOW_GATES: "1",
-      PI_MESH_WORKFLOW_MODEL: process.env.PI_MESH_WORKFLOW_MODEL ?? "openai-codex/gpt-5.3-codex-spark",
-      PI_MESH_WORKFLOW_THINKING: process.env.PI_MESH_WORKFLOW_THINKING ?? "low",
-    },
+    env: process.env,
     stdio: ["ignore", "pipe", "pipe"],
   });
   child.stdout.setEncoding("utf-8");
@@ -161,6 +171,13 @@ function runShardAttempt(shard: WorkflowMatrixShard, options: ShardRunOptions, a
 function prefixWrite(prefix: string, chunk: string, stderr: boolean): void {
   const text = chunk.split("\n").map((line) => line ? `[${prefix}] ${line}` : line).join("\n");
   (stderr ? process.stderr : process.stdout).write(text);
+}
+
+export function resolveWorkflowShardArgs(args: Record<string, string>): Record<string, string> {
+  if (!args.preset) return args;
+  const preset = workflowShardPresetArgs[args.preset as keyof typeof workflowShardPresetArgs];
+  if (!preset) throw new Error(`Unsupported workflow shard preset: ${args.preset}`);
+  return { ...preset, ...args };
 }
 
 function parseArgs(items: string[]): Record<string, string> {

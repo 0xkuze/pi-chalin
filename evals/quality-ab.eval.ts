@@ -46,20 +46,20 @@ if (isMain()) await main();
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const startedAt = new Date().toISOString();
-  const mode = args.mode ?? process.env.PI_MESH_QUALITY_MODE ?? "files";
-  const requestedTimeoutMs = args.timeoutMs ?? process.env.PI_MESH_QUALITY_TIMEOUT_MS;
+  const mode = args.mode ?? process.env.PI_CHALIN_QUALITY_MODE ?? "files";
+  const requestedTimeoutMs = args.timeoutMs ?? process.env.PI_CHALIN_QUALITY_TIMEOUT_MS;
   const variantTimeoutMs = resolveVariantTimeoutMs(requestedTimeoutMs);
-  const variantsToRun = resolveVariantsToRun(args.variant ?? args.only ?? process.env.PI_MESH_QUALITY_VARIANT);
-  const fixture = createFixtureFromArgs(args.fixture ?? process.env.PI_MESH_QUALITY_FIXTURE);
-  if (fixture && process.env.PI_MESH_QUALITY_KEEP_FIXTURE !== "1") {
+  const variantsToRun = resolveVariantsToRun(args.variant ?? args.only ?? process.env.PI_CHALIN_QUALITY_VARIANT);
+  const fixture = createFixtureFromArgs(args.fixture ?? process.env.PI_CHALIN_QUALITY_FIXTURE);
+  if (fixture && process.env.PI_CHALIN_QUALITY_KEEP_FIXTURE !== "1") {
     process.on("exit", () => fs.rmSync(fixture.cwd, { recursive: true, force: true }));
   }
-  const profile = parseProfile(args.profile ?? process.env.PI_MESH_QUALITY_PROFILE ?? fixture?.profile ?? "agent-tooling");
-  const prompt = args.prompt ?? process.env.PI_MESH_QUALITY_PROMPT ?? fixture?.prompt ?? "revisa este proyecto dime que hace, en profundidad";
+  const profile = parseProfile(args.profile ?? process.env.PI_CHALIN_QUALITY_PROFILE ?? fixture?.profile ?? "agent-tooling");
+  const prompt = args.prompt ?? process.env.PI_CHALIN_QUALITY_PROMPT ?? fixture?.prompt ?? "revisa este proyecto dime que hace, en profundidad";
 
-  const simplePath = args.simple ?? process.env.PI_MESH_QUALITY_SIMPLE_FILE;
-  const meshPath = args.mesh ?? process.env.PI_MESH_QUALITY_MESH_FILE;
-  const targetCwd = path.resolve(args.cwd ?? process.env.PI_MESH_QUALITY_CWD ?? fixture?.cwd ?? process.cwd());
+  const simplePath = args.simple ?? process.env.PI_CHALIN_QUALITY_SIMPLE_FILE;
+  const meshPath = args.mesh ?? process.env.PI_CHALIN_QUALITY_MESH_FILE;
+  const targetCwd = path.resolve(args.cwd ?? process.env.PI_CHALIN_QUALITY_CWD ?? fixture?.cwd ?? process.cwd());
 
   const outputs = mode === "sdk"
     ? await runSdkComparison({ prompt, targetCwd, variantTimeoutMs, variantsToRun })
@@ -109,18 +109,18 @@ async function main(): Promise<void> {
       finalTextChars: item.finalText.length,
       finalTextSnippet: snippet(item.finalText, 1600),
       stderrSnippet: snippet(item.stderr, 1000),
-      ...(process.env.PI_MESH_QUALITY_STORE_FULL_OUTPUT === "1"
+      ...(process.env.PI_CHALIN_QUALITY_STORE_FULL_OUTPUT === "1"
         ? { finalText: item.finalText, stdout: item.stdout, stderr: item.stderr }
         : {}),
     })),
   };
 
-  const reportDir = path.join(repoRoot, ".pi-mesh", "evals");
+  const reportDir = path.join(repoRoot, ".pi-chalin", "evals");
   fs.mkdirSync(reportDir, { recursive: true });
   const reportPath = path.join(reportDir, `quality-ab-${stamp(startedAt)}.json`);
   fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
 
-  console.log(`pi-mesh quality A/B: ${pass ? "PASS" : "FAIL"}`);
+  console.log(`pi-chalin quality A/B: ${pass ? "PASS" : "FAIL"}`);
   if (simpleScore && meshScore) {
     console.log(`simple=${simpleScore.score} mesh=${meshScore.score} delta=${meshScore.score - simpleScore.score}`);
     console.log(`simple missing: ${simpleScore.missingFacts.join(", ") || "none"}`);
@@ -136,7 +136,7 @@ async function main(): Promise<void> {
   if (timedOut) console.log(`timeout: ${outputs.filter((item) => item.timeoutReason).map((item) => `${item.variant}: ${item.timeoutReason}`).join("; ")}`);
   console.log(`report: ${reportPath}`);
 
-  if (!pass && process.env.PI_MESH_QUALITY_ALLOW_FAIL !== "1") process.exit(1);
+  if (!pass && process.env.PI_CHALIN_QUALITY_ALLOW_FAIL !== "1") process.exit(1);
 }
 
 export function resolveVariantTimeoutMs(value: string | undefined): number {
@@ -198,9 +198,9 @@ async function runPiVariant(variant: Variant, config: { prompt: string; targetCw
     variant === "mesh" ? "read,bash,grep,find,ls,mesh_route" : "read,bash,grep,find,ls",
   ];
   if (variant === "mesh") args.push("-e", extensionPath);
-  const model = process.env.PI_MESH_QUALITY_MODEL;
+  const model = process.env.PI_CHALIN_QUALITY_MODEL;
   if (model) args.push("--model", model);
-  const thinking = process.env.PI_MESH_QUALITY_THINKING ?? "minimal";
+  const thinking = process.env.PI_CHALIN_QUALITY_THINKING ?? "minimal";
   if (thinking) args.push("--thinking", thinking);
   args.push(config.prompt);
 

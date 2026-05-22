@@ -10,7 +10,7 @@ afterEach(() => { while (tempDirs.length > 0) fs.rmSync(tempDirs.pop()!, { recur
 function tempDir(prefix: string): string { const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); tempDirs.push(dir); return dir; }
 
 test("project discovery indexes unusual nested layouts without semantic hardcoding", () => {
-  const dir = tempDir("pi-mesh-discovery-");
+  const dir = tempDir("pi-chalin-discovery-");
   fs.mkdirSync(path.join(dir, "weird-zone", "alpha", "src"), { recursive: true });
   fs.mkdirSync(path.join(dir, "weird-zone", "alpha", "docs", "adr"), { recursive: true });
   fs.mkdirSync(path.join(dir, "runtime", "edge", "checks"), { recursive: true });

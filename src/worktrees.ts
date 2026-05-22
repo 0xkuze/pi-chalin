@@ -35,13 +35,13 @@ export function prepareWorktreeIsolation(options: MeshPathsOptions & { runId: st
   }
 
   const repoRoot = gitRoot.stdout.trim();
-  const baseDir = path.join(path.dirname(repoRoot), ".pi-mesh-worktrees", safeName(path.basename(repoRoot)), options.runId);
+  const baseDir = path.join(path.dirname(repoRoot), ".pi-chalin-worktrees", safeName(path.basename(repoRoot)), options.runId);
   fs.mkdirSync(baseDir, { recursive: true });
   const worktrees: WorktreeIsolationPlan["worktrees"] = [];
   for (const [index, step] of options.steps.entries()) {
     if (!isWriterAgent(options.agents.get(step.agent))) continue;
     const stepId = `step-${index + 1}`;
-    const branch = `pi-mesh/${options.runId}/${stepId}-${safeName(step.agent)}`;
+    const branch = `pi-chalin/${options.runId}/${stepId}-${safeName(step.agent)}`;
     const target = path.join(baseDir, `${stepId}-${safeName(step.agent)}`);
     const branchResult = git(options.cwd, ["branch", branch, "HEAD"]);
     if (!branchResult.ok && !branchResult.stderr.includes("already exists")) {

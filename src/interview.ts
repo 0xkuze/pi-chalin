@@ -106,7 +106,7 @@ export async function runMeshInterview(
 
 export function formatInterviewResult(result: InterviewResult): string {
   const lines = [
-    `pi-mesh interview · ${result.status}`,
+    `pi-chalin interview · ${result.status}`,
     `artifact: ${result.featureId}`,
     `reason: ${compact(result.reason, 140)}`,
     result.answers.length ? "answers:" : "answers: none",
@@ -157,12 +157,12 @@ function formatChoice(choice: InterviewChoiceInput, recommended: InterviewChoice
 }
 
 function formatQuestionTitle(current: number, total: number, question: string): string {
-  return `pi-mesh interview ${current}/${total} · ${compact(question, 70)}`;
+  return `pi-chalin interview ${current}/${total} · ${compact(question, 70)}`;
 }
 
 function formatInterviewRequest(task: string, reason: string, questions: InterviewQuestionInput[]): string {
   return [
-    "pi-mesh interview required",
+    "pi-chalin interview required",
     `task: ${compact(task, 140)}`,
     `reason: ${compact(reason, 140)}`,
     ...questions.map((question, index) => `${index + 1}. ${question.question}\n   ${question.choices.map((choice) => `- ${choice.label}${choice.recommended ? " (recommended)" : ""}`).join("\n   ")}`),

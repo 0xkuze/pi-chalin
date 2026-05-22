@@ -1,5 +1,5 @@
 {
-  "name": "pi-mesh",
+  "name": "pi-chalin",
   "version": "0.1.0",
   "description": "Pi Coding Agent extension for routed, memory-aware subagent workflows",
   "license": "MIT",
@@ -27,9 +27,9 @@
     "eval:trajectory": "node --experimental-strip-types evals/trajectory.eval.ts",
     "eval:trace": "node --experimental-strip-types evals/trace-quality.eval.ts",
     "eval:workflow": "node --experimental-strip-types evals/workflow-quality.eval.ts",
-    "eval:workflow:sharded": "PI_MESH_WORKFLOW_MODEL=openai-codex/gpt-5.3-codex-spark PI_MESH_WORKFLOW_THINKING=low node --experimental-strip-types evals/workflow-sharded.eval.ts --case=community --variant=both --runs=3 --timeoutMs=45000 --shards=5 --concurrency=1 --shardRetries=1 --matrixPath=evals/results/workflow-quality-community-sharded-matrix.jsonl",
-    "eval:workflow:matrix": "PI_MESH_WORKFLOW_MODEL=openai-codex/gpt-5.3-codex-spark PI_MESH_WORKFLOW_THINKING=low PI_MESH_WORKFLOW_ALLOW_MULTI_SDK=1 PI_MESH_WORKFLOW_ALLOW_LONG_SDK=1 PI_MESH_WORKFLOW_GATES=1 node --experimental-strip-types evals/workflow-quality.eval.ts --mode=sdk --case=all-with-holdout --variant=both --runs=3 --timeoutMs=60000 --matrixPath=evals/results/workflow-quality-full-matrix.jsonl",
-    "eval:workflow:community": "PI_MESH_WORKFLOW_MODEL=openai-codex/gpt-5.3-codex-spark PI_MESH_WORKFLOW_THINKING=low PI_MESH_WORKFLOW_ALLOW_MULTI_SDK=1 PI_MESH_WORKFLOW_GATES=1 node --experimental-strip-types evals/workflow-quality.eval.ts --mode=sdk --case=community --variant=both --runs=3 --timeoutMs=60000 --matrixPath=evals/results/workflow-quality-community-matrix.jsonl",
+    "eval:workflow:sharded": "node --experimental-strip-types evals/workflow-sharded.eval.ts --preset=community",
+    "eval:workflow:matrix": "node --experimental-strip-types evals/workflow-quality.eval.ts --preset=matrix",
+    "eval:workflow:community": "node --experimental-strip-types evals/workflow-quality.eval.ts --preset=community",
     "eval:long": "node --experimental-strip-types evals/long-running.eval.ts"
   },
   "keywords": [

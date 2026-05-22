@@ -20,7 +20,7 @@ test("parseExaTextResults extracts source evidence", () => {
 });
 
 test("searchWeb uses Exa MCP and caches compact source bundles", async () => {
-  const cwd = tempDir("pi-mesh-webfetch-");
+  const cwd = tempDir("pi-chalin-webfetch-");
   const previousFetch = globalThis.fetch;
   let calls = 0;
   globalThis.fetch = async () => {
@@ -42,8 +42,8 @@ test("searchWeb uses Exa MCP and caches compact source bundles", async () => {
 
 
 test("WebFetch audit summarizes cache freshness and sources", async () => {
-  const cwd = tempDir("pi-mesh-webfetch-audit-");
-  const cacheDir = path.join(cwd, ".pi-mesh", "cache", "webfetch");
+  const cwd = tempDir("pi-chalin-webfetch-audit-");
+  const cacheDir = path.join(cwd, ".pi-chalin", "cache", "webfetch");
   fs.mkdirSync(cacheDir, { recursive: true });
   fs.writeFileSync(path.join(cacheDir, "search-a.json"), JSON.stringify({
     query: "Exa MCP",
@@ -62,7 +62,7 @@ test("WebFetch audit summarizes cache freshness and sources", async () => {
   assert.equal(entries[0]?.freshness, "fresh");
 
   const formatted = formatWebFetchAudit(entries);
-  assert.match(formatted, /pi-mesh WebFetch Audit/);
+  assert.match(formatted, /pi-chalin WebFetch Audit/);
   assert.match(formatted, /search · Exa MCP/);
   assert.match(formatted, /Exa docs/);
   assert.match(formatted, /https:\/\/exa.ai\/docs/);

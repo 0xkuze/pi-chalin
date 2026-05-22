@@ -19,7 +19,7 @@ export class MemoryStore {
   private readonly dbPath: string;
 
   constructor(options: MeshPathsOptions) {
-    this.dbPath = path.join(resolveMeshPaths(options).projectRoot, ".pi-mesh", "memory.sqlite");
+    this.dbPath = path.join(resolveMeshPaths(options).projectRoot, ".pi-chalin", "memory.sqlite");
   }
 
   async submitCandidates(candidates: MemoryCandidate[]): Promise<MemoryRecord[]> {
@@ -290,7 +290,7 @@ function memoryTopicKey(normalized: string): string | undefined {
   if (has("extension", "routing", "subagent")) return "extension-routing-subagents";
   if (normalized.includes("memory.sqlite") || (has("memory") && (tokens.has("sqlite") || tokens.has("fts5") || normalized.includes("sql.js-fts5")))) return "memory-store";
   if ((normalized.includes("agents/") || normalized.includes("agents*.md") || normalized.includes("agents/*.md")) && has("agent")) return "agent-catalog";
-  if (normalized.includes(".pi-mesh/runs") || normalized.includes("runs/<id>.json") || normalized.includes("runs/*.json")) return "run-persistence";
+  if (normalized.includes(".pi-chalin/runs") || normalized.includes("runs/<id>.json") || normalized.includes("runs/*.json")) return "run-persistence";
   if (normalized.includes("src/commands.ts") || normalized.includes("/mesh")) return "mesh-commands";
   if (normalized.includes("src/index.ts")) return "runtime-entrypoint";
   if (normalized.includes("src/kernel.ts") || tokens.has("meshkernel")) return "kernel-routing";
@@ -303,7 +303,7 @@ function memoryTokens(normalized: string): Set<string> {
   const stop = new Set([
     "the", "and", "for", "that", "this", "with", "from", "into", "using", "uses", "use", "under", "through", "when", "where", "should",
     "este", "esta", "esto", "para", "que", "con", "por", "desde", "hacia", "como", "usa", "usar", "usando", "debe", "deben", "del", "las", "los", "una", "uno", "mas", "más",
-    "project", "proyecto", "pi", "mesh", "pi-mesh", "coding", "agent",
+    "project", "proyecto", "pi", "mesh", "pi-chalin", "coding", "agent",
   ]);
   return new Set(normalized.split(/\s+/).map(canonicalMemoryToken).filter((token) => token.length >= 3 && !stop.has(token)));
 }

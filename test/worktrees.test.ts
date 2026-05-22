@@ -21,10 +21,10 @@ test("worktree isolation detects parallel writer contention", () => {
 });
 
 test("worktree isolation creates isolated branches and merges clean patches", () => {
-  const cwd = tempDir("pi-mesh-worktree-");
+  const cwd = tempDir("pi-chalin-worktree-");
   git(cwd, ["init"]);
-  git(cwd, ["config", "user.email", "pi-mesh@example.com"]);
-  git(cwd, ["config", "user.name", "pi-mesh"]);
+  git(cwd, ["config", "user.email", "pi-chalin@example.com"]);
+  git(cwd, ["config", "user.name", "pi-chalin"]);
   fs.writeFileSync(path.join(cwd, "a.txt"), "one\n");
   git(cwd, ["add", "."]);
   git(cwd, ["commit", "-m", "init"]);
@@ -41,10 +41,10 @@ test("worktree isolation creates isolated branches and merges clean patches", ()
 });
 
 test("worktree isolation allows dirty primary worktrees but detects overlapping merge conflicts", () => {
-  const cwd = tempDir("pi-mesh-worktree-dirty-");
+  const cwd = tempDir("pi-chalin-worktree-dirty-");
   git(cwd, ["init"]);
-  git(cwd, ["config", "user.email", "pi-mesh@example.com"]);
-  git(cwd, ["config", "user.name", "pi-mesh"]);
+  git(cwd, ["config", "user.email", "pi-chalin@example.com"]);
+  git(cwd, ["config", "user.name", "pi-chalin"]);
   fs.writeFileSync(path.join(cwd, "a.txt"), "one\n");
   git(cwd, ["add", "."]);
   git(cwd, ["commit", "-m", "init"]);
@@ -68,10 +68,10 @@ test("worktree isolation allows dirty primary worktrees but detects overlapping 
 });
 
 test("worktree merge includes new untracked files from isolated writers", () => {
-  const cwd = tempDir("pi-mesh-worktree-new-file-");
+  const cwd = tempDir("pi-chalin-worktree-new-file-");
   git(cwd, ["init"]);
-  git(cwd, ["config", "user.email", "pi-mesh@example.com"]);
-  git(cwd, ["config", "user.name", "pi-mesh"]);
+  git(cwd, ["config", "user.email", "pi-chalin@example.com"]);
+  git(cwd, ["config", "user.name", "pi-chalin"]);
   fs.writeFileSync(path.join(cwd, "a.txt"), "one\n");
   git(cwd, ["add", "."]);
   git(cwd, ["commit", "-m", "init"]);

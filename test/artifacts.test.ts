@@ -13,12 +13,12 @@ afterEach(() => { while (tempDirs.length > 0) fs.rmSync(tempDirs.pop()!, { recur
 function tempDir(prefix: string): string { const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); tempDirs.push(dir); return dir; }
 
 test("ArtifactStore persists resumable feature state with checkpoints and validation contracts", async () => {
-  const cwd = tempDir("pi-mesh-artifacts-");
+  const cwd = tempDir("pi-chalin-artifacts-");
   const store = new ArtifactStore({ cwd });
 
   await store.initFeature({
     featureId: "memory-and-artifacts",
-    goal: "Improve pi-mesh memory and artifact continuation.",
+    goal: "Improve pi-chalin memory and artifact continuation.",
     chain: ["scout", "planner", "worker", "reviewer"],
   });
   await store.appendCheckpoint("memory-and-artifacts", {
@@ -39,7 +39,7 @@ test("ArtifactStore persists resumable feature state with checkpoints and valida
     rules: ["Use structured memory candidates", "Do not store raw command output"],
   });
   await store.appendInterviewDecision("memory-and-artifacts", {
-    task: "Improve pi-mesh memory and artifact continuation.",
+    task: "Improve pi-chalin memory and artifact continuation.",
     reason: "Scope is ambiguous before planning.",
     status: "answered",
     answers: [{ questionId: "scope", question: "How broad is the change?", answer: "MVP scope", recommended: true }],
@@ -54,20 +54,20 @@ test("ArtifactStore persists resumable feature state with checkpoints and valida
   assert.equal(state?.interviewDecisions.length, 1);
 
   const resume = await store.resumeContext("memory-and-artifacts");
-  assert.match(resume, /Improve pi-mesh memory/);
+  assert.match(resume, /Improve pi-chalin memory/);
   assert.match(resume, /Design selected/);
   assert.match(resume, /memory-quality-gate/);
   assert.match(resume, /memory-worker/);
   assert.match(resume, /Interview decisions/);
   assert.match(resume, /How broad is the change\?/);
 
-  assert.ok(fs.existsSync(path.join(cwd, ".pi-mesh", "artifacts", "features", "memory-and-artifacts", "state.json")));
-  assert.ok(fs.existsSync(path.join(cwd, ".pi-mesh", "artifacts", "features", "memory-and-artifacts", "checkpoints.jsonl")));
-  assert.ok(fs.existsSync(path.join(cwd, ".pi-mesh", "artifacts", "features", "memory-and-artifacts", "skills", "memory-worker", "SKILL.md")));
+  assert.ok(fs.existsSync(path.join(cwd, ".pi-chalin", "artifacts", "features", "memory-and-artifacts", "state.json")));
+  assert.ok(fs.existsSync(path.join(cwd, ".pi-chalin", "artifacts", "features", "memory-and-artifacts", "checkpoints.jsonl")));
+  assert.ok(fs.existsSync(path.join(cwd, ".pi-chalin", "artifacts", "features", "memory-and-artifacts", "skills", "memory-worker", "SKILL.md")));
 });
 
 test("MeshKernel records run artifacts for long or artifact-aware workflows", async () => {
-  const cwd = tempDir("pi-mesh-artifacts-kernel-");
+  const cwd = tempDir("pi-chalin-artifacts-kernel-");
   const route = routeFromPlan({
     topology: "chain",
     steps: [
@@ -90,7 +90,7 @@ test("MeshKernel records run artifacts for long or artifact-aware workflows", as
 
 
 test("openArtifactPanel provides a real navigable TUI over feature artifacts", async () => {
-  const cwd = tempDir("pi-mesh-artifacts-ui-");
+  const cwd = tempDir("pi-chalin-artifacts-ui-");
   const store = new ArtifactStore({ cwd });
   await store.initFeature({ featureId: "checkout-refactor", goal: "Refactor checkout flow.", chain: ["scout", "worker", "reviewer"] });
   await store.appendCheckpoint("checkout-refactor", {
@@ -119,7 +119,7 @@ test("openArtifactPanel provides a real navigable TUI over feature artifacts", a
 });
 
 test("openArtifactPanel shows interview decisions as navigable artifact context", async () => {
-  const cwd = tempDir("pi-mesh-artifacts-interview-ui-");
+  const cwd = tempDir("pi-chalin-artifacts-interview-ui-");
   const store = new ArtifactStore({ cwd });
   await store.initFeature({ featureId: "ambiguous-migration", goal: "Clarify migration request.", chain: ["interview"] });
   await store.appendInterviewDecision("ambiguous-migration", {

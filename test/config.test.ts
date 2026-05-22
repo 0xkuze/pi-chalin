@@ -23,9 +23,9 @@ function writeJson(filePath: string, value: unknown): void {
 }
 
 test("config merge order is defaults then project then user", () => {
-  const cwd = tempDir("pi-mesh-cwd-");
-  const userRoot = tempDir("pi-mesh-user-");
-  writeJson(path.join(cwd, ".pi-mesh", "config.json"), { enabled: false, autonomy: "low" });
+  const cwd = tempDir("pi-chalin-cwd-");
+  const userRoot = tempDir("pi-chalin-user-");
+  writeJson(path.join(cwd, ".pi-chalin", "config.json"), { enabled: false, autonomy: "low" });
   writeJson(path.join(userRoot, "config.json"), { autonomy: "high" });
 
   const loaded = loadEffectiveConfig({ cwd, userRoot });
@@ -34,8 +34,8 @@ test("config merge order is defaults then project then user", () => {
 });
 
 test("safety non-downgrade prevents disabling mandatory guards", () => {
-  const cwd = tempDir("pi-mesh-cwd-");
-  const userRoot = tempDir("pi-mesh-user-");
+  const cwd = tempDir("pi-chalin-cwd-");
+  const userRoot = tempDir("pi-chalin-user-");
   writeJson(path.join(userRoot, "config.json"), {
     safety: {
       approvalRiskThreshold: "critical",
@@ -54,9 +54,9 @@ test("safety non-downgrade prevents disabling mandatory guards", () => {
 });
 
 test("config persists and validates per-agent thinking overrides", () => {
-  const cwd = tempDir("pi-mesh-cwd-");
+  const cwd = tempDir("pi-chalin-cwd-");
   setAgentThinkingOverride({ cwd }, "built-in/reviewer", "high", "project");
-  writeJson(path.join(cwd, ".pi-mesh", "config.json"), {
+  writeJson(path.join(cwd, ".pi-chalin", "config.json"), {
     agents: {
       thinkingOverrides: {
         "built-in/reviewer": "high",

@@ -30,10 +30,10 @@ export function registerMeshAutoRouter(pi: ExtensionAPI): void {
     return {
       systemPrompt: `${event.systemPrompt}\n\n${orchestrationPrompt}`,
       message: {
-        customType: useCompactPrompt ? "pi-mesh-direct-compact-orchestration" : useCompactCriticalPrompt ? "pi-mesh-critical-compact-orchestration" : "pi-mesh-orchestration",
+        customType: useCompactPrompt ? "pi-chalin-direct-compact-orchestration" : useCompactCriticalPrompt ? "pi-chalin-critical-compact-orchestration" : "pi-chalin-orchestration",
         content: useCompactPrompt ? compactDirectSteeringMessage(ctx.hasUI) : useCompactCriticalPrompt ? compactCriticalSteeringMessage(ctx.hasUI) : [
-          "If the user says continue/resume after an interrupted pi-mesh run, call mesh_resume before answering from partial findings.",
-          "pi-mesh preflight: if this is branch/project analysis, architecture/planning, broad/project-wide review, project-wide refactor strategy, complex/risky multi-file implementation, or memory recall, call mesh_route first. Bounded read-only mini-project reviews, bounded scaffolding, named-file bugfixes, named-file refactors, and simple implementation with explicit acceptance criteria should stay direct.",
+          "If the user says continue/resume after an interrupted pi-chalin run, call mesh_resume before answering from partial findings.",
+          "pi-chalin preflight: if this is branch/project analysis, architecture/planning, broad/project-wide review, project-wide refactor strategy, complex/risky multi-file implementation, or memory recall, call mesh_route first. Bounded read-only mini-project reviews, bounded scaffolding, named-file bugfixes, named-file refactors, and simple implementation with explicit acceptance criteria should stay direct.",
           "For explicit small bugfix/test requests with named files, inspect the target files once, edit promptly, and verify. Do not route or dry-run unless the change is broad, destructive, a security-sensitive mutation, or ambiguous.",
           "Also call mesh_route for risky surgical/long-file edits; use scout → planner → worker → reviewer so the edit stays targeted and verified.",
           "If the user asks to compare independent approaches/options, choose mesh_route with parallel planners/reviewers and synthesize the recommendation afterward.",
@@ -56,14 +56,14 @@ export function registerMeshAutoRouter(pi: ExtensionAPI): void {
       const blockedReason = meshRouteBlockedReason(event);
       if (blockedReason) {
         pi.sendMessage({
-          customType: "pi-mesh-route-blocked-nudge",
+          customType: "pi-chalin-route-blocked-nudge",
           content: `${event.toolName} did not execute work (${blockedReason}). Do not claim completion from that result. If the user's request is a safe explicit edit, continue directly with native tools; otherwise explain the blocker.`,
           display: false,
         }, { triggerTurn: false, deliverAs: "steer" });
         return;
       }
       pi.sendMessage({
-        customType: "pi-mesh-synthesis-nudge",
+        customType: "pi-chalin-synthesis-nudge",
         content: `${event.toolName} finished. Answer the user's original prompt now from the Final answer material in the tool result. Do not call another tool unless that material explicitly names a critical blocking gap.`,
         display: false,
       }, { triggerTurn: false, deliverAs: "steer" });
@@ -80,14 +80,14 @@ export function registerMeshAutoRouter(pi: ExtensionAPI): void {
     });
     if (shouldProgressNudge) {
       pi.sendMessage({
-        customType: "pi-mesh-direct-progress-nudge",
+        customType: "pi-chalin-direct-progress-nudge",
         content: "You have changed files for a bounded direct task. If the user asked for tests and you have not changed a test/spec file, add or update the relevant test before verification. Tests must prove the requested behavior with non-trivial assertions, not only keep or rename the starter smoke/empty test. For timer code, prefer injected clocks/schedulers over brittle MockTimers; for Node CLI subprocess tests, preserve process.env and derive target file URLs directly. Then run the nearest relevant verification command. If it fails, fix only the root cause and rerun verification after the last edit; then answer. The final answer must name the changed file paths and the exact verification command/result. Do not continue exploring unless a concrete acceptance criterion is still missing.",
         display: false,
       }, { triggerTurn: false, deliverAs: "steer" });
     }
     if (shouldReadyToVerifyNudge) {
       pi.sendMessage({
-        customType: "pi-mesh-direct-ready-to-verify-nudge",
+        customType: "pi-chalin-direct-ready-to-verify-nudge",
         content: [
           "Implementation and required test/doc edits are now in place for this bounded direct task.",
           "Before verification, sanity-check that requested tests are behavior-bearing: they should assert the requested outputs/effects and relevant edge cases, not only a starter empty/smoke path.",
@@ -100,7 +100,7 @@ export function registerMeshAutoRouter(pi: ExtensionAPI): void {
     if (shouldFailureNudge) {
       const commandText = verificationCommand ? `\`${verificationCommand}\`` : "the verification command";
       pi.sendMessage({
-        customType: "pi-mesh-direct-verification-failed-nudge",
+        customType: "pi-chalin-direct-verification-failed-nudge",
         content: [
           `${commandText} failed after file changes.`,
           "Do NOT answer as done yet. Read the failure, fix the root cause, and rerun the nearest relevant verification after the final edit. You may not answer with a failed or stale Verification result.",
@@ -113,7 +113,7 @@ export function registerMeshAutoRouter(pi: ExtensionAPI): void {
     }
     if (shouldMissingTestNudge) {
       pi.sendMessage({
-        customType: "pi-mesh-direct-tests-missing-nudge",
+        customType: "pi-chalin-direct-tests-missing-nudge",
         content: [
           "The user requested tests, but the changed files so far do not include a test/spec file.",
           "Do NOT answer as done yet. Your next action must be an edit/write to the relevant test/spec file, not a final answer.",
@@ -125,7 +125,7 @@ export function registerMeshAutoRouter(pi: ExtensionAPI): void {
     if (!shouldCompletionNudge) return;
     const commandText = verificationCommand ? `\`${verificationCommand}\`` : "the verification command";
     pi.sendMessage({
-      customType: "pi-mesh-direct-completion-nudge",
+      customType: "pi-chalin-direct-completion-nudge",
       content: [
         `You changed files and ${commandText} passed.`,
         "If the user's acceptance criteria are satisfied and this passing verification happened after the last edit, answer now using this exact compact evidence format:",
@@ -166,7 +166,7 @@ export function shouldUseCompactMeshCriticalPrompt(prompt: string): boolean {
 
 function compactCriticalSteeringMessage(hasUI?: boolean): string {
   return [
-    "pi-mesh critical preflight: this is risky/complex/surgical work. First action must be `mesh_route`; do not answer direct and do not inspect with native tools first.",
+    "pi-chalin critical preflight: this is risky/complex/surgical work. First action must be `mesh_route`; do not answer direct and do not inspect with native tools first.",
     hasUI ? undefined : "Non-interactive mode: one real mesh_route, then stop from the mesh handoff; no post-mesh native exploration.",
     "Use worker/reviewer discipline: decompose, assign ownership, verify, and preserve a compact final handoff.",
   ].filter((line): line is string => Boolean(line)).join("\n");
@@ -174,7 +174,7 @@ function compactCriticalSteeringMessage(hasUI?: boolean): string {
 
 function compactDirectSteeringMessage(hasUI?: boolean): string {
   return [
-    "pi-mesh compact preflight: this looks like bounded direct work. Prefer native tools; do not spend budget on orchestration prose or visible planning before tool calls.",
+    "pi-chalin compact preflight: this looks like bounded direct work. Prefer native tools; do not spend budget on orchestration prose or visible planning before tool calls.",
     hasUI ? undefined : "Non-interactive mode: first action should be a relevant tool call; inspect briefly, write promptly, verify, fix failures, rerun verification after the final edit, then final answer.",
     "For dependency-free TypeScript scaffolding: exact requested files, Node built-in test runner, tests under test/, no uninstalled runners/dependencies, exported requested API. If it is a CLI package, declare the requested command in package.json `bin`, not only in `scripts`; `bin` values must be executable file paths such as `./src/cli.ts` or `./bin/name`, never `node ...` command strings.",
     "If tests are requested, make them behavior-bearing: assert requested outputs/effects and edge/failure cases instead of only preserving starter smoke/empty tests.",
@@ -208,10 +208,10 @@ function meshRouteBlockedReason(event: unknown): string | undefined {
 }
 
 function scheduleNonInteractiveShutdown(ctx: { hasUI?: boolean; abort?: () => void; shutdown?: () => void }): void {
-  if (ctx.hasUI || typeof ctx.shutdown !== "function" || process.env.PI_MESH_NONINTERACTIVE_SHUTDOWN === "0") return;
+  if (ctx.hasUI || typeof ctx.shutdown !== "function" || process.env.PI_CHALIN_NONINTERACTIVE_SHUTDOWN === "0") return;
   const abort = ctx.abort;
   const shutdown = ctx.shutdown;
-  const configuredDelay = Number(process.env.PI_MESH_NONINTERACTIVE_SHUTDOWN_DELAY_MS);
+  const configuredDelay = Number(process.env.PI_CHALIN_NONINTERACTIVE_SHUTDOWN_DELAY_MS);
   const delayMs = Number.isFinite(configuredDelay) && configuredDelay >= 0 ? configuredDelay : 0;
   const timer = setTimeout(() => {
     try {

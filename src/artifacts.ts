@@ -95,7 +95,7 @@ export class ArtifactStore {
   private readonly root: string;
 
   constructor(options: MeshPathsOptions) {
-    this.root = path.join(resolveMeshPaths(options).projectRoot, ".pi-mesh", "artifacts");
+    this.root = path.join(resolveMeshPaths(options).projectRoot, ".pi-chalin", "artifacts");
   }
 
   async initFeature(input: { featureId: string; goal: string; chain?: string[]; currentStep?: string }): Promise<FeatureArtifactState> {
@@ -182,7 +182,7 @@ export class ArtifactStore {
 
   async resumeContext(featureId: string): Promise<string> {
     const state = await this.loadFeature(featureId);
-    if (!state) return `No pi-mesh artifacts found for feature '${featureId}'.`;
+    if (!state) return `No pi-chalin artifacts found for feature '${featureId}'.`;
     const latest = state.checkpoints.slice(-5).map((checkpoint) => `- ${checkpoint.title} (${checkpoint.agent}, ${checkpoint.status}): ${checkpoint.summary}`);
     const validations = state.validationContracts.map((contract) => `- ${contract.id}: ${contract.successCriteria.join("; ")}`);
     const interviews = state.interviewDecisions.slice(-5).flatMap((decision) => [

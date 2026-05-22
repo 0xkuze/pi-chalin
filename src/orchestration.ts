@@ -88,7 +88,7 @@ export const ORCHESTRATION_EVAL_CASES: MeshOrchestrationEvalCase[] = [
   },
   {
     id: "memory-recall",
-    prompt: "recuerda que decidimos sobre la memoria de pi-mesh",
+    prompt: "recuerda que decidimos sobre la memoria de pi-chalin",
     expectedDecision: "mesh",
     expectedTopology: "memory-only",
     expectedAgents: [],
@@ -189,19 +189,19 @@ export const ORCHESTRATION_EVAL_CASES: MeshOrchestrationEvalCase[] = [
 
 export function buildCompactMeshOrchestratorSystemPrompt(): string {
   return [
-    "## pi-mesh orchestration (compact)",
-    "You are the primary Pi agent. Choose direct native execution for safe bounded implementation/scaffolding/test/refactor tasks with explicit files or acceptance criteria. Use pi-mesh only when specialist context isolation is worth the latency.",
+    "## pi-chalin orchestration (compact)",
+    "You are the primary Pi agent. Choose direct native execution for safe bounded implementation/scaffolding/test/refactor tasks with explicit files or acceptance criteria. Use pi-chalin only when specialist context isolation is worth the latency.",
     "Direct bounded code work: do not narrate planning or emit visible analysis before tools; first inspect briefly, then write the requested implementation/test/docs promptly, ensure requested tests prove the behavior with non-trivial assertions rather than only starter smoke/empty coverage, run the nearest relevant verification command, fix failures, rerun verification after the final edit, and answer immediately with changed paths, verification result, and one note about the satisfied constraint. For timer behavior, prefer injected clocks/schedulers over brittle Node MockTimers; for Node CLI subprocess tests, preserve process.env and derive paths directly from import.meta.url.",
     "If the prompt says review-only, docs-only, no code changes, or no mutations, obey that literally: do not add tests/source files or modify code unless explicitly requested. For dependency-free TypeScript scaffolding, use exact requested paths, export the requested API, use package.json test script `node --experimental-strip-types --test test/*.test.ts`, keep tests under `test/`, avoid uninstalled runners/dependencies, declare package.json `bin` when scaffolding a CLI command; `bin` values must be executable file paths, not command strings, and verify before final answer.",
     "Call `mesh_route` for broad/deep project analysis, architecture/migration strategy, broad review, complex/risky multi-file work, risky long-file/surgical edits, parallel option comparison, or memory/continuation work. Call `mesh_interview` only when a real decision is ambiguous.",
-    "If mesh_route returns, answer from its Final answer material immediately. Do not call mesh_route for bounded direct work merely because pi-mesh is available.",
+    "If mesh_route returns, answer from its Final answer material immediately. Do not call mesh_route for bounded direct work merely because pi-chalin is available.",
   ].join("\n");
 }
 
 export function buildCompactMeshCriticalSystemPrompt(): string {
   return [
-    "## pi-mesh orchestration (critical compact)",
-    "This prompt requires pi-mesh before native tools. First action should be one `mesh_route` call; do not inspect files directly before routing.",
+    "## pi-chalin orchestration (critical compact)",
+    "This prompt requires pi-chalin before native tools. First action should be one `mesh_route` call; do not inspect files directly before routing.",
     "Use `chain` scout → planner → worker → reviewer for risky implementation, long-file/surgical edits, auth/security-sensitive mutations, or complex multi-file work.",
     "Use `dag` for independent implementation slices: discovery/planning first, parallel workers with non-overlapping ownership, then reviewer synthesis.",
     "For surgical/long-file edits: worker must use targeted edit discipline, not full rewrite; reviewer must verify scope and tests.",
@@ -213,13 +213,13 @@ export function buildCompactMeshCriticalSystemPrompt(): string {
 export function buildMeshOrchestratorSystemPrompt(agents: AgentDefinition[]): string {
   const roster = agents.map(formatAgentForPrompt).join("\n") || "- none";
   return [
-    "## pi-mesh orchestration",
+    "## pi-chalin orchestration",
     "You are the primary Pi agent. Decide whether to answer directly, call `mesh_interview`, or call `mesh_route` as an agents-as-tools runtime.",
-    "pi-mesh is optional orchestration for work that benefits from specialist context isolation; the user does not need to invoke it.",
+    "pi-chalin is optional orchestration for work that benefits from specialist context isolation; the user does not need to invoke it.",
     "",
     "### Gate",
     "Before read/bash/grep/find/ls, decide whether this is repository orchestration work.",
-    "MUST call `mesh_resume` first when the user asks to continue/resume and a prior pi-mesh run was paused, interrupted, or left stale by terminal shutdown. Do not answer from partial findings until resume has no resumable run.",
+    "MUST call `mesh_resume` first when the user asks to continue/resume and a prior pi-chalin run was paused, interrupted, or left stale by terminal shutdown. Do not answer from partial findings until resume has no resumable run.",
     "MUST call `mesh_interview` before `mesh_route` when the request is ambiguous, uses a term you cannot resolve from memory/codebase exploration, has missing scope/constraints, or contains an uncovered decision branch that would make subagents guess.",
     "MUST call `mesh_route` first for clear current branch/diff/PR summaries, what this project does, project structure, architecture/migration/project-wide refactor strategy, broad/project-wide review, security/correctness review over a broad surface, complex/risky multi-file implementation, risky long-file/surgical edits, or prior memory. Do NOT treat an explicit named-file refactor implementation as refactor strategy; that is bounded direct work unless the prompt says broad/risky/long-file.",
     "Hard direct gate: if the user names one to three target file paths and asks to refactor/fix/add/update/extract tests or helpers, do NOT call `mesh_route`; use native read/edit/write/bash directly. Calling mesh_route for that bounded case wastes latency and will be redirected back to direct execution.",
@@ -229,11 +229,11 @@ export function buildMeshOrchestratorSystemPrompt(agents: AgentDefinition[]): st
     "Call `mesh_interview` in batches of 1-5 concise questions with at most 5 concise answers each; mark the best answer as recommended and allow custom answers unless safety requires constrained choices.",
     "After `mesh_interview` returns, use its artifact answers as context. If still blocked, ask another interview batch; if ready, continue planning or call `mesh_route`.",
     "Call `mesh_route` at most once per user prompt after the needed interview context is available. After it returns, immediately write the final answer from its `Final answer material`; do not keep thinking, do not call another tool, and do not inspect files unless the handoff names a concrete blocking gap.",
-    "For long-running/continuation work, use `mesh_resume` for interrupted runs; use `mesh_artifact_resume` when the user names an existing feature/task artifact; otherwise set `needsArtifacts: true` so pi-mesh records run summaries and handoffs.",
+    "For long-running/continuation work, use `mesh_resume` for interrupted runs; use `mesh_artifact_resume` when the user names an existing feature/task artifact; otherwise set `needsArtifacts: true` so pi-chalin records run summaries and handoffs.",
     "",
     "### Interview when",
     "Use `mesh_interview` when proceeding would require guessing user intent, unknown terminology, risk tolerance, target scope, accepted tradeoffs, or destructive/large-change boundaries.",
-    "Do not interview for information that can be cheaply and safely discovered from the local codebase or existing pi-mesh memory; discover first, interview only for the remaining blocker.",
+    "Do not interview for information that can be cheaply and safely discovered from the local codebase or existing pi-chalin memory; discover first, interview only for the remaining blocker.",
     "Persisted interview answers are artifacts and should be reused by the next route/subagents instead of asking again.",
     "",
     "### Direct answer when",
@@ -264,7 +264,7 @@ export function buildMeshOrchestratorSystemPrompt(agents: AgentDefinition[]): st
     "- Use `mesh_web_search` only for current external facts, docs, URLs, or explicit web research. It is available globally and to external-context agents; workers should not use it by default.",
     "- Do not send worker agents to browse the web by default.",
     "",
-    "### Available pi-mesh agents",
+    "### Available pi-chalin agents",
     roster,
   ].join("\n");
 }

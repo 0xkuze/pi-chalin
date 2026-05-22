@@ -11,7 +11,7 @@ afterEach(() => { while (tempDirs.length > 0) fs.rmSync(tempDirs.pop()!, { recur
 function tempDir(prefix: string): string { const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); tempDirs.push(dir); return dir; }
 
 test("project snapshot is stack-agnostic and detects Go projects without package.json", () => {
-  const dir = tempDir("pi-mesh-go-");
+  const dir = tempDir("pi-chalin-go-");
   fs.mkdirSync(path.join(dir, "cmd", "api"), { recursive: true });
   fs.mkdirSync(path.join(dir, "internal", "service"), { recursive: true });
   fs.writeFileSync(path.join(dir, "go.mod"), "module example.com/app\n");
@@ -38,7 +38,7 @@ test("guarded child bash blocks ad-hoc scripts and file mutation", () => {
 });
 
 test("child tool policy enforces budget before executing tools", async () => {
-  const dir = tempDir("pi-mesh-budget-");
+  const dir = tempDir("pi-chalin-budget-");
   const policy = createChildToolPolicy({ cwd: dir, maxToolCalls: 1, agentName: "scout" });
   const tool = createProjectSnapshotTool(policy);
 
@@ -53,7 +53,7 @@ test("child tool policy enforces budget before executing tools", async () => {
 });
 
 test("child write tool is blocked for existing files", async () => {
-  const dir = tempDir("pi-mesh-write-");
+  const dir = tempDir("pi-chalin-write-");
   fs.writeFileSync(path.join(dir, "existing.ts"), "export const value = 1;\n");
   const policy = createChildToolPolicy({ cwd: dir, maxToolCalls: 5, agentName: "worker", allowedTools: ["write"] });
   const write = createChildTools(policy).find((tool) => tool.name === "write");
@@ -67,7 +67,7 @@ test("child write tool is blocked for existing files", async () => {
 });
 
 test("child tool policy blocks tools outside capabilities", () => {
-  const dir = tempDir("pi-mesh-allowed-tools-");
+  const dir = tempDir("pi-chalin-allowed-tools-");
   const policy = createChildToolPolicy({ cwd: dir, maxToolCalls: 5, agentName: "planner", allowedTools: ["mesh_project_snapshot", "read"] });
 
   const gate = policy.beforeTool("bash", { command: "git status --short" });
@@ -78,7 +78,7 @@ test("child tool policy blocks tools outside capabilities", () => {
 });
 
 test("controlled child artifact tool writes checkpoints and validation contracts", async () => {
-  const dir = tempDir("pi-mesh-child-artifact-");
+  const dir = tempDir("pi-chalin-child-artifact-");
   const policy = createChildToolPolicy({ cwd: dir, maxToolCalls: 5, agentName: "worker", allowedTools: ["mesh_artifact_write"] });
   const tool = createChildTools(policy).find((candidate) => candidate.name === "mesh_artifact_write");
   assert.ok(tool);
@@ -103,14 +103,14 @@ test("controlled child artifact tool writes checkpoints and validation contracts
   }, undefined, undefined, undefined as never);
   assert.match(String((validation.content?.[0] as { text?: string } | undefined)?.text ?? ""), /validation contract saved/i);
 
-  const state = JSON.parse(fs.readFileSync(path.join(dir, ".pi-mesh", "artifacts", "features", "checkout-refactor", "state.json"), "utf-8"));
+  const state = JSON.parse(fs.readFileSync(path.join(dir, ".pi-chalin", "artifacts", "features", "checkout-refactor", "state.json"), "utf-8"));
   assert.equal(state.checkpoints.length, 1);
   assert.equal(state.validationContracts.length, 1);
   assert.equal(policy.metrics().toolCalls, 2);
 });
 
 test("child tools expose only policy-allowed definitions to reduce child prompt bloat", () => {
-  const dir = tempDir("pi-mesh-child-tools-prune-");
+  const dir = tempDir("pi-chalin-child-tools-prune-");
   const policy = createChildToolPolicy({ cwd: dir, maxToolCalls: 5, agentName: "scout", allowedTools: ["read", "mesh_project_snapshot"] });
   const names = createChildTools(policy).map((tool) => tool.name).sort();
   assert.deepEqual(names, ["mesh_project_snapshot", "read"]);
