@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, test } from "node:test";
+import { afterEach, test } from "bun:test";
 import { buildProjectSnapshot, formatProjectSnapshot } from "../src/snapshot.ts";
 import { classifyBashCommand, createChildToolPolicy, createChildTools, createProjectSnapshotTool } from "../src/child-tools.ts";
 
@@ -98,7 +98,7 @@ test("controlled child artifact tool writes checkpoints and validation contracts
     featureId: "checkout-refactor",
     id: "checkout-tests",
     title: "Checkout validation tests",
-    commands: ["npm test -- checkout"],
+    commands: ["bun test -- checkout"],
     successCriteria: ["Checkout validation tests pass", "No snapshot-only approval"],
   }, undefined, undefined, undefined as never);
   assert.match(String((validation.content?.[0] as { text?: string } | undefined)?.text ?? ""), /validation contract saved/i);
@@ -125,8 +125,8 @@ test("formatProjectSnapshot includes compact recent commits for branch summaries
     cacheKey: "cache",
     stack: ["node"],
     signals: ["package.json"],
-    packageManagers: ["npm"],
-    testCommands: ["npm test"],
+    packageManagers: ["bun"],
+    testCommands: ["bun test"],
     buildCommands: [],
     entrypoints: [],
     highSignalFiles: [],

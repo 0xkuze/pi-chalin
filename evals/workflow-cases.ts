@@ -162,7 +162,7 @@ function refactorPricingCase(): WorkflowEvalCase {
         check("src/pricing.ts", "exports calculateInvoice", ["export function calculateInvoice", "subtotal", "tax", "total"], 22),
         check("src/pricing.ts", "extracts helper functions", ["function (?!calculateInvoice)\\w+|const \\w*(Subtotal|Tax|Discount|Taxable)\\w*\\s*(?::[^=]+)?=\\s*\\([^)]*\\)\\s*(?::[^=]+)?=>", "subtotal", "taxable|tax"], 18),
         check("test/pricing.test.ts", "keeps behavior tests", ["calculateInvoice", "discount", "tax", "total", "expect|assert"], 20),
-        check("package.json", "keeps test script", ["vitest run|node\\s+.*--test|npm test"], 8),
+        check("package.json", "keeps test script", ["vitest run|node\\s+.*--test|bun test"], 8),
       ],
       forbiddenContent: [
         forbid("src/pricing.ts", "does not delete invoice math", ["throw new Error\\(['\"]not implemented", "TODO: implement"], 25),
@@ -174,9 +174,9 @@ function refactorPricingCase(): WorkflowEvalCase {
       validation: { runTests: true, allowSkip: true },
     },
     setup(cwd) {
-      writeBaseNodeProject(cwd);
+      writeBaseBunProject(cwd);
       write(cwd, "src/pricing.ts", `export interface LineItem {\n  sku: string;\n  quantity: number;\n  unitPriceCents: number;\n}\n\nexport interface InvoiceInput {\n  items: LineItem[];\n  discountPercent?: number;\n  taxRatePercent: number;\n}\n\nexport function calculateInvoice(input: InvoiceInput) {\n  let subtotal = 0;\n  for (const item of input.items) {\n    subtotal += item.quantity * item.unitPriceCents;\n  }\n  const discount = Math.round(subtotal * ((input.discountPercent ?? 0) / 100));\n  const taxable = subtotal - discount;\n  const tax = Math.round(taxable * (input.taxRatePercent / 100));\n  const total = taxable + tax;\n  return { subtotal, discount, tax, total };\n}\n`);
-      write(cwd, "test/pricing.test.ts", `import { describe, it } from "node:test";\nimport assert from "node:assert/strict";\nimport { calculateInvoice } from "../src/pricing.ts";\n\ndescribe("calculateInvoice", () => {\n  it("calculates totals with discount and tax", () => {\n    assert.deepEqual(calculateInvoice({\n      items: [{ sku: "book", quantity: 2, unitPriceCents: 1000 }],\n      discountPercent: 10,\n      taxRatePercent: 8,\n    }), { subtotal: 2000, discount: 200, tax: 144, total: 1944 });\n  });\n});\n`);
+      write(cwd, "test/pricing.test.ts", `import { describe, it } from "bun:test";\nimport assert from "node:assert/strict";\nimport { calculateInvoice } from "../src/pricing.ts";\n\ndescribe("calculateInvoice", () => {\n  it("calculates totals with discount and tax", () => {\n    assert.deepEqual(calculateInvoice({\n      items: [{ sku: "book", quantity: 2, unitPriceCents: 1000 }],\n      discountPercent: 10,\n      taxRatePercent: 8,\n    }), { subtotal: 2000, discount: 200, tax: 144, total: 1944 });\n  });\n});\n`);
     },
   };
 }
@@ -203,9 +203,9 @@ function addUnitTestCase(): WorkflowEvalCase {
       validation: { runTests: true, allowSkip: true },
     },
     setup(cwd) {
-      writeBaseNodeProject(cwd);
+      writeBaseBunProject(cwd);
       write(cwd, "src/safeDivide.ts", `export function safeDivide(numerator: number, denominator: number): number {\n  if (denominator === 0 || !Number.isFinite(denominator)) return 0;\n  return numerator / denominator;\n}\n`);
-      write(cwd, "test/safeDivide.test.ts", `import { describe, it } from "node:test";\nimport assert from "node:assert/strict";\nimport { safeDivide } from "../src/safeDivide.ts";\n\ndescribe("safeDivide", () => {\n  it("divides normal numbers", () => {\n    assert.equal(safeDivide(10, 2), 5);\n  });\n});\n`);
+      write(cwd, "test/safeDivide.test.ts", `import { describe, it } from "bun:test";\nimport assert from "node:assert/strict";\nimport { safeDivide } from "../src/safeDivide.ts";\n\ndescribe("safeDivide", () => {\n  it("divides normal numbers", () => {\n    assert.equal(safeDivide(10, 2), 5);\n  });\n});\n`);
     },
   };
 }
@@ -231,9 +231,9 @@ function smallFeatureCase(): WorkflowEvalCase {
       validation: { runTests: true, allowSkip: true },
     },
     setup(cwd) {
-      writeBaseNodeProject(cwd);
+      writeBaseBunProject(cwd);
       write(cwd, "src/filterTasks.ts", `export interface Task {\n  id: string;\n  title: string;\n  description?: string;\n}\n\nexport function filterTasks(tasks: Task[], query: string): Task[] {\n  return tasks;\n}\n`);
-      write(cwd, "test/filterTasks.test.ts", `import { describe, it } from "node:test";\nimport assert from "node:assert/strict";\nimport { filterTasks } from "../src/filterTasks.ts";\n\ndescribe("filterTasks", () => {\n  it("returns all tasks for empty query", () => {\n    assert.equal(filterTasks([{ id: "1", title: "Pay rent" }], "").length, 1);\n  });\n});\n`);
+      write(cwd, "test/filterTasks.test.ts", `import { describe, it } from "bun:test";\nimport assert from "node:assert/strict";\nimport { filterTasks } from "../src/filterTasks.ts";\n\ndescribe("filterTasks", () => {\n  it("returns all tasks for empty query", () => {\n    assert.equal(filterTasks([{ id: "1", title: "Pay rent" }], "").length, 1);\n  });\n});\n`);
     },
   };
 }
@@ -260,9 +260,9 @@ function largeFeatureCase(): WorkflowEvalCase {
       validation: { runTests: true, allowSkip: true },
     },
     setup(cwd) {
-      writeBaseNodeProject(cwd);
+      writeBaseBunProject(cwd);
       write(cwd, "src/rateLimit.ts", `export interface RateLimitResult {\n  allowed: boolean;\n  remaining: number;\n  retryAfterMs: number;\n}\n\nexport function createRateLimiter(_options: { limit: number; windowMs: number }) {\n  return {\n    check(_key: string): RateLimitResult {\n      return { allowed: true, remaining: 1, retryAfterMs: 0 };\n    },\n  };\n}\n`);
-      write(cwd, "test/rateLimit.test.ts", `import { describe, it } from "node:test";\nimport assert from "node:assert/strict";\nimport { createRateLimiter } from "../src/rateLimit.ts";\n\ndescribe("createRateLimiter", () => {\n  it("allows initial request", () => {\n    const limiter = createRateLimiter({ limit: 2, windowMs: 1000 });\n    assert.equal(limiter.check("user-1").allowed, true);\n  });\n});\n`);
+      write(cwd, "test/rateLimit.test.ts", `import { describe, it } from "bun:test";\nimport assert from "node:assert/strict";\nimport { createRateLimiter } from "../src/rateLimit.ts";\n\ndescribe("createRateLimiter", () => {\n  it("allows initial request", () => {\n    const limiter = createRateLimiter({ limit: 2, windowMs: 1000 });\n    assert.equal(limiter.check("user-1").allowed, true);\n  });\n});\n`);
     },
   };
 }
@@ -280,7 +280,7 @@ function scaffoldCase(): WorkflowEvalCase {
         check("package.json", "declares CLI package and scripts", ["note-pack", "bin", "test", "type"], 20),
         check("src/*.ts", "implements lowercase normalization", ["toLowerCase", "export"], 25),
         check("test/*.test.ts", "tests normalization", ["normalize|note-pack|cli", "toLowerCase|lowercase|min[uú]scula|may[uú]scula", "expect|assert|test\\("], 20),
-        check("README.md", "documents usage", ["note-pack", "Usage|Uso", "node|npm|npx|note-pack\\s+<"], 10),
+        check("README.md", "documents usage", ["note-pack", "Usage|Uso", "bun|Bun|note-pack\\s+<"], 10),
       ],
       finalAnswerPatterns: ["package.json", "src/cli.ts", "README.md"],
       maxFiles: 6,
@@ -309,7 +309,7 @@ function greenfieldCase(): WorkflowEvalCase {
         check("test/*.test.ts", "tests token generation and invalid input", ["createToken", "prefix|token|id", "throw|toThrow", "expect|assert"], 25),
         check("README.md", "documents API", ["createToken", "prefix", "id"], 10),
       ],
-      finalAnswerPatterns: ["npm test|test", "src/index.ts", "README.md"],
+      finalAnswerPatterns: ["bun test|test", "src/index.ts", "README.md"],
       maxFiles: 6,
       maxDurationMs: 60_000,
       semantic: { exports: [{ file: "src/index.ts", names: ["createToken"] }], packageScripts: ["test"], testFiles: [{ file: "test/*.test.ts", target: "createToken", assertions: true }] },
@@ -343,9 +343,9 @@ function holdoutBugfixDateParserCase(): WorkflowEvalCase {
       validation: { runTests: true, allowSkip: true },
     },
     setup(cwd) {
-      writeBaseNodeProject(cwd);
+      writeBaseBunProject(cwd);
       write(cwd, "src/parseDate.ts", `export function parseIsoDate(value: string): Date | null {\n  const parsed = new Date(value);\n  return Number.isNaN(parsed.getTime()) ? null : parsed;\n}\n`);
-      write(cwd, "test/parseDate.test.ts", `import { describe, it } from "node:test";\nimport assert from "node:assert/strict";\nimport { parseIsoDate } from "../src/parseDate.ts";\n\ndescribe("parseIsoDate", () => {\n  it("accepts a valid ISO date", () => {\n    assert.notEqual(parseIsoDate("2024-02-29"), null);\n  });\n});\n`);
+      write(cwd, "test/parseDate.test.ts", `import { describe, it } from "bun:test";\nimport assert from "node:assert/strict";\nimport { parseIsoDate } from "../src/parseDate.ts";\n\ndescribe("parseIsoDate", () => {\n  it("accepts a valid ISO date", () => {\n    assert.notEqual(parseIsoDate("2024-02-29"), null);\n  });\n});\n`);
     },
   };
 }
@@ -371,7 +371,7 @@ function holdoutReviewOnlySecurityCase(): WorkflowEvalCase {
       validation: { runTests: false, allowSkip: true },
     },
     setup(cwd) {
-      writeBaseNodeProject(cwd);
+      writeBaseBunProject(cwd);
       write(cwd, "src/auth.ts", `export function requireUser(headers: Record<string, string | undefined>) {\n  return headers["x-user-id"] ?? null;\n}\n`);
       write(cwd, "src/server.ts", `import { requireUser } from "./auth";\n\nexport function handleAdmin(headers: Record<string, string | undefined>) {\n  const user = requireUser(headers);\n  if (!user) return { status: 401 };\n  return { status: 200, body: "admin" };\n}\n`);
     },
@@ -400,9 +400,9 @@ function holdoutSmallFeatureSortTasksCase(): WorkflowEvalCase {
       validation: { runTests: true, allowSkip: true },
     },
     setup(cwd) {
-      writeBaseNodeProject(cwd);
+      writeBaseBunProject(cwd);
       write(cwd, "src/sortTasks.ts", `export type Priority = "low" | "medium" | "high";\n\nexport interface Task {\n  id: string;\n  title: string;\n  priority: Priority;\n  dueDate: string;\n}\n\nexport function sortTasks(tasks: Task[]): Task[] {\n  return tasks;\n}\n`);
-      write(cwd, "test/sortTasks.test.ts", `import { describe, it } from "node:test";\nimport assert from "node:assert/strict";\nimport { sortTasks } from "../src/sortTasks.ts";\n\ndescribe("sortTasks", () => {\n  it("keeps an empty list empty", () => {\n    assert.deepEqual(sortTasks([]), []);\n  });\n});\n`);
+      write(cwd, "test/sortTasks.test.ts", `import { describe, it } from "bun:test";\nimport assert from "node:assert/strict";\nimport { sortTasks } from "../src/sortTasks.ts";\n\ndescribe("sortTasks", () => {\n  it("keeps an empty list empty", () => {\n    assert.deepEqual(sortTasks([]), []);\n  });\n});\n`);
     },
   };
 }
@@ -494,7 +494,7 @@ function holdoutMonorepoPackageCase(): WorkflowEvalCase {
     kind: "scaffold",
     suite: "holdout",
     title: "Add a package-local utility in a tiny monorepo",
-    prompt: "En este mini monorepo, implementa packages/math/src/clamp.ts y su test package-local. No muevas archivos al root. Mantén npm test en el root ejecutando el test del paquete.",
+    prompt: "En este mini monorepo, implementa packages/math/src/clamp.ts y su test package-local. No muevas archivos al root. Mantén bun test en el root ejecutando el test del paquete.",
     expected: {
       requiredFiles: ["package.json", "packages/math/src/clamp.ts", "packages/math/test/clamp.test.ts"],
       requiredContent: [
@@ -502,16 +502,16 @@ function holdoutMonorepoPackageCase(): WorkflowEvalCase {
         check("packages/math/src/clamp.ts", "exports clamp", ["export function clamp", "min", "max", "Math.min|Math.max|if"], 30),
         check("packages/math/test/clamp.test.ts", "tests bounds", ["clamp", "min", "max", "assert|expect", "below|above|inside|range"], 28),
       ],
-      finalAnswerPatterns: ["packages/math/src/clamp.ts", "packages/math/test/clamp.test.ts", "npm test"],
+      finalAnswerPatterns: ["packages/math/src/clamp.ts", "packages/math/test/clamp.test.ts", "bun test"],
       maxFiles: 8,
       maxDurationMs: 60_000,
       semantic: { exports: [{ file: "packages/math/src/clamp.ts", names: ["clamp"] }], packageScripts: ["test"], testFiles: [{ file: "packages/math/test/*.test.ts", target: "clamp", assertions: true }] },
       validation: { runTests: true, allowSkip: false },
     },
     setup(cwd) {
-      write(cwd, "package.json", JSON.stringify({ name: "mini-monorepo", private: true, type: "module", scripts: { test: "node --experimental-strip-types --test packages/math/test/*.test.ts" } }, null, 2));
+      write(cwd, "package.json", JSON.stringify({ name: "mini-monorepo", private: true, type: "module", scripts: { test: "bun test packages/math/test/*.test.ts" } }, null, 2));
       write(cwd, "packages/math/src/clamp.ts", `export function clamp(value: number, min: number, max: number): number {\n  return value;\n}\n`);
-      write(cwd, "packages/math/test/clamp.test.ts", `import test from "node:test";\nimport assert from "node:assert/strict";\nimport { clamp } from "../src/clamp.ts";\n\ntest("returns value inside range", () => {\n  assert.equal(clamp(5, 0, 10), 5);\n});\n`);
+      write(cwd, "packages/math/test/clamp.test.ts", `import { test } from "bun:test";\nimport assert from "node:assert/strict";\nimport { clamp } from "../src/clamp.ts";\n\ntest("returns value inside range", () => {\n  assert.equal(clamp(5, 0, 10), 5);\n});\n`);
     },
   };
 }
@@ -530,7 +530,7 @@ function holdoutLegacyCjsCase(): WorkflowEvalCase {
         check("test/parseFlags.test.cjs", "tests value and boolean flags", ["require", "parseFlags", "verbose", "name", "assert"], 30),
       ],
       forbiddenContent: [forbid("package.json", "does not migrate to ESM", ["\\\"type\\\"\\s*:\\s*\\\"module\\\""], 20)],
-      finalAnswerPatterns: ["lib/parseFlags.cjs", "test/parseFlags.test.cjs", "npm test"],
+      finalAnswerPatterns: ["lib/parseFlags.cjs", "test/parseFlags.test.cjs", "bun test"],
       maxFiles: 5,
       maxDurationMs: 60_000,
       validation: { runTests: true, allowSkip: false },
@@ -538,7 +538,7 @@ function holdoutLegacyCjsCase(): WorkflowEvalCase {
     setup(cwd) {
       write(cwd, "package.json", JSON.stringify({ name: "legacy-cjs", scripts: { test: "node --test test/*.test.cjs" } }, null, 2));
       write(cwd, "lib/parseFlags.cjs", `function parseFlags(argv) {\n  return {};\n}\n\nmodule.exports = { parseFlags };\n`);
-      write(cwd, "test/parseFlags.test.cjs", `const test = require("node:test");\nconst assert = require("node:assert/strict");\nconst { parseFlags } = require("../lib/parseFlags.cjs");\n\ntest("starts empty", () => {\n  assert.deepEqual(parseFlags([]), {});\n});\n`);
+      write(cwd, "test/parseFlags.test.cjs", `const { test } = require("bun:test");\nconst assert = require("node:assert/strict");\nconst { parseFlags } = require("../lib/parseFlags.cjs");\n\ntest("starts empty", () => {\n  assert.deepEqual(parseFlags([]), {});\n});\n`);
     },
   };
 }
@@ -553,17 +553,17 @@ function holdoutDocsRunbookCase(): WorkflowEvalCase {
     expected: {
       requiredFiles: ["docs/runbook.md", "package.json", "src/sync.ts"],
       requiredContent: [
-        check("docs/runbook.md", "documents tests diagnosis and rollback", ["npm\\s+(run\\s+)?test", "sync", "rollback", "diagn[oó]stic|diagnos|debug|troubleshoot", "src/sync.ts|package.json"], 45),
+        check("docs/runbook.md", "documents tests diagnosis and rollback", ["Bun\\s+(run\\s+)?test", "sync", "rollback", "diagn[oó]stic|diagnos|debug|troubleshoot", "src/sync.ts|package.json"], 45),
         check("src/sync.ts", "code remains untouched surface", ["export function syncRecords", "remote", "local"], 10),
       ],
       forbiddenFiles: ["test/*", "tests/*"],
-      finalAnswerPatterns: ["docs/runbook.md", "npm test|test"],
+      finalAnswerPatterns: ["docs/runbook.md", "bun test|test"],
       maxFiles: 6,
       maxDurationMs: 45_000,
       validation: { runTests: false, allowSkip: true },
     },
     setup(cwd) {
-      writeBaseNodeProject(cwd);
+      writeBaseBunProject(cwd);
       write(cwd, "src/sync.ts", `export function syncRecords(local: string[], remote: string[]): string[] {\n  return [...local, ...remote];\n}\n`);
       write(cwd, "docs/runbook.md", `# Sync Runbook\n\nTODO: document operations.\n`);
     },
@@ -576,7 +576,7 @@ function holdoutBrokenTestsTriageCase(): WorkflowEvalCase {
     kind: "bugfix",
     suite: "holdout",
     title: "Fix failing test by correcting implementation root cause",
-    prompt: "El test está fallando. Encuentra la causa raíz en src/normalizeEmail.ts, corrígela y deja npm test pasando. No cambies el test para ocultar el bug.",
+    prompt: "El test está fallando. Encuentra la causa raíz en src/normalizeEmail.ts, corrígela y deja bun test pasando. No cambies el test para ocultar el bug.",
     expected: {
       requiredFiles: ["package.json", "src/normalizeEmail.ts", "test/normalizeEmail.test.ts"],
       requiredContent: [
@@ -584,16 +584,16 @@ function holdoutBrokenTestsTriageCase(): WorkflowEvalCase {
         check("test/normalizeEmail.test.ts", "keeps regression assertions", ["normalizeEmail", "USER@EXAMPLE.COM", "user@example.com", "assert|expect"], 28),
       ],
       forbiddenContent: [forbid("test/normalizeEmail.test.ts", "does not weaken assertion", ["notEqual|notStrictEqual|skip|todo"], 25)],
-      finalAnswerPatterns: ["src/normalizeEmail.ts", "test/normalizeEmail.test.ts", "npm test"],
+      finalAnswerPatterns: ["src/normalizeEmail.ts", "test/normalizeEmail.test.ts", "bun test"],
       maxFiles: 4,
       maxDurationMs: 45_000,
       semantic: { exports: [{ file: "src/normalizeEmail.ts", names: ["normalizeEmail"] }], packageScripts: ["test"], testFiles: [{ file: "test/normalizeEmail.test.ts", target: "normalizeEmail", assertions: true }] },
       validation: { runTests: true, allowSkip: false },
     },
     setup(cwd) {
-      writeBaseNodeProject(cwd);
+      writeBaseBunProject(cwd);
       write(cwd, "src/normalizeEmail.ts", `export function normalizeEmail(input: string): string {\n  return input;\n}\n`);
-      write(cwd, "test/normalizeEmail.test.ts", `import test from "node:test";\nimport assert from "node:assert/strict";\nimport { normalizeEmail } from "../src/normalizeEmail.ts";\n\ntest("normalizes email whitespace and case", () => {\n  assert.equal(normalizeEmail(" USER@EXAMPLE.COM "), "user@example.com");\n});\n`);
+      write(cwd, "test/normalizeEmail.test.ts", `import { test } from "bun:test";\nimport assert from "node:assert/strict";\nimport { normalizeEmail } from "../src/normalizeEmail.ts";\n\ntest("normalizes email whitespace and case", () => {\n  assert.equal(normalizeEmail(" USER@EXAMPLE.COM "), "user@example.com");\n});\n`);
     },
   };
 }
@@ -608,7 +608,7 @@ function communityExpressAuthMiddlewareCase(): WorkflowEvalCase {
     promptVariants: [
       "Implementa requireRole(role) en src/authMiddleware.ts para un servidor estilo Express: 401 sin user, 403 sin rol, next() si autorizado. Añade tests y no instales paquetes.",
       "Hay un gap de autorización en este mini proyecto tipo Express. Corrige src/authMiddleware.ts con middleware requireRole(role), cubre user ausente, rol faltante y rol válido con tests.",
-      "Trabaja como en una app Express real pero sin dependencia express: añade middleware requireRole(role), conserva los tipos existentes, cubre 401 sin user, 403 sin rol y next() autorizado, y deja npm test pasando.",
+      "Trabaja como en una app Express real pero sin dependencia express: añade middleware requireRole(role), conserva los tipos existentes, cubre 401 sin user, 403 sin rol y next() autorizado, y deja bun test pasando.",
     ],
     sourceProfile: communityProfile("Express middleware", "Node.js http handlers"),
     expected: {
@@ -619,16 +619,16 @@ function communityExpressAuthMiddlewareCase(): WorkflowEvalCase {
         check("test/authMiddleware.test.ts", "tests auth outcomes", ["requireRole", "401", "403", "next|called|llamad", "assert|expect"], 28),
       ],
       forbiddenContent: [forbid("package.json", "no express dependency shortcut", ["express", "@types/express"], 25)],
-      finalAnswerPatterns: ["src/authMiddleware.ts", "test/authMiddleware.test.ts", "npm test|test"],
+      finalAnswerPatterns: ["src/authMiddleware.ts", "test/authMiddleware.test.ts", "bun test|test"],
       maxFiles: 5,
       maxDurationMs: 60_000,
       semantic: { exports: [{ file: "src/authMiddleware.ts", names: ["requireRole"] }], packageScripts: ["test"], testFiles: [{ file: "test/authMiddleware.test.ts", target: "requireRole", assertions: true }] },
       validation: { runTests: true, allowSkip: false },
     },
     setup(cwd) {
-      writeBaseNodeProject(cwd);
+      writeBaseBunProject(cwd);
       write(cwd, "src/authMiddleware.ts", `export interface RequestLike {\n  user?: { id: string; roles?: string[] };\n}\n\nexport interface ResponseLike {\n  status(code: number): ResponseLike;\n  json(body: unknown): void;\n}\n\nexport type Next = () => void;\n\nexport function requireRole(_role: string) {\n  return (_req: RequestLike, _res: ResponseLike, next: Next) => next();\n}\n`);
-      write(cwd, "test/authMiddleware.test.ts", `import test from "node:test";\nimport assert from "node:assert/strict";\nimport { requireRole } from "../src/authMiddleware.ts";\n\ntest("allows existing user for now", () => {\n  let called = false;\n  const res = { status: () => res, json: () => undefined };\n  requireRole("admin")({ user: { id: "u1", roles: ["admin"] } }, res, () => { called = true; });\n  assert.equal(called, true);\n});\n`);
+      write(cwd, "test/authMiddleware.test.ts", `import { test } from "bun:test";\nimport assert from "node:assert/strict";\nimport { requireRole } from "../src/authMiddleware.ts";\n\ntest("allows existing user for now", () => {\n  let called = false;\n  const res = { status: () => res, json: () => undefined };\n  requireRole("admin")({ user: { id: "u1", roles: ["admin"] } }, res, () => { called = true; });\n  assert.equal(called, true);\n});\n`);
     },
   };
 }
@@ -660,9 +660,9 @@ function communityReduxSelectorCase(): WorkflowEvalCase {
       validation: { runTests: true, allowSkip: false },
     },
     setup(cwd) {
-      writeBaseNodeProject(cwd);
+      writeBaseBunProject(cwd);
       write(cwd, "src/selectVisibleTodos.ts", `export type VisibilityFilter = "all" | "active" | "completed";\nexport interface Todo { id: string; text: string; completed: boolean }\nexport interface TodoState { todos: Todo[]; visibilityFilter: VisibilityFilter }\n\nexport function selectVisibleTodos(state: TodoState): Todo[] {\n  if (state.visibilityFilter === "active") return state.todos.filter((todo) => !todo.completed);\n  if (state.visibilityFilter === "completed") return state.todos.filter((todo) => todo.completed);\n  return state.todos;\n}\n`);
-      write(cwd, "test/selectVisibleTodos.test.ts", `import test from "node:test";\nimport assert from "node:assert/strict";\nimport { selectVisibleTodos } from "../src/selectVisibleTodos.ts";\n\ntest("returns all todos", () => {\n  const state = { visibilityFilter: "all" as const, todos: [{ id: "1", text: "Ship", completed: false }] };\n  assert.equal(selectVisibleTodos(state).length, 1);\n});\n`);
+      write(cwd, "test/selectVisibleTodos.test.ts", `import { test } from "bun:test";\nimport assert from "node:assert/strict";\nimport { selectVisibleTodos } from "../src/selectVisibleTodos.ts";\n\ntest("returns all todos", () => {\n  const state = { visibilityFilter: "all" as const, todos: [{ id: "1", text: "Ship", completed: false }] };\n  assert.equal(selectVisibleTodos(state).length, 1);\n});\n`);
     },
   };
 }
@@ -754,9 +754,9 @@ function communityReactDebounceHookCase(): WorkflowEvalCase {
       validation: { runTests: true, allowSkip: false },
     },
     setup(cwd) {
-      writeBaseNodeProject(cwd);
+      writeBaseBunProject(cwd);
       write(cwd, "src/debounce.ts", `export function createDebouncer(delayMs: number, callback: () => void) {\n  return { call() { callback(); }, cancel() {} };\n}\n`);
-      write(cwd, "test/debounce.test.ts", `import test from "node:test";\nimport assert from "node:assert/strict";\nimport { createDebouncer } from "../src/debounce.ts";\n\ntest("calls callback", () => {\n  let calls = 0;\n  createDebouncer(10, () => { calls += 1; }).call();\n  assert.equal(calls, 1);\n});\n`);
+      write(cwd, "test/debounce.test.ts", `import { test } from "bun:test";\nimport assert from "node:assert/strict";\nimport { createDebouncer } from "../src/debounce.ts";\n\ntest("calls callback", () => {\n  let calls = 0;\n  createDebouncer(10, () => { calls += 1; }).call();\n  assert.equal(calls, 1);\n});\n`);
     },
   };
 }
@@ -782,9 +782,9 @@ function communityNextApiValidationCase(): WorkflowEvalCase {
       validation: { runTests: true, allowSkip: false },
     },
     setup(cwd) {
-      writeBaseNodeProject(cwd);
+      writeBaseBunProject(cwd);
       write(cwd, "src/api/createUser.ts", `export interface RequestLike { body?: unknown }\nexport function createUserHandler(req: RequestLike) {\n  return { status: 201, body: req.body };\n}\n`);
-      write(cwd, "test/createUser.test.ts", `import test from "node:test";\nimport assert from "node:assert/strict";\nimport { createUserHandler } from "../src/api/createUser.ts";\n\ntest("creates user", () => {\n  assert.equal(createUserHandler({ body: { email: "A@B.COM", name: "Ada" } }).status, 201);\n});\n`);
+      write(cwd, "test/createUser.test.ts", `import { test } from "bun:test";\nimport assert from "node:assert/strict";\nimport { createUserHandler } from "../src/api/createUser.ts";\n\ntest("creates user", () => {\n  assert.equal(createUserHandler({ body: { email: "A@B.COM", name: "Ada" } }).status, 201);\n});\n`);
     },
   };
 }
@@ -810,9 +810,9 @@ function communityGraphqlResolverCase(): WorkflowEvalCase {
       validation: { runTests: true, allowSkip: false },
     },
     setup(cwd) {
-      writeBaseNodeProject(cwd);
+      writeBaseBunProject(cwd);
       write(cwd, "src/resolvers/project.ts", `export interface Project { id: string; ownerId: string; name: string }\nexport function getProject(_args: { id: string }, _context: { user?: { id: string }, projects: Project[] }): Project | null {\n  return null;\n}\n`);
-      write(cwd, "test/projectResolver.test.ts", `import test from "node:test";\nimport assert from "node:assert/strict";\nimport { getProject } from "../src/resolvers/project.ts";\n\ntest("missing project returns null", () => {\n  assert.equal(getProject({ id: "x" }, { user: { id: "u1" }, projects: [] }), null);\n});\n`);
+      write(cwd, "test/projectResolver.test.ts", `import { test } from "bun:test";\nimport assert from "node:assert/strict";\nimport { getProject } from "../src/resolvers/project.ts";\n\ntest("missing project returns null", () => {\n  assert.equal(getProject({ id: "x" }, { user: { id: "u1" }, projects: [] }), null);\n});\n`);
     },
   };
 }
@@ -838,9 +838,9 @@ function communityKoaErrorMiddlewareCase(): WorkflowEvalCase {
       validation: { runTests: true, allowSkip: false },
     },
     setup(cwd) {
-      writeBaseNodeProject(cwd);
+      writeBaseBunProject(cwd);
       write(cwd, "src/errorMiddleware.ts", `export interface ContextLike { status?: number; body?: unknown }\nexport async function errorMiddleware(_ctx: ContextLike, next: () => Promise<void>): Promise<void> {\n  await next();\n}\n`);
-      write(cwd, "test/errorMiddleware.test.ts", `import test from "node:test";\nimport assert from "node:assert/strict";\nimport { errorMiddleware } from "../src/errorMiddleware.ts";\n\ntest("passes through successful next", async () => {\n  const ctx = {};\n  await errorMiddleware(ctx, async () => {});\n  assert.deepEqual(ctx, {});\n});\n`);
+      write(cwd, "test/errorMiddleware.test.ts", `import { test } from "bun:test";\nimport assert from "node:assert/strict";\nimport { errorMiddleware } from "../src/errorMiddleware.ts";\n\ntest("passes through successful next", async () => {\n  const ctx = {};\n  await errorMiddleware(ctx, async () => {});\n  assert.deepEqual(ctx, {});\n});\n`);
     },
   };
 }
@@ -1054,9 +1054,9 @@ function communityTsFeatureFlagsCase(): WorkflowEvalCase {
       validation: { runTests: true, allowSkip: false },
     },
     setup(cwd) {
-      writeBaseNodeProject(cwd);
+      writeBaseBunProject(cwd);
       write(cwd, "src/flags.ts", `export function evaluateFlag(_flag: unknown, _user: { userId: string }): boolean {\n  return false;\n}\n`);
-      write(cwd, "test/flags.test.ts", `import test from "node:test";\nimport assert from "node:assert/strict";\nimport { evaluateFlag } from "../src/flags.ts";\n\ntest("defaults false", () => {\n  assert.equal(evaluateFlag({ defaultValue: false }, { userId: "u1" }), false);\n});\n`);
+      write(cwd, "test/flags.test.ts", `import { test } from "bun:test";\nimport assert from "node:assert/strict";\nimport { evaluateFlag } from "../src/flags.ts";\n\ntest("defaults false", () => {\n  assert.equal(evaluateFlag({ defaultValue: false }, { userId: "u1" }), false);\n});\n`);
     },
   };
 }
@@ -1082,9 +1082,9 @@ function communityNodeWebhookVerifierCase(): WorkflowEvalCase {
       validation: { runTests: true, allowSkip: false },
     },
     setup(cwd) {
-      writeBaseNodeProject(cwd);
+      writeBaseBunProject(cwd);
       write(cwd, "src/webhook.ts", `export function verifyWebhook(_payload: string, _signature: string | undefined, _secret: string): boolean {\n  return true;\n}\n`);
-      write(cwd, "test/webhook.test.ts", `import test from "node:test";\nimport assert from "node:assert/strict";\nimport { verifyWebhook } from "../src/webhook.ts";\n\ntest("placeholder accepts", () => {\n  assert.equal(verifyWebhook("{}", "x", "s"), true);\n});\n`);
+      write(cwd, "test/webhook.test.ts", `import { test } from "bun:test";\nimport assert from "node:assert/strict";\nimport { verifyWebhook } from "../src/webhook.ts";\n\ntest("placeholder accepts", () => {\n  assert.equal(verifyWebhook("{}", "x", "s"), true);\n});\n`);
     },
   };
 }
@@ -1174,12 +1174,12 @@ function communityProfile(...inspiredBy: string[]): WorkflowEvalCase["sourceProf
   return { kind: "community-inspired", inspiredBy, privateData: false };
 }
 
-function writeBaseNodeProject(cwd: string): void {
+function writeBaseBunProject(cwd: string): void {
   write(cwd, "package.json", JSON.stringify({
     name: "workflow-eval-fixture",
     private: true,
     type: "module",
-    scripts: { test: "node --experimental-strip-types --test test/*.test.ts" },
+    scripts: { test: "bun test" },
   }, null, 2));
   write(cwd, "tsconfig.json", JSON.stringify({ compilerOptions: { target: "ES2022", module: "NodeNext", moduleResolution: "NodeNext", strict: true, noEmit: true, allowImportingTsExtensions: true }, include: ["src/**/*.ts", "test/**/*.ts"] }, null, 2));
 }

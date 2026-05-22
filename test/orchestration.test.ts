@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "bun:test";
 import { AgentCatalog } from "../src/agents.ts";
 import {
   ORCHESTRATION_EVAL_CASES,
@@ -59,7 +59,7 @@ test("orchestrator prompt teaches LLM-first routing without prompt keyword class
   assert.match(prompt, /injected or controlled clock/i);
   assert.match(prompt, /dependency-free TypeScript scaffolding/i);
   assert.match(prompt, /exact requested files/i);
-  assert.match(prompt, /node --experimental-strip-types --test test\/\*\.test\.ts/i);
+  assert.match(prompt, /bun test/i);
   assert.match(prompt, /package\.json `bin`/i);
   assert.match(prompt, /never command strings|not command strings/i);
   assert.match(prompt, /Explicit recall/i);

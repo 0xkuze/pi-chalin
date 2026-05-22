@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -36,14 +36,14 @@ async function main(): Promise<void> {
     await store.saveValidationContract(featureId, {
       id: "contract-regression",
       title: "Regression contract",
-      commands: ["npm test"],
+      commands: ["bun test"],
       successCriteria: ["resume keeps completed handoffs", "pending stages continue", "final review sees prior context"],
       files: ["package.json", "src/queue.ts", "test/queue.test.ts"],
     });
     await store.saveWorkerSkill(featureId, {
       name: "queue-migration-worker",
       summary: "Keep queue changes small, test first, and checkpoint handoff before continuing.",
-      rules: ["Do not restart completed scout work", "Run npm test before final handoff", "Record checkpoint on every stage boundary"],
+      rules: ["Do not restart completed scout work", "Run bun test before final handoff", "Record checkpoint on every stage boundary"],
     });
     const checkpoint = await store.appendCheckpoint(featureId, {
       agent: "scout",
@@ -177,11 +177,11 @@ function writeSyntheticLongRunningProject(cwd: string): void {
     name: "synthetic-long-running-queue",
     private: true,
     type: "module",
-    scripts: { test: "node --experimental-strip-types --test test/*.test.ts" },
+    scripts: { test: "bun test" },
   }, null, 2));
   write(cwd, "src/queue.ts", `export interface Job { id: string; payload: string }\nexport class Queue {\n  private jobs: Job[] = [];\n  enqueue(job: Job): void { this.jobs.push(job); }\n  dequeue(): Job | undefined { return this.jobs.shift(); }\n}\n`);
-  write(cwd, "test/queue.test.ts", `import test from "node:test";\nimport assert from "node:assert/strict";\nimport { Queue } from "../src/queue.ts";\n\ntest("dequeues FIFO", () => {\n  const queue = new Queue();\n  queue.enqueue({ id: "1", payload: "a" });\n  assert.equal(queue.dequeue()?.id, "1");\n});\n`);
-  write(cwd, "docs/runbook.md", "# Queue migration runbook\n\nRollback: revert src/queue.ts and rerun npm test.\n");
+  write(cwd, "test/queue.test.ts", `import { test } from "bun:test";\nimport assert from "node:assert/strict";\nimport { Queue } from "../src/queue.ts";\n\ntest("dequeues FIFO", () => {\n  const queue = new Queue();\n  queue.enqueue({ id: "1", payload: "a" });\n  assert.equal(queue.dequeue()?.id, "1");\n});\n`);
+  write(cwd, "docs/runbook.md", "# Queue migration runbook\n\nRollback: revert src/queue.ts and rerun bun test.\n");
 }
 
 function write(cwd: string, relativePath: string, content: string): void {

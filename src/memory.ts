@@ -283,6 +283,7 @@ function isDuplicateMemoryContent(a: string, b: string): boolean {
 function memoryTopicKey(normalized: string): string | undefined {
   const tokens = memoryTokens(normalized);
   if (tokens.has("bun") && tokens.has("test") && tokens.has("settimeout")) return "testing:bun-no-settimeout";
+  if ((tokens.has("buntest") || normalized.includes("bun:test")) && tokens.has("test")) return "testing:bun-test";
   if ((tokens.has("nodetest") || normalized.includes("node:test")) && tokens.has("test")) return "testing:node-test";
   if (tokens.has("checkpoint") && (tokens.has("handoff") || tokens.has("resume"))) return "workflow:handoff-checkpoints";
   if (tokens.has("validation") && tokens.has("contract")) return "workflow:validation-contracts";
@@ -375,14 +376,14 @@ function canonicalMemoryToken(token: string): string {
 function memoryEntities(normalized: string): Set<string> {
   const entities = new Set<string>();
   for (const match of normalized.matchAll(/[\w.-]+\/[\w./-]+|[\w.-]+\.(?:ts|tsx|js|jsx|json|md|sqlite)/g)) entities.add(match[0]);
-  for (const token of ["meshkernel", "agentcatalog", "memorystore", "typescript", "sqlite", "fts5", "tui", "sdk", "bun", "node:test"]) {
+  for (const token of ["meshkernel", "agentcatalog", "memorystore", "typescript", "sqlite", "fts5", "tui", "sdk", "bun", "bun:test", "node:test"]) {
     if (normalized.includes(token)) entities.add(token);
   }
   return entities;
 }
 
 function isStrongMemoryEntity(entity: string): boolean {
-  return entity.includes("/") || /\.(?:ts|tsx|js|jsx|json|md|sqlite)$/.test(entity) || ["meshkernel", "agentcatalog", "memorystore", "sqlite", "fts5", "bun", "node:test"].includes(entity);
+  return entity.includes("/") || /\.(?:ts|tsx|js|jsx|json|md|sqlite)$/.test(entity) || ["meshkernel", "agentcatalog", "memorystore", "sqlite", "fts5", "bun", "bun:test", "node:test"].includes(entity);
 }
 
 function jaccard(a: Set<string>, b: Set<string>): number {

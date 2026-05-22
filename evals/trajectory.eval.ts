@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -72,7 +72,7 @@ function healthyRun(): RunState {
   return baseRun("complete", [
     step("scout", "complete", { read: 2, grep: 1 }, { text: "## Findings\n- src/index.ts defines the extension entrypoint.", filesRead: ["src/index.ts"] }),
     step("worker", "complete", { read: 1, edit: 1 }, { text: "Changed one bounded line in src/index.ts.", filesRead: ["src/index.ts"], filesTouched: ["src/index.ts"] }),
-    step("reviewer", "complete", { bash: 1 }, { text: "Validation passed with npm test.", verificationDone: true }),
+    step("reviewer", "complete", { bash: 1 }, { text: "Validation passed with bun test.", verificationDone: true }),
   ]);
 }
 

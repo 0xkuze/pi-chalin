@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "bun:test";
 import { getAnalysisFacts, scoreAnalysisAnswer } from "../src/analysis-quality.ts";
 
 test("scoreAnalysisAnswer rewards accurate deep-project coverage over length", () => {
@@ -61,7 +61,7 @@ test("scoreAnalysisAnswer supports non-Engram synthetic project profiles", () =>
     "Routing uses React Router with /login, /dashboard and /settings.",
     "State and API access live in src/lib/api.ts and src/features/auth/useSession.ts.",
     "Tests run with Vitest and React Testing Library.",
-    "The build scripts are npm run dev, npm run build and npm run test.",
+    "The build scripts are bun run dev, bun run build and bun run test.",
   ].join("\n");
 
   assert.equal(scoreAnalysisAnswer(goService, { profile: "go-service" }).pass, true);

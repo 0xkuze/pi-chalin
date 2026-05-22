@@ -56,7 +56,7 @@ const PROFILE_FACTS: Record<AnalysisQualityProfile, AnalysisQualityFact[]> = {
     fact("routes", "client routes", 16, [/\/login/i, /\/dashboard/i, /\/settings/i]),
     fact("state-api", "state/API module", 16, [/src\/lib\/api\.ts/i, /src\/features\/auth\/useSession\.ts/i]),
     fact("testing", "frontend test stack", 16, [/Vitest/i, /React Testing Library|testing-library/i]),
-    fact("scripts", "frontend scripts", 12, [/npm run dev/i, /npm run build/i, /npm run test/i]),
+    fact("scripts", "frontend scripts", 12, [/(?:npm|bun) run dev/i, /(?:npm|bun) run build/i, /(?:npm|bun) run test/i]),
     fact("risk-signal", "frontend risk insight", 10, [/(auth|session|dashboard)/i, /(risk|riesgo|coverage|cobertura|validation|validaci[oó]n)/i]),
   ],
   monorepo: [
@@ -160,7 +160,7 @@ function hasTestEvidence(answer: string, profile: AnalysisQualityProfile): boole
   const profileEvidence: Record<AnalysisQualityProfile, RegExp[]> = {
     "agent-tooling": [/go test \.\/\.\.\./i, /_test\.go/i, /internal\/.*test/i],
     "go-service": [/go test \.\/\.\.\./i, /_test\.go/i, /routes_test\.go/i],
-    "frontend-app": [/Vitest/i, /React Testing Library|testing-library/i, /\.test\.tsx/i, /npm run test/i],
+    "frontend-app": [/Vitest/i, /React Testing Library|testing-library/i, /\.test\.tsx/i, /(?:npm|bun) run test/i],
     monorepo: [/pnpm test/i, /pnpm -r test/i, /Vitest/i, /\.test\.(ts|tsx|js|jsx)/i],
   };
   return profileEvidence[profile].some((pattern) => pattern.test(answer));

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, test } from "node:test";
+import { afterEach, test } from "bun:test";
 import registerPiChalin from "../src/index.ts";
 import { shouldUseCompactDirectOrchestrationPrompt, shouldUseCompactMeshCriticalPrompt } from "../src/autoroute.ts";
 import { resetRuntimeState, setLatestRun } from "../src/runtime-state.ts";
@@ -157,7 +157,7 @@ test("pi-chalin keeps the native prompt and teaches the primary Pi agent to deci
   assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /changing only implementation is incomplete/i);
   assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /dependency-free TypeScript scaffolding/i);
   assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /exact requested files/i);
-  assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /node --experimental-strip-types --test test\/\*\.test\.ts/i);
+  assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /bun test/i);
   assert.match(promptResult?.systemPrompt ?? "", /branch\/diff\/PR/i);
   assert.match(promptResult?.systemPrompt ?? "", /Architecture\/migration/i);
   assert.match(promptResult?.systemPrompt ?? "", /scout/);
@@ -195,7 +195,7 @@ test("pi-chalin uses compact orchestration context for bounded scaffold prompts"
   assert.match(promptResult?.message?.content ?? "", /no uninstalled runners/i);
   assert.match(promptResult?.message?.content ?? "", /rerun verification after the final edit/i);
   assert.match(promptResult?.message?.content ?? "", /package\.json `bin`/i);
-  assert.match(promptResult?.message?.content ?? "", /never `node \.\.\.` command strings/i);
+  assert.match(promptResult?.message?.content ?? "", /never runtime command strings/i);
   assert.match(promptResult?.message?.content ?? "", /injected clocks\/schedulers/i);
   assert.match(promptResult?.message?.content ?? "", /process\.env/i);
 });
@@ -238,27 +238,27 @@ test("direct bounded edits get one completion nudge after verification", async (
   };
   await beforeAgentStart({ type: "before_agent_start", prompt: "fix src/parseDate.ts", systemPrompt: "base", systemPromptOptions: {} }, ctx);
 
-  toolExecutionEnd({ toolName: "bash", isError: false, args: { command: "npm test" } }, ctx);
+  toolExecutionEnd({ toolName: "bash", isError: false, args: { command: "bun test" } }, ctx);
   assert.equal(fake.messages.some((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-completion-nudge"), false, "verification before mutation is not enough");
 
   toolExecutionEnd({ toolName: "edit", isError: false }, ctx);
   assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-progress-nudge").length, 1, "mutation gets a progress nudge");
   assert.equal(fake.messages.some((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-completion-nudge"), false, "mutation alone is not enough for completion");
 
-  toolExecutionEnd({ toolName: "bash", isError: true, args: { command: "npm test" } }, ctx);
+  toolExecutionEnd({ toolName: "bash", isError: true, args: { command: "bun test" } }, ctx);
   const failureNudges = fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-verification-failed-nudge");
   assert.equal(failureNudges.length, 1);
   assert.match((failureNudges[0]?.message as { content?: string }).content ?? "", /Do NOT answer as done yet/i);
-  assert.match((failureNudges[0]?.message as { content?: string }).content ?? "", /node --experimental-strip-types --test test\/\*\.test\.ts/i);
+  assert.match((failureNudges[0]?.message as { content?: string }).content ?? "", /bun test/i);
   assert.match((failureNudges[0]?.message as { content?: string }).content ?? "", /wall-clock flakiness/i);
   assert.match((failureNudges[0]?.message as { content?: string }).content ?? "", /process\.env/i);
 
-  toolExecutionEnd({ toolName: "bash", isError: false, args: { command: "npm test" } }, ctx);
+  toolExecutionEnd({ toolName: "bash", isError: false, args: { command: "bun test" } }, ctx);
   const nudges = fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-completion-nudge");
   assert.equal(nudges.length, 1);
   const nudgeContent = (nudges[0]?.message as { content?: string }).content ?? "";
   assert.match(nudgeContent, /answer now/i);
-  assert.match(nudgeContent, /Verification: `npm test` passed/i);
+  assert.match(nudgeContent, /Verification: `bun test` passed/i);
   assert.match(nudgeContent, /Passing tests is not enough/i);
   assert.match(nudgeContent, /starter smoke\/empty path/i);
   assert.match(nudgeContent, /bin\/scripts/i);
@@ -269,7 +269,7 @@ test("direct bounded edits get one completion nudge after verification", async (
   assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-progress-nudge").length, 1, "progress nudge is sent once per turn");
   assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-ready-to-verify-nudge").length, 2, "editing after verification invalidates stale verification and asks for a fresh check");
 
-  toolExecutionEnd({ toolName: "bash", isError: false, args: { command: "npm test" } }, ctx);
+  toolExecutionEnd({ toolName: "bash", isError: false, args: { command: "bun test" } }, ctx);
   assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-completion-nudge").length, 2, "new edits after verification require a new completion nudge");
 });
 
@@ -317,7 +317,7 @@ test("direct bounded edits do not complete when requested tests were not changed
 
   await beforeAgentStart({ type: "before_agent_start", prompt: "implementa src/rateLimit.ts y añade tests", systemPrompt: "base", systemPromptOptions: {} }, ctx);
   toolExecutionEnd({ toolName: "edit", isError: false, args: { path: "src/rateLimit.ts" } }, ctx);
-  toolExecutionEnd({ toolName: "bash", isError: false, args: { command: "npm test" } }, ctx);
+  toolExecutionEnd({ toolName: "bash", isError: false, args: { command: "bun test" } }, ctx);
 
   assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-tests-missing-nudge").length, 1);
   assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-completion-nudge").length, 0);
@@ -328,7 +328,7 @@ test("direct bounded edits do not complete when requested tests were not changed
 
   toolExecutionEnd({ toolName: "edit", isError: false, args: { path: "test/rateLimit.test.ts" } }, ctx);
   assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-ready-to-verify-nudge").length, 1);
-  toolExecutionEnd({ toolName: "bash", isError: false, args: { command: "npm test" } }, ctx);
+  toolExecutionEnd({ toolName: "bash", isError: false, args: { command: "bun test" } }, ctx);
 
   assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-completion-nudge").length, 1);
 });

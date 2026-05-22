@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "bun:test";
 import { buildTraceJudgePrompt, gradePiTrace, parsePiJsonTrace, parseTraceJudgeVerdict } from "../src/trace-quality.ts";
 import { MAX_JUDGE_TIMEOUT_MS, resolveJudgeTimeoutMs } from "../evals/trace-quality.eval.ts";
 
@@ -74,11 +74,11 @@ test("gradePiTrace treats tools after approval-blocked mesh_route as recovery", 
     event({ type: "tool_execution_end", toolName: "mesh_route", result: { content: [{ type: "text", text: blockedMesh }] } }),
     event({ type: "tool_execution_start", toolName: "read", args: { path: "src/pricing.ts" } }),
     event({ type: "tool_execution_start", toolName: "edit", args: { path: "src/pricing.ts" } }),
-    event({ type: "tool_execution_start", toolName: "bash", args: { command: "npm test" } }),
-    event({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Cambios en src/pricing.ts. Verificación: npm test passed." }] } }),
+    event({ type: "tool_execution_start", toolName: "bash", args: { command: "bun test" } }),
+    event({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Cambios en src/pricing.ts. Verificación: bun test passed." }] } }),
   ].join("\n");
 
-  const report = gradePiTrace(stdout, { variant: "mesh", promptKind: "generic", finalText: "Cambios en src/pricing.ts. Verificación: npm test passed.", minAnswerChars: 20 });
+  const report = gradePiTrace(stdout, { variant: "mesh", promptKind: "generic", finalText: "Cambios en src/pricing.ts. Verificación: bun test passed.", minAnswerChars: 20 });
 
   assert.equal(report.metrics.meshRouteApprovalBlocked, 1);
   assert.equal(report.metrics.exploratoryParentToolsAfterMesh, 0);
@@ -89,7 +89,7 @@ test("gradePiTrace treats tools after approval-blocked mesh_route as recovery", 
 
 test("gradePiTrace treats direct-recommended mesh_route as non-executable recovery", () => {
   const directRecommended = "pi-chalin direct execution recommended\nstatus: direct-recommended\nDirect execution recommended: this is a bounded explicit-file mutation.";
-  const final = "Cambios: `src/pricing.ts`. Verificación: `npm test` passed.";
+  const final = "Cambios: `src/pricing.ts`. Verificación: `bun test` passed.";
   const stdout = [
     event({ type: "tool_execution_end", toolName: "mesh_route", result: { content: [{ type: "text", text: directRecommended }] } }),
     event({ type: "tool_execution_start", toolName: "read", args: { path: "src/pricing.ts" } }),
@@ -114,7 +114,7 @@ test("gradePiTrace does not treat approval-blocked mesh_route as final answer", 
 });
 
 test("gradePiTrace accepts concise implementation evidence without rewarding verbosity", () => {
-  const concise = "Cambios: `src/pricing.ts`. Verificación: `npm test` ✅ passed.";
+  const concise = "Cambios: `src/pricing.ts`. Verificación: `bun test` ✅ passed.";
   const report = gradePiTrace(event({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: concise }] } }), {
     variant: "simple",
     promptKind: "generic",

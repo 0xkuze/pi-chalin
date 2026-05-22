@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
-import { afterEach, test } from "node:test";
+import { afterEach, test } from "bun:test";
 import { MockWorkerRunner, buildConflictResolverTask, buildSdkPrompt, childToolNames, createRunState, hasUnrecoverableFailedSteps, loadResumableRunState, parseAgentOutput, prepareRunForResume, resolveAgentModel, resolveAgentThinking, resolveStepCompletionStatus, shouldStopAfterDagStage, toolBudgetForStep, withIdleTimeout } from "../src/runner.ts";
 import type { AgentDefinition, RouteDecision, RunState } from "../src/schemas.ts";
 
@@ -429,7 +429,7 @@ test("unrecovered read-only DAG failures remain failed until a downstream stage 
 });
 
 test("parseAgentOutput accepts richer memory categories for long-running work", () => {
-  const output = parseAgentOutput("planner", "## Memory Candidates\n- testing: This project runs regression tests with node:test and isolated temp directories, so feature tests should not share filesystem state.\n- workflow: Long-running mesh features should checkpoint handoffs and validation contracts after each stage so later agents can resume safely.");
+  const output = parseAgentOutput("planner", "## Memory Candidates\n- testing: This project runs regression tests with bun:test and isolated temp directories, so feature tests should not share filesystem state.\n- workflow: Long-running mesh features should checkpoint handoffs and validation contracts after each stage so later agents can resume safely.");
   assert.deepEqual(output.memoryCandidates.map((candidate) => candidate.category), ["testing", "workflow"]);
 });
 

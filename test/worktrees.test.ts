@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
-import { afterEach, test } from "node:test";
+import { afterEach, test } from "bun:test";
 import { cleanupWorktrees, mergeWorktreeChanges, needsWorktreeIsolation, prepareWorktreeIsolation } from "../src/worktrees.ts";
 import type { AgentDefinition } from "../src/schemas.ts";
 

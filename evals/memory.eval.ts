@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -73,9 +73,9 @@ async function evaluateRecall(store: MemoryStore, writeSamples: number[], search
   const memories = [
     {
       category: "testing",
-      content: "The checkout module uses node:test with isolated temporary directories, so regression tests should avoid shared filesystem state.",
-      query: "checkout node:test isolated temporary directories",
-      expected: /checkout module uses node:test/i,
+      content: "The checkout module uses bun:test with isolated temporary directories, so regression tests should avoid shared filesystem state.",
+      query: "checkout bun:test isolated temporary directories",
+      expected: /checkout module uses bun:test/i,
     },
     {
       category: "tooling",

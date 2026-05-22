@@ -54,7 +54,7 @@ function writeGoServiceFixture(cwd: string): void {
 }
 
 function writeFrontendAppFixture(cwd: string): void {
-  write(cwd, "README.md", `# Console Web\n\nConsole Web is a Vite React TypeScript application for authenticated operations dashboards.\n\n## Runtime\n- Entry points: src/main.tsx and src/App.tsx\n- Routes: /login, /dashboard, /settings\n- API client: src/lib/api.ts\n- Session state: src/features/auth/useSession.ts\n\n## Validation\nUse npm run dev locally, npm run build for production bundles, and npm run test for Vitest + React Testing Library coverage.\nThe main risk is auth/session handling around dashboard access and settings updates.\n`);
+  write(cwd, "README.md", `# Console Web\n\nConsole Web is a Vite React TypeScript application for authenticated operations dashboards.\n\n## Runtime\n- Entry points: src/main.tsx and src/App.tsx\n- Routes: /login, /dashboard, /settings\n- API client: src/lib/api.ts\n- Session state: src/features/auth/useSession.ts\n\n## Validation\nUse bun run dev locally, bun run build for production bundles, and bun run test for Vitest + React Testing Library coverage.\nThe main risk is auth/session handling around dashboard access and settings updates.\n`);
 
   write(cwd, "package.json", JSON.stringify({
     name: "console-web",

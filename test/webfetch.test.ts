@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, test } from "node:test";
+import { afterEach, test } from "bun:test";
 import { formatWebBundle, formatWebFetchAudit, listWebFetchAudit, parseExaTextResults, searchWeb } from "../src/webfetch.ts";
 
 const tempDirs: string[] = [];
@@ -23,10 +23,10 @@ test("searchWeb uses Exa MCP and caches compact source bundles", async () => {
   const cwd = tempDir("pi-chalin-webfetch-");
   const previousFetch = globalThis.fetch;
   let calls = 0;
-  globalThis.fetch = async () => {
+  globalThis.fetch = (async () => {
     calls += 1;
     return new Response(`data: ${JSON.stringify({ result: { content: [{ type: "text", text: "Title: Exa MCP\nURL: https://exa.ai/docs/reference/exa-mcp\nText: Exa MCP connects assistants to search and fetch tools." }] } })}\n`);
-  };
+  }) as unknown as typeof fetch;
   try {
     const first = await searchWeb({ cwd, query: "Exa MCP tools", maxSources: 3 });
     const second = await searchWeb({ cwd, query: "Exa MCP tools", maxSources: 3 });

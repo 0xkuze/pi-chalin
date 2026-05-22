@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { test } from "bun:test";
 import { evaluateBudgetUsage, estimateBudgetPreflight, policyForStep, recordBudgetCheckpoint, summarizeToolUtility } from "../src/budget.ts";
 import { ArtifactStore } from "../src/artifacts.ts";
 import type { AgentDefinition, RunStepState } from "../src/schemas.ts";
@@ -105,7 +105,7 @@ test("tool-call budget alone is a soft cap that can checkpoint without failing t
 test("summarizeToolUtility exposes waste and signal metrics", () => {
   const utility = summarizeToolUtility({
     findings: [
-      "testing: Project uses node:test.",
+      "testing: Project uses bun:test.",
       "workflow: Checkpoints are written after each handoff.",
     ],
     toolCalls: 8,
@@ -113,7 +113,7 @@ test("summarizeToolUtility exposes waste and signal metrics", () => {
     firstSignalToolCall: 4,
     verificationDone: true,
     memoryCandidates: [
-      { content: "Project uses node:test with isolated temp dirs.", category: "testing", confidence: 0.9 },
+      { content: "Project uses bun:test with isolated temp dirs.", category: "testing", confidence: 0.9 },
       { content: "cmd = ['pi']", category: "agent-note", confidence: 0.5 },
     ],
   });

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "bun:test";
 import { extractFinalText, extractMeshToolResultText, MAX_VARIANT_TIMEOUT_MS, resolveVariantTimeoutMs, resolveVariantsToRun } from "../evals/quality-ab.eval.ts";
 
 test("resolveVariantTimeoutMs caps SDK quality evals to a fast-fail window", () => {

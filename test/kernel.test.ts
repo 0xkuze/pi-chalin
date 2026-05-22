@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, test } from "node:test";
+import { afterEach, test } from "bun:test";
 import { MeshKernel, routeFromPlan } from "../src/kernel.ts";
 import { createMemoryCandidate, MemoryStore } from "../src/memory.ts";
 import type { WorkerRunner, WorkerRunnerContext } from "../src/runner.ts";

@@ -5,7 +5,7 @@
 <p align="center">
   <a href="package.json"><img alt="version" src="https://img.shields.io/badge/version-0.1.0-111111?style=for-the-badge"></a>
   <a href="package.json"><img alt="license" src="https://img.shields.io/badge/license-MIT-0f766e?style=for-the-badge"></a>
-  <a href="package.json"><img alt="node" src="https://img.shields.io/badge/node-%3E%3D22.19.0-3c873a?style=for-the-badge&logo=node.js&logoColor=white"></a>
+  <a href="package.json"><img alt="bun" src="https://img.shields.io/badge/bun-%3E%3D1.3.14-111111?style=for-the-badge&logo=bun&logoColor=white"></a>
   <a href="package.json"><img alt="typescript" src="https://img.shields.io/badge/typescript-5.7-3178c6?style=for-the-badge&logo=typescript&logoColor=white"></a>
   <a href="package.json"><img alt="status" src="https://img.shields.io/badge/status-MVP-2563eb?style=for-the-badge"></a>
 </p>
@@ -64,21 +64,20 @@ The README is the canonical project overview in this repository. Historical desi
 
 ### Requirements
 
-- Node.js `>=22.19.0`
-- npm
+- Bun `>=1.3.14`
 - Pi Coding Agent runtime
 
 ### Install
 
 ```bash
-npm install
+bun install
 ```
 
 ### Verify
 
 ```bash
-npm run typecheck
-npm test
+bun run typecheck
+bun run test
 ```
 
 ### Load In Pi
@@ -134,7 +133,7 @@ Package
   assets/                 banner and packaged image assets
   agents/                 built-in agent definitions
   src/                    extension source
-  test/                   node:test coverage
+  test/                   Bun test coverage
   evals/                  quality and behavior evaluators
 ```
 
@@ -230,22 +229,24 @@ See `package.json` and the evaluator files under `evals/` for the full set used 
 Useful scripts:
 
 ```bash
-npm test
-npm run typecheck
-npm run eval
-npm run eval:all
-npm run eval:workflow
-npm run eval:workflow:matrix
+bun run test
+bun run typecheck
+bun run eval
+bun run eval:all
+bun run eval:workflow
+bun run eval:workflow:matrix
 ```
 
 The fast confidence path is:
 
 ```bash
-npm run typecheck
-npm test
+bun run typecheck
+bun run test
 ```
 
 The broader evaluator path is intentionally heavier. Use it when changing routing, runtime policy, child-tool budgets, memory behavior, or workflow scoring.
+
+The test script runs Bun's test runner directly, so `bun test` and `bun run test` exercise the same suite.
 
 ## Design Principles
 

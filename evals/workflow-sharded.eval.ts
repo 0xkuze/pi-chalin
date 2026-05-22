@@ -138,7 +138,6 @@ function runShardAttempt(shard: WorkflowMatrixShard, options: ShardRunOptions, a
   const matrixPath = path.join(options.shardDir, `shard-${String(shard.index).padStart(2, "0")}-attempt-${attempt}.jsonl`);
   fs.rmSync(matrixPath, { force: true });
   const childArgs = [
-    "--experimental-strip-types",
     workflowEvalPath,
     "--mode=sdk",
     `--case=${shard.caseIds.join(",")}`,

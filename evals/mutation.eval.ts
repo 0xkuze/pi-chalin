@@ -47,7 +47,7 @@ try {
   const testDir = path.join(testWorktree.path, "tests");
   fs.mkdirSync(testDir, { recursive: true });
   fs.writeFileSync(path.join(testDir, "feature.test.mjs"), [
-    "import test from 'node:test';",
+    "import { test } from 'bun:test';",
     "import assert from 'node:assert/strict';",
     "import { featureConfig } from '../src/feature.js';",
     "",
@@ -72,7 +72,7 @@ try {
   checks.push(check("primary-worktree-has-worker-change", /enabled: true/.test(mergedFeature), { mergedFeature }));
   checks.push(check("primary-worktree-has-test-change", fs.existsSync(path.join(cwd, "tests", "feature.test.mjs")), { testPath: "tests/feature.test.mjs" }));
 
-  const validation = spawnSync("node", ["--test", "tests/feature.test.mjs"], { cwd, encoding: "utf-8", timeout: 15_000 });
+  const validation = spawnSync("bun", ["test", "tests/feature.test.mjs"], { cwd, encoding: "utf-8", timeout: 15_000 });
   checks.push(check("reviewer-validation-passed", validation.status === 0, { status: validation.status, stdout: tail(validation.stdout), stderr: tail(validation.stderr) }));
 
   const artifacts = new ArtifactStore({ cwd });
@@ -84,15 +84,15 @@ try {
     status: "complete",
   });
   await artifacts.saveValidationContract("mutation-worktree-gate", {
-    id: "feature-flag-node-test",
+    id: "feature-flag-bun-test",
     title: "Feature flag regression test",
-    commands: ["node --test tests/feature.test.mjs"],
+    commands: ["bun test tests/feature.test.mjs"],
     successCriteria: ["The reviewer validation command exits 0", "The worker edit touches only the intended feature flag line"],
   });
   await artifacts.appendCheckpoint("mutation-worktree-gate", {
     agent: "reviewer",
     title: "Reviewer validation passed",
-    summary: "Reviewer validated merged worker changes with node --test tests/feature.test.mjs and no worktree conflicts.",
+    summary: "Reviewer validated merged worker changes with bun test tests/feature.test.mjs and no worktree conflicts.",
     status: validation.status === 0 ? "complete" : "failed",
   });
   const artifactState = await artifacts.loadFeature("mutation-worktree-gate");
@@ -125,7 +125,7 @@ try {
 
 function createFixture(dir: string): void {
   fs.mkdirSync(path.join(dir, "src"), { recursive: true });
-  fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ type: "module", scripts: { test: "node --test tests/*.test.mjs" } }, null, 2));
+  fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ type: "module", scripts: { test: "bun test tests/*.test.mjs" } }, null, 2));
   fs.writeFileSync(path.join(dir, "src", "feature.js"), [
     "export const featureConfig = {",
     "  name: 'mutation-eval',",

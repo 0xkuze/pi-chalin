@@ -7,7 +7,7 @@
     "noEmit": true,
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
-    "types": ["node"],
+    "types": ["node", "bun"],
     "skipLibCheck": true
   },
   "include": ["src/**/*.ts", "test/**/*.ts", "evals/**/*.ts"]

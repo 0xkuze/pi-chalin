@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { test } from "node:test";
+import { setDefaultTimeout, test } from "bun:test";
 import { createWorkflowFixture, listWorkflowCommunityCases, listWorkflowEvalCases, listWorkflowHoldoutCases, selectWorkflowPrompt } from "../evals/workflow-cases.ts";
 import { resolveWorkflowShardArgs } from "../evals/workflow-sharded.eval.ts";
 import { assertSdkRunBudget, buildWorkflowJudgePrompt, detectWorkflowInfrastructureFailure, detectWorkflowVerification, evaluateWorkflowRegressionGates, extractFinalText, observeTerminalAssistantAnswer, resolveCaseIds, resolveVariants, resolveWorkflowArgs, resolveWorkflowIdleTimeoutMs, resolveWorkflowInfraRetries, resolveWorkflowRunCount, resolveWorkflowTimeoutMs, shouldRetainWorkflowFixture, shouldRunWorkflowJudge, shouldStoreFullWorkflowOutput, summarizeComparison, summarizeWorkflowFailures, workflowRegressionGatesEnabled, workflowReportFilename, writeWorkflowReport, DEFAULT_WORKFLOW_IDLE_TIMEOUT_MS, MAX_WORKFLOW_RUNS, MAX_WORKFLOW_TIMEOUT_MS } from "../evals/workflow-quality.eval.ts";
 import { scoreWorkflowWorkspace } from "../src/workflow-quality.ts";
+
+setDefaultTimeout(60_000);
 
 test("workflow eval case bank covers real task types", () => {
   const kinds = new Set(listWorkflowEvalCases().map((item) => item.kind));
@@ -58,7 +60,7 @@ test("workflow fixtures start with intentionally incomplete work", () => {
 test("workflow scorer passes a completed small-feature workspace", () => {
   const fixture = createWorkflowFixture("small-feature-search-filter");
   fs.writeFileSync(path.join(fixture.cwd, "src/filterTasks.ts"), `export interface Task { id: string; title: string; description?: string }\nexport function filterTasks(tasks: Task[], query: string): Task[] {\n  const normalized = query.trim().toLowerCase();\n  if (!normalized) return tasks;\n  return tasks.filter((task) => task.title.toLowerCase().includes(normalized) || (task.description ?? "").toLowerCase().includes(normalized));\n}\n`);
-  fs.writeFileSync(path.join(fixture.cwd, "test/filterTasks.test.ts"), `import { expect, it } from "vitest";\nimport { filterTasks } from "../src/filterTasks";\nit("filters by title and description case-insensitively", () => {\n  expect(filterTasks([{ id: "1", title: "Alpha", description: "Roadmap" }], "roadmap")).toHaveLength(1);\n  expect(filterTasks([{ id: "1", title: "Alpha" }], "ALPHA")).toHaveLength(1);\n});\n`);
+  fs.writeFileSync(path.join(fixture.cwd, "test/filterTasks.test.ts"), `import { expect, it } from "bun:test";\nimport { filterTasks } from "../src/filterTasks";\nit("filters by title and description case-insensitively", () => {\n  expect(filterTasks([{ id: "1", title: "Alpha", description: "Roadmap" }], "roadmap")).toHaveLength(1);\n  expect(filterTasks([{ id: "1", title: "Alpha" }], "ALPHA")).toHaveLength(1);\n});\n`);
   const report = scoreWorkflowWorkspace(fixture.cwd, fixture.case, { finalText: "Actualicé src/filterTasks.ts y test/filterTasks.test.ts", durationMs: 1000 });
   assert.equal(report.pass, true);
   assert.ok(report.score >= 80);
@@ -73,15 +75,15 @@ test("workflow scorer accepts descriptive exported helper names for CLI scaffold
     name: "note-pack",
     type: "module",
     bin: { "note-pack": "./src/cli.ts" },
-    scripts: { test: "node --experimental-strip-types --test test/*.test.ts" },
+    scripts: { test: "bun test" },
   }, null, 2));
   fs.mkdirSync(path.join(fixture.cwd, "src"), { recursive: true });
   fs.mkdirSync(path.join(fixture.cwd, "test"), { recursive: true });
-  fs.writeFileSync(path.join(fixture.cwd, "src/cli.ts"), `#!/usr/bin/env node\nexport function normalizeText(input: string): string { return input.toLowerCase(); }\nexport function main(argv = process.argv.slice(2)): void { process.stdout.write(normalizeText(argv.join(" ")) + "\\n"); }\nif (import.meta.url === \`file://\${process.argv[1]}\`) main();\n`);
-  fs.writeFileSync(path.join(fixture.cwd, "test/cli.test.ts"), `import test from "node:test";\nimport assert from "node:assert/strict";\nimport { normalizeText } from "../src/cli.ts";\ntest("normalizes lowercase", () => { assert.equal(normalizeText("HeLLo"), "hello"); });\n`);
-  fs.writeFileSync(path.join(fixture.cwd, "README.md"), "# note-pack\n\n## Usage\n\nRun `note-pack HELLO` with npm after install.\n");
+  fs.writeFileSync(path.join(fixture.cwd, "src/cli.ts"), `#!/usr/bin/env bun\nexport function normalizeText(input: string): string { return input.toLowerCase(); }\nexport function main(argv = process.argv.slice(2)): void { process.stdout.write(normalizeText(argv.join(" ")) + "\\n"); }\nif (import.meta.url === \`file://\${process.argv[1]}\`) main();\n`);
+  fs.writeFileSync(path.join(fixture.cwd, "test/cli.test.ts"), `import { test } from "bun:test";\nimport assert from "node:assert/strict";\nimport { normalizeText } from "../src/cli.ts";\ntest("normalizes lowercase", () => { assert.equal(normalizeText("HeLLo"), "hello"); });\n`);
+  fs.writeFileSync(path.join(fixture.cwd, "README.md"), "# note-pack\n\n## Usage\n\nRun `note-pack HELLO` with Bun after install.\n");
   const report = scoreWorkflowWorkspace(fixture.cwd, fixture.case, {
-    finalText: "Changed src/cli.ts, test/cli.test.ts, package.json, README.md. Verification: npm test passed.",
+    finalText: "Changed src/cli.ts, test/cli.test.ts, package.json, README.md. Verification: bun test passed.",
     durationMs: 1000,
     validateTests: true,
   });
@@ -97,17 +99,17 @@ test("workflow scorer accepts CLI bin adapters separate from exported source mod
     name: "note-pack",
     type: "module",
     bin: { "note-pack": "./bin/note-pack" },
-    scripts: { test: "node --experimental-strip-types --test test/*.test.ts" },
+    scripts: { test: "bun test" },
   }, null, 2));
   fs.mkdirSync(path.join(fixture.cwd, "src"), { recursive: true });
   fs.mkdirSync(path.join(fixture.cwd, "bin"), { recursive: true });
   fs.mkdirSync(path.join(fixture.cwd, "test"), { recursive: true });
   fs.writeFileSync(path.join(fixture.cwd, "src/cli.ts"), `export function normalizeText(input: string): string { return input.toLowerCase(); }\n`);
-  fs.writeFileSync(path.join(fixture.cwd, "bin/note-pack"), `#!/usr/bin/env node --experimental-strip-types\nimport { argv } from "node:process";\nimport { normalizeText } from "../src/cli.ts";\nconsole.log(normalizeText(argv.slice(2).join(" ")));\n`);
-  fs.writeFileSync(path.join(fixture.cwd, "test/cli.test.ts"), `import test from "node:test";\nimport assert from "node:assert/strict";\nimport { normalizeText } from "../src/cli.ts";\ntest("normalizes lowercase", () => { assert.equal(normalizeText("HeLLo"), "hello"); });\n`);
-  fs.writeFileSync(path.join(fixture.cwd, "README.md"), "# note-pack\n\n## Uso\n\nRun `note-pack <texto>` with `node --experimental-strip-types bin/note-pack HOLA`.\n");
+  fs.writeFileSync(path.join(fixture.cwd, "bin/note-pack"), `#!/usr/bin/env bun\nimport { argv } from "node:process";\nimport { normalizeText } from "../src/cli.ts";\nconsole.log(normalizeText(argv.slice(2).join(" ")));\n`);
+  fs.writeFileSync(path.join(fixture.cwd, "test/cli.test.ts"), `import { test } from "bun:test";\nimport assert from "node:assert/strict";\nimport { normalizeText } from "../src/cli.ts";\ntest("normalizes lowercase", () => { assert.equal(normalizeText("HeLLo"), "hello"); });\n`);
+  fs.writeFileSync(path.join(fixture.cwd, "README.md"), "# note-pack\n\n## Uso\n\nRun `note-pack <texto>` with `bun bin/note-pack HOLA`.\n");
   const report = scoreWorkflowWorkspace(fixture.cwd, fixture.case, {
-    finalText: "Changed package.json, src/cli.ts, bin/note-pack, test/cli.test.ts and README.md. Verification: npm test passed.",
+    finalText: "Changed package.json, src/cli.ts, bin/note-pack, test/cli.test.ts and README.md. Verification: bun test passed.",
     durationMs: 1000,
     validateTests: true,
   });
@@ -124,15 +126,15 @@ test("workflow scorer recognizes CommonJS module exports in community CLI cases"
     name: "validate-env",
     type: "commonjs",
     bin: { "validate-env": "./src/cli.ts" },
-    scripts: { test: "node --experimental-strip-types --test test/*.test.ts" },
+    scripts: { test: "bun test" },
   }, null, 2));
   fs.mkdirSync(path.join(fixture.cwd, "src"), { recursive: true });
   fs.mkdirSync(path.join(fixture.cwd, "test"), { recursive: true });
   fs.writeFileSync(path.join(fixture.cwd, "src/cli.ts"), `function getMissingEnvVariables(required, env = process.env) { return required.filter((name) => !env[name]); }\nfunction runCli(argv = process.argv.slice(2), env = process.env) { const missing = getMissingEnvVariables(argv, env); return { code: missing.length ? 1 : 0, output: missing.join(",") }; }\nif (require.main === module) { const result = runCli(); console.log(result.output); process.exit(result.code); }\nmodule.exports = { getMissingEnvVariables, runCli };\n`);
-  fs.writeFileSync(path.join(fixture.cwd, "test/cli.test.ts"), `const test = require("node:test");\nconst assert = require("node:assert/strict");\nconst { getMissingEnvVariables, runCli } = require("../src/cli.ts");\ntest("missing and present env vars", () => { assert.deepEqual(getMissingEnvVariables(["API_URL", "TOKEN"], { API_URL: "x" }), ["TOKEN"]); assert.equal(runCli(["API_URL"], { API_URL: "x" }).code, 0); });\n`);
+  fs.writeFileSync(path.join(fixture.cwd, "test/cli.test.ts"), `const { test } = require("bun:test");\nconst assert = require("node:assert/strict");\nconst { getMissingEnvVariables, runCli } = require("../src/cli.ts");\ntest("missing and present env vars", () => { assert.deepEqual(getMissingEnvVariables(["API_URL", "TOKEN"], { API_URL: "x" }), ["TOKEN"]); assert.equal(runCli(["API_URL"], { API_URL: "x" }).code, 0); });\n`);
   fs.writeFileSync(path.join(fixture.cwd, "README.md"), "# validate-env\n\n## Usage\n\nRun `validate-env API_URL TOKEN` to validate env variables.\n");
   const report = scoreWorkflowWorkspace(fixture.cwd, fixture.case, {
-    finalText: "Changed package.json, src/cli.ts, test/cli.test.ts and README.md. Verification: npm test passed.",
+    finalText: "Changed package.json, src/cli.ts, test/cli.test.ts and README.md. Verification: bun test passed.",
     durationMs: 1000,
     validateTests: true,
   });
@@ -152,9 +154,9 @@ test("workflow scorer rejects no-op implementation", () => {
 test("workflow scorer does not flag legitimate rate limiter test expectations as no-op", () => {
   const fixture = createWorkflowFixture("large-feature-rate-limit");
   fs.writeFileSync(path.join(fixture.cwd, "src/rateLimit.ts"), `export interface RateLimitResult { allowed: boolean; remaining: number; retryAfterMs: number }\nexport function createRateLimiter(options: { limit: number; windowMs: number; now?: () => number }) {\n  const now = options.now ?? Date.now;\n  const windows = new Map<string, { start: number; count: number }>();\n  return { check(key: string): RateLimitResult {\n    const current = now();\n    const state = windows.get(key);\n    if (!state || current - state.start >= options.windowMs) { windows.set(key, { start: current, count: 1 }); return { allowed: true, remaining: Math.max(0, options.limit - 1), retryAfterMs: 0 }; }\n    if (state.count < options.limit) { state.count += 1; return { allowed: true, remaining: Math.max(0, options.limit - state.count), retryAfterMs: 0 }; }\n    return { allowed: false, remaining: 0, retryAfterMs: Math.max(0, options.windowMs - (current - state.start)) };\n  }};\n}\n`);
-  fs.writeFileSync(path.join(fixture.cwd, "test/rateLimit.test.ts"), `import { describe, it } from "node:test";\nimport assert from "node:assert/strict";\nimport { createRateLimiter } from "../src/rateLimit.ts";\ndescribe("createRateLimiter", () => {\n  it("covers allow block and reset", () => {\n    let current = 0;\n    const limiter = createRateLimiter({ limit: 2, windowMs: 1000, now: () => current });\n    assert.deepEqual(limiter.check("u"), { allowed: true, remaining: 1, retryAfterMs: 0 });\n    assert.equal(limiter.check("u").allowed, true);\n    assert.equal(limiter.check("u").allowed, false);\n    current = 1000;\n    assert.equal(limiter.check("u").allowed, true);\n  });\n});\n`);
+  fs.writeFileSync(path.join(fixture.cwd, "test/rateLimit.test.ts"), `import { describe, it } from "bun:test";\nimport assert from "node:assert/strict";\nimport { createRateLimiter } from "../src/rateLimit.ts";\ndescribe("createRateLimiter", () => {\n  it("covers allow block and reset", () => {\n    let current = 0;\n    const limiter = createRateLimiter({ limit: 2, windowMs: 1000, now: () => current });\n    assert.deepEqual(limiter.check("u"), { allowed: true, remaining: 1, retryAfterMs: 0 });\n    assert.equal(limiter.check("u").allowed, true);\n    assert.equal(limiter.check("u").allowed, false);\n    current = 1000;\n    assert.equal(limiter.check("u").allowed, true);\n  });\n});\n`);
   const report = scoreWorkflowWorkspace(fixture.cwd, fixture.case, {
-    finalText: "Changed src/rateLimit.ts and test/rateLimit.test.ts. Verification: npm test passed. No external dependencies.",
+    finalText: "Changed src/rateLimit.ts and test/rateLimit.test.ts. Verification: bun test passed. No external dependencies.",
     durationMs: 1000,
     validateTests: true,
   });
@@ -178,7 +180,7 @@ export function sortTasks(tasks: Task[]): Task[] {
   });
 }
 `);
-  fs.writeFileSync(path.join(fixture.cwd, "test/sortTasks.test.ts"), `import { describe, it } from "node:test";
+  fs.writeFileSync(path.join(fixture.cwd, "test/sortTasks.test.ts"), `import { describe, it } from "bun:test";
 import assert from "node:assert/strict";
 import { sortTasks } from "../src/sortTasks.ts";
 describe("sortTasks", () => {
@@ -199,7 +201,7 @@ describe("sortTasks", () => {
 });
 `);
   const report = scoreWorkflowWorkspace(fixture.cwd, fixture.case, {
-    finalText: "Changed src/sortTasks.ts and test/sortTasks.test.ts. Verification: npm test passed.",
+    finalText: "Changed src/sortTasks.ts and test/sortTasks.test.ts. Verification: bun test passed.",
     durationMs: 1000,
     validateTests: true,
   });
@@ -215,14 +217,14 @@ test("workflow scorer accepts descriptive greenfield test filenames", () => {
   fs.writeFileSync(path.join(fixture.cwd, "package.json"), JSON.stringify({
     name: "token-legible",
     type: "module",
-    scripts: { test: "node --experimental-strip-types --test test/*.test.ts" },
+    scripts: { test: "bun test" },
   }, null, 2));
   fs.writeFileSync(path.join(fixture.cwd, "src/index.ts"), `export function createToken(prefix: string, id: string): string {
   if (!prefix.trim() || !id.trim()) throw new Error("prefix and id must not be empty");
   return \`\${prefix}-\${id}\`.toLowerCase();
 }
 `);
-  fs.writeFileSync(path.join(fixture.cwd, "test/token.test.ts"), `import test from "node:test";
+  fs.writeFileSync(path.join(fixture.cwd, "test/token.test.ts"), `import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { createToken } from "../src/index.ts";
 test("creates token", () => assert.equal(createToken("User", "ABC"), "user-abc"));
@@ -230,7 +232,7 @@ test("rejects invalid input", () => assert.throws(() => createToken("", "abc")))
 `);
   fs.writeFileSync(path.join(fixture.cwd, "README.md"), "# token-legible\n\nUse `createToken(prefix, id)`.\n");
   const report = scoreWorkflowWorkspace(fixture.cwd, fixture.case, {
-    finalText: "Changed package.json, src/index.ts, test/token.test.ts, README.md. Verification: npm test passed.",
+    finalText: "Changed package.json, src/index.ts, test/token.test.ts, README.md. Verification: bun test passed.",
     durationMs: 1000,
     validateTests: true,
   });
@@ -247,7 +249,7 @@ test("workflow scorer accepts specific Error subclasses for config validation", 
   fs.writeFileSync(path.join(fixture.cwd, "package.json"), JSON.stringify({
     name: "mini-config-lib",
     type: "module",
-    scripts: { test: "node --experimental-strip-types --test test/*.test.ts" },
+    scripts: { test: "bun test" },
   }, null, 2));
   fs.writeFileSync(path.join(fixture.cwd, "src/config.ts"), `export type NodeEnv = "development" | "test" | "production";
 export const loadConfig = (env: Record<string, string | undefined>) => {
@@ -258,7 +260,7 @@ export const loadConfig = (env: Record<string, string | undefined>) => {
   return { port, nodeEnv };
 };
 `);
-  fs.writeFileSync(path.join(fixture.cwd, "test/config.test.ts"), `import test from "node:test";
+  fs.writeFileSync(path.join(fixture.cwd, "test/config.test.ts"), `import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { loadConfig } from "../src/config.ts";
 test("defaults and validates", () => {
@@ -269,7 +271,7 @@ test("defaults and validates", () => {
 `);
   fs.writeFileSync(path.join(fixture.cwd, "README.md"), "# Config\n\nUse `loadConfig` with `PORT`, `NODE_ENV`, default port `3000`.\n");
   const report = scoreWorkflowWorkspace(fixture.cwd, fixture.case, {
-    finalText: "Changed package.json, src/config.ts, test/config.test.ts, README.md. Verification: npm test passed.",
+    finalText: "Changed package.json, src/config.ts, test/config.test.ts, README.md. Verification: bun test passed.",
     durationMs: 1000,
     validateTests: true,
   });
@@ -289,7 +291,7 @@ test("workflow scorer accepts valid date coverage without hardcoding leap-day li
   return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day ? parsed : null;
 }
 `);
-  fs.writeFileSync(path.join(fixture.cwd, "test/parseDate.test.ts"), `import test from "node:test";
+  fs.writeFileSync(path.join(fixture.cwd, "test/parseDate.test.ts"), `import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { parseIsoDate } from "../src/parseDate.ts";
 test("accepts valid ISO dates and rejects impossible dates", () => {
@@ -298,7 +300,7 @@ test("accepts valid ISO dates and rejects impossible dates", () => {
 });
 `);
   const report = scoreWorkflowWorkspace(fixture.cwd, fixture.case, {
-    finalText: "Changed src/parseDate.ts and test/parseDate.test.ts. Verification: npm test passed.",
+    finalText: "Changed src/parseDate.ts and test/parseDate.test.ts. Verification: bun test passed.",
     durationMs: 1000,
     validateTests: true,
   });
@@ -412,15 +414,15 @@ func TestCacheTTLExpiry(t *testing.T) {
 test("workflow scorer rejects docs-only cases that add test/code artifacts", () => {
   const fixture = createWorkflowFixture("holdout-docs-runbook");
   fs.mkdirSync(path.join(fixture.cwd, "test"), { recursive: true });
-  fs.writeFileSync(path.join(fixture.cwd, "test/sync.test.ts"), `import test from "node:test";
+  fs.writeFileSync(path.join(fixture.cwd, "test/sync.test.ts"), `import { test } from "bun:test";
 test("extra", () => {});
 `);
   fs.writeFileSync(path.join(fixture.cwd, "docs/runbook.md"), `# Sync Runbook
 
-Run \`npm test\`. Diagnostic and diagnóstico steps for sync in src/sync.ts. Rollback with git restore and verify package.json.
+Run \`bun test\`. Diagnostic and diagnóstico steps for sync in src/sync.ts. Rollback with git restore and verify package.json.
 `);
   const report = scoreWorkflowWorkspace(fixture.cwd, fixture.case, {
-    finalText: "Changed docs/runbook.md. Verification: npm test. Rollback documented.",
+    finalText: "Changed docs/runbook.md. Verification: bun test. Rollback documented.",
     durationMs: 1000,
     validateTests: false,
   });
@@ -429,14 +431,14 @@ Run \`npm test\`. Diagnostic and diagnóstico steps for sync in src/sync.ts. Rol
   fs.rmSync(fixture.cwd, { recursive: true, force: true });
 });
 
-test("workflow scorer accepts docs runbook that documents npm run test", () => {
+test("workflow scorer accepts docs runbook that documents bun run test", () => {
   const fixture = createWorkflowFixture("holdout-docs-runbook");
   fs.writeFileSync(path.join(fixture.cwd, "docs/runbook.md"), `# Sync Runbook
 
-Run \`npm run test\`. Diagnostic and diagnóstico steps for sync in src/sync.ts. Rollback with git restore and verify package.json.
+Run \`bun run test\`. Diagnostic and diagnóstico steps for sync in src/sync.ts. Rollback with git restore and verify package.json.
 `);
   const report = scoreWorkflowWorkspace(fixture.cwd, fixture.case, {
-    finalText: "Changed docs/runbook.md. Documented npm run test and rollback. Verification: documentation only.",
+    finalText: "Changed docs/runbook.md. Documented bun run test and rollback. Verification: documentation only.",
     durationMs: 1000,
     validateTests: false,
   });
@@ -444,18 +446,18 @@ Run \`npm run test\`. Diagnostic and diagnóstico steps for sync in src/sync.ts.
   fs.rmSync(fixture.cwd, { recursive: true, force: true });
 });
 
-test("workflow validation fails when Node test command executes zero tests", () => {
+test("workflow validation fails when Bun test command executes zero tests", () => {
   const fixture = createWorkflowFixture("scaffold-cli-tool");
   fs.writeFileSync(path.join(fixture.cwd, "package.json"), JSON.stringify({
     name: "note-pack",
     type: "module",
-    scripts: { test: "node --experimental-strip-types --test test/*.test.ts" },
+    scripts: { test: "bun test" },
   }, null, 2));
   fs.mkdirSync(path.join(fixture.cwd, "src"), { recursive: true });
   fs.writeFileSync(path.join(fixture.cwd, "src/cli.ts"), `export function normalizeText(input: string): string { return input.toLowerCase(); }
 `);
   const report = scoreWorkflowWorkspace(fixture.cwd, fixture.case, {
-    finalText: "Changed package.json and src/cli.ts. Verification: npm test passed.",
+    finalText: "Changed package.json and src/cli.ts. Verification: bun test passed.",
     durationMs: 1000,
     validateTests: true,
   });
@@ -830,7 +832,7 @@ test("workflow runner only treats terminal assistant events as final answers", (
 
   const terminal = observeTerminalAssistantAnswer(JSON.stringify({
     type: "message_end",
-    message: { role: "assistant", content: [{ type: "text", text: "Hecho.\n\n- Verification: `npm test` passed" }] },
+    message: { role: "assistant", content: [{ type: "text", text: "Hecho.\n\n- Verification: `bun test` passed" }] },
   }) + "\n");
   assert.equal(terminal.terminalAnswer, true);
   assert.equal(extractFinalText(JSON.stringify({
@@ -859,13 +861,13 @@ test("workflow runner only treats terminal assistant events as final answers", (
 
 test("workflow verification detector requires a passing verification bash call", () => {
   const stdout = [
-    JSON.stringify({ type: "tool_execution_start", toolName: "bash", args: { command: "npm test" } }),
+    JSON.stringify({ type: "tool_execution_start", toolName: "bash", args: { command: "bun test" } }),
     JSON.stringify({ type: "tool_execution_end", toolName: "bash", isError: false, result: { content: "pass" } }),
   ].join("\n");
   assert.deepEqual(detectWorkflowVerification(stdout), { passed: true, calls: 1 });
 
   const failed = [
-    JSON.stringify({ type: "tool_execution_start", toolName: "bash", args: { command: "npm test" } }),
+    JSON.stringify({ type: "tool_execution_start", toolName: "bash", args: { command: "bun test" } }),
     JSON.stringify({ type: "tool_execution_end", toolName: "bash", isError: true, result: { content: "fail" } }),
   ].join("\n");
   assert.deepEqual(detectWorkflowVerification(failed), { passed: false, calls: 1 });
@@ -880,7 +882,7 @@ test("workflow verification detector requires a passing verification bash call",
 test("workflow judge auto mode only triggers for ambiguous deterministic passes", () => {
   const fixture = createWorkflowFixture("small-feature-search-filter");
   fs.writeFileSync(path.join(fixture.cwd, "src/filterTasks.ts"), `export interface Task { id: string; title: string; description?: string }\nexport function filterTasks(tasks: Task[], query: string): Task[] { return tasks.filter((task) => task.title.toLowerCase().includes(query.toLowerCase()) || (task.description ?? "").toLowerCase().includes(query.toLowerCase())); }\n`);
-  fs.writeFileSync(path.join(fixture.cwd, "test/filterTasks.test.ts"), `import { expect, it } from "vitest";\nimport { filterTasks } from "../src/filterTasks";\nit("filters by title and description case-insensitively", () => { expect(filterTasks([{ id: "1", title: "Alpha", description: "Roadmap" }], "roadmap")).toHaveLength(1); });\n`);
+  fs.writeFileSync(path.join(fixture.cwd, "test/filterTasks.test.ts"), `import { expect, it } from "bun:test";\nimport { filterTasks } from "../src/filterTasks";\nit("filters by title and description case-insensitively", () => { expect(filterTasks([{ id: "1", title: "Alpha", description: "Roadmap" }], "roadmap")).toHaveLength(1); });\n`);
   const workspace = scoreWorkflowWorkspace(fixture.cwd, fixture.case, { finalText: "src/filterTasks.ts test/filterTasks.test.ts" });
   const output = { workspace, trace: { pass: true, score: 100, warnings: [] }, diagnostics: { jsonEvents: 0, toolEvents: 0, toolCallsByName: {}, duplicateToolCalls: 0, readCalls: 0, writeCalls: 0, editCalls: 0, retries: 0, tokenTotal: 0 } } as unknown as Parameters<typeof shouldRunWorkflowJudge>[0];
   assert.equal(shouldRunWorkflowJudge(output), workspace.metrics.validation.status === "skipped");

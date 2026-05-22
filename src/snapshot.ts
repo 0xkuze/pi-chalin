@@ -157,14 +157,15 @@ function addPackageJsonSignals(cwd: string, stack: Set<string>, packageManagers:
       if (dep === "typescript") stack.add("typescript");
     }
     const manager = parsed.packageManager?.split("@")[0];
-    packageManagers.add(manager || packageManagerFromLock(cwd) || "npm");
+    packageManagers.add(manager || packageManagerFromLock(cwd) || "bun");
     for (const [name] of Object.entries(parsed.scripts ?? {})) {
-      if (/^(test|test:|vitest|jest)/.test(name)) testCommands.add(`${manager || "npm"} run ${name}`);
-      if (/^(build|typecheck|lint)$/.test(name)) buildCommands.add(`${manager || "npm"} run ${name}`);
+      const packageManager = manager || packageManagerFromLock(cwd) || "bun";
+      if (/^(test|test:|vitest|jest)/.test(name)) testCommands.add(`${packageManager} run ${name}`);
+      if (/^(build|typecheck|lint)$/.test(name)) buildCommands.add(`${packageManager} run ${name}`);
     }
   } catch {
     stack.add("node");
-    packageManagers.add(packageManagerFromLock(cwd) || "npm");
+    packageManagers.add(packageManagerFromLock(cwd) || "bun");
   }
 }
 

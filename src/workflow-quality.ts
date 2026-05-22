@@ -251,10 +251,13 @@ function resolveValidationCommand(cwd: string): { command: string; args: string[
   const packageJson = readPackageJson(cwd);
   const script = typeof packageJson?.scripts?.test === "string" ? packageJson.scripts.test : undefined;
   if (script) {
+    if (/\bbun\s+(?:run\s+)?test\b/i.test(script)) return { command: "bun", args: ["test"] };
     if (/\b(vitest|jest|tsx|ts-node|tape)\b/i.test(script) && !hasNodeModules(cwd)) return undefined;
-    if (/node\s+.*--test|python\s+-m\s+unittest|go\s+test|npm\s+test/i.test(script) || hasNodeModules(cwd)) {
-      const args = /node\s+.*--test|python\s+-m\s+unittest|go\s+test/i.test(script) ? ["test"] : ["test", "--", "--runInBand"];
-      return { command: "npm", args };
+    if (/python\s+-m\s+unittest|go\s+test/i.test(script)) {
+      return { command: script.includes("go test") ? "go" : "python3", args: script.includes("go test") ? ["test", "./..."] : ["-m", "unittest", "discover", "-s", "tests"] };
+    }
+    if (/node\s+.*--test|npm\s+test/i.test(script) || hasNodeModules(cwd)) {
+      return { command: "bun", args: ["test"] };
     }
     return undefined;
   }

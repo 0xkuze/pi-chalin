@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, test } from "node:test";
+import { afterEach, test } from "bun:test";
 import { createMemoryCandidate, MemoryStore } from "../src/memory.ts";
 
 const tempDirs: string[] = [];
@@ -49,14 +49,14 @@ test("MemoryStore keeps generic agent notes pending for human review", async () 
   const [record] = await store.submitCandidates([
     createMemoryCandidate({
       category: "agent-note",
-      content: "The project test suite currently runs through Node's built-in test runner, so new regression tests should follow the existing node:test style.",
+      content: "The project test suite currently runs through Bun's test runner, so new regression tests should follow the existing bun:test style.",
       sourceAgent: "reviewer",
       confidence: 0.9,
       scope: "project",
     }),
   ]);
   assert.equal(record?.status, "pending");
-  assert.equal((await store.search("node:test style")).length, 0, "pending memories are not retrieved until approved");
+  assert.equal((await store.search("bun:test style")).length, 0, "pending memories are not retrieved until approved");
 });
 
 test("MemoryStore rejects logs code snippets and task completion noise", async () => {
@@ -189,7 +189,7 @@ test("MemoryStore revisions topic-key memories instead of duplicating them", asy
 test("MemoryStore counts exact duplicate sightings without cluttering review", async () => {
   const cwd = tempDir("pi-chalin-memory-");
   const store = new MemoryStore({ cwd });
-  const content = "The project uses node:test for extension regression tests, so new tests should import from node:assert/strict and keep temporary project roots isolated.";
+  const content = "The project uses bun:test for extension regression tests, so new tests should import from node:assert/strict and keep temporary project roots isolated.";
   await store.submitCandidates([createMemoryCandidate({ category: "testing", content, sourceAgent: "scout", confidence: 0.91, scope: "project" })]);
   await store.submitCandidates([createMemoryCandidate({ category: "testing", content: `${content} `, sourceAgent: "context-builder", confidence: 0.92, scope: "project" })]);
 

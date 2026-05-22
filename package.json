@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Pi Coding Agent extension for routed, memory-aware subagent workflows",
   "license": "MIT",
+  "packageManager": "bun@1.3.14",
   "type": "module",
   "main": "src/index.ts",
   "files": [
@@ -13,24 +14,24 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node --experimental-strip-types --test test/*.test.ts",
-    "typecheck": "tsc --noEmit",
-    "eval:orchestration": "node --experimental-strip-types evals/orchestration.eval.ts",
-    "eval": "npm run eval:orchestration",
-    "eval:orchestration:sdk": "node --experimental-strip-types evals/orchestration.eval.ts --runner=sdk --limit=1",
-    "eval:sdk": "npm run eval:orchestration:sdk",
-    "eval:memory": "node --experimental-strip-types evals/memory.eval.ts",
-    "eval:quality": "node --experimental-strip-types evals/quality-ab.eval.ts",
-    "eval:quality:sdk": "node --experimental-strip-types evals/quality-ab.eval.ts --mode=sdk",
-    "eval:all": "npm run eval:orchestration && npm run eval:memory && npm run eval:mutation && npm run eval:trajectory && npm run eval:long",
-    "eval:mutation": "node --experimental-strip-types evals/mutation.eval.ts",
-    "eval:trajectory": "node --experimental-strip-types evals/trajectory.eval.ts",
-    "eval:trace": "node --experimental-strip-types evals/trace-quality.eval.ts",
-    "eval:workflow": "node --experimental-strip-types evals/workflow-quality.eval.ts",
-    "eval:workflow:sharded": "node --experimental-strip-types evals/workflow-sharded.eval.ts --preset=community",
-    "eval:workflow:matrix": "node --experimental-strip-types evals/workflow-quality.eval.ts --preset=matrix",
-    "eval:workflow:community": "node --experimental-strip-types evals/workflow-quality.eval.ts --preset=community",
-    "eval:long": "node --experimental-strip-types evals/long-running.eval.ts"
+    "test": "bun test",
+    "typecheck": "bun tsc --noEmit",
+    "eval:orchestration": "bun evals/orchestration.eval.ts",
+    "eval": "bun run eval:orchestration",
+    "eval:orchestration:sdk": "bun evals/orchestration.eval.ts --runner=sdk --limit=1",
+    "eval:sdk": "bun run eval:orchestration:sdk",
+    "eval:memory": "bun evals/memory.eval.ts",
+    "eval:quality": "bun evals/quality-ab.eval.ts",
+    "eval:quality:sdk": "bun evals/quality-ab.eval.ts --mode=sdk",
+    "eval:all": "bun run eval:orchestration && bun run eval:memory && bun run eval:mutation && bun run eval:trajectory && bun run eval:long",
+    "eval:mutation": "bun evals/mutation.eval.ts",
+    "eval:trajectory": "bun evals/trajectory.eval.ts",
+    "eval:trace": "bun evals/trace-quality.eval.ts",
+    "eval:workflow": "bun evals/workflow-quality.eval.ts",
+    "eval:workflow:sharded": "bun evals/workflow-sharded.eval.ts --preset=community",
+    "eval:workflow:matrix": "bun evals/workflow-quality.eval.ts --preset=matrix",
+    "eval:workflow:community": "bun evals/workflow-quality.eval.ts --preset=community",
+    "eval:long": "bun evals/long-running.eval.ts"
   },
   "keywords": [
     "pi-package",
@@ -63,10 +64,16 @@
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.75.3",
     "@earendil-works/pi-tui": "^0.75.3",
+    "@types/bun": "^1.3.14",
     "@types/node": "^24.3.0",
     "typescript": "^5.7.3"
   },
   "engines": {
-    "node": ">=22.19.0"
-  }
+    "bun": ">=1.3.14"
+  },
+  "trustedDependencies": [
+    "@google/genai",
+    "koffi",
+    "protobufjs"
+  ]
 }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { test } from "bun:test";
 import { approvalDecision, DEFAULT_CONFIG } from "../src/config.ts";
 import { createChildToolPolicy } from "../src/child-tools.ts";
 import type { RouteDecision } from "../src/schemas.ts";
