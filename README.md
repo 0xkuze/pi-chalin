@@ -31,7 +31,7 @@ Use it when a task benefits from:
 - deeper repository discovery before implementation;
 - isolated planning, execution, and review roles;
 - resumable long-running work;
-- local memory with explicit review;
+- first-class memory through either pi-chalin local review or native Engram;
 - visible routing, safety, and runtime state in the Pi TUI;
 - audited web context for current external information.
 
@@ -42,7 +42,7 @@ Use it when a task benefits from:
 | Routing | Direct execution for bounded work, chalin workflows for broad or risky work. |
 | Subagents | Built-in `scout`, `planner`, `worker`, `reviewer`, `researcher`, `delegate`, `oracle`, `context-builder`, and `conflict-resolver` agents. |
 | Topologies | `single`, `chain`, `parallel`, `dag`, and `memory-only` workflow shapes. |
-| Memory | Configurable local or Engram-backed records, candidates, deduplication, revisions, and search. |
+| Memory | First-class `pi-chalin local`, `engram`, or `auto` backends with search, write, revise, review, and cloud-aware Engram sync. |
 | Artifacts | Resumable checkpoints, validation contracts, interviews, and handoffs. |
 | Safety | Approval thresholds, autonomy modes, recursion guards, single-writer isolation, stale-run recovery, and mutation checks. |
 | TUI | Smart Panel, agent manager, activity monitor, memory review, artifact panel, and web fetch audit. |
@@ -151,6 +151,7 @@ src/runner.ts             mock and SDK-backed worker execution
 src/agents.ts             built-in, project, and user agent catalog
 src/config.ts             config, autonomy, safety, and overrides
 src/memory.ts             memory records, candidates, and search
+src/memory-provider.ts    configurable pi-chalin local and Engram memory backends
 src/artifacts.ts          resumable task state and handoffs
 src/webfetch.ts           audited external context
 src/worktrees.ts          isolated writer worktrees
@@ -232,6 +233,18 @@ If the user already has `gentle-pi`/`gentle-engram` working, pi-chalin reuses th
 
 When Engram is the active/preferred memory provider, `/chalin memory` lists Engram observations only, including project and personal scopes returned by Engram. pi-chalin does not expose its local `approve`/`reject` review flow in that mode. If the user selects `pi-chalin local`, the local SQLite memory store keeps its existing pending-review, approve, reject, delete, search, and revise behavior.
 
+### Engram Memory
+
+Engram is supported as a native memory backend, not as an external afterthought. When `/chalin settings` is set to `engram`, every memory-facing surface uses Engram directly:
+
+- `/chalin memory` lists and searches Engram observations.
+- `chalin_memory_search`, `chalin_memory_write`, and `chalin_memory_revise` operate against Engram.
+- Routed, chained, parallel, DAG, and `memory-only` workflows receive memory from the configured Engram backend.
+- Engram-backed memory does not use pi-chalin's local pending `approve`/`reject` queue.
+- Engram Cloud works through Engram's official local-first sync path when the runtime is enrolled and the Pi process has `ENGRAM_CLOUD_TOKEN`.
+
+Use `auto` when you want Engram if it is reachable with a local fallback, `engram` when Engram must be the source of truth, and `pi-chalin` when you want the local SQLite review workflow.
+
 User-level configuration and agents currently live under `~/.pi/chalin/`. That path is part of the Pi chalin workflow namespace, not the package name.
 
 ## Environment Variables
@@ -246,6 +259,11 @@ PI_CHALIN_MOCK_STEP_DELAY_MS
 PI_CHALIN_WORKFLOW_MODEL
 PI_CHALIN_WORKFLOW_THINKING
 PI_CHALIN_WORKFLOW_GATES
+PI_CHALIN_MEMORY_PROVIDER
+ENGRAM_URL
+ENGRAM_PORT
+ENGRAM_BIN
+ENGRAM_CLOUD_TOKEN
 ```
 
 See `package.json` and the evaluator files under `evals/` for the full set used by development scripts.
