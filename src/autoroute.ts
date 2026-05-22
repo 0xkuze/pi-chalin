@@ -1,9 +1,12 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { AgentCatalog } from "./agents.ts";
 import { loadEffectiveConfig } from "./config.ts";
-import { buildCompactChalinCriticalSystemPrompt, buildCompactChalinOrchestratorSystemPrompt, buildChalinOrchestratorSystemPrompt } from "./orchestration.ts";
+import { MemoryStore } from "./memory.ts";
+import { buildCompactChalinCriticalSystemPrompt, buildCompactChalinOrchestratorSystemPrompt, buildCompactChalinResumeSystemPrompt, buildChalinOrchestratorSystemPrompt } from "./orchestration.ts";
+import { isUsableStepHandoff, loadResumableRunState } from "./runner-state.ts";
 import { beginChalinTurn, recordDirectToolCompletion } from "./runtime-state.ts";
-import { setChalinStatus } from "./ui.ts";
+import type { RunState } from "./schemas.ts";
+import { setChalinStatus } from "./ui-status.ts";
 
 export function registerChalinAutoRouter(pi: ExtensionAPI): void {
   pi.on("input", async (event) => {
@@ -21,18 +24,23 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
     const loaded = loadEffectiveConfig({ cwd: ctx.cwd });
     if (!loaded.config.enabled) return;
     const promptText = typeof event.prompt === "string" ? event.prompt : "";
+    const resumableRun = looksLikeContinuationPrompt(promptText) ? loadResumableRunState({ cwd: ctx.cwd }) : undefined;
+    const useCompactResumePrompt = Boolean(resumableRun);
     const useCompactPrompt = shouldUseCompactDirectOrchestrationPrompt(promptText);
-    const useCompactCriticalPrompt = !useCompactPrompt && shouldUseCompactChalinCriticalPrompt(promptText);
-    const catalog = useCompactPrompt || useCompactCriticalPrompt ? undefined : AgentCatalog.load({ cwd: ctx.cwd });
-    const orchestrationPrompt = useCompactPrompt
+    const useCompactCriticalPrompt = !useCompactResumePrompt && !useCompactPrompt && shouldUseCompactChalinCriticalPrompt(promptText);
+    const catalog = useCompactResumePrompt || useCompactPrompt || useCompactCriticalPrompt ? undefined : AgentCatalog.load({ cwd: ctx.cwd });
+    const orchestrationPrompt = useCompactResumePrompt
+      ? buildCompactChalinResumeSystemPrompt()
+      : useCompactPrompt
       ? buildCompactChalinOrchestratorSystemPrompt()
       : useCompactCriticalPrompt ? buildCompactChalinCriticalSystemPrompt() : buildChalinOrchestratorSystemPrompt(catalog?.list() ?? []);
+    const memoryContext = useCompactResumePrompt ? undefined : await globalMemoryContextForPrompt(ctx.cwd, promptText);
     return {
-      systemPrompt: `${event.systemPrompt}\n\n${orchestrationPrompt}`,
+      systemPrompt: `${event.systemPrompt}\n\n${orchestrationPrompt}${memoryContext ? `\n\n${memoryContext}` : ""}`,
       message: {
-        customType: useCompactPrompt ? "pi-chalin-direct-compact-orchestration" : useCompactCriticalPrompt ? "pi-chalin-critical-compact-orchestration" : "pi-chalin-orchestration",
-        content: useCompactPrompt ? compactDirectSteeringMessage(ctx.hasUI) : useCompactCriticalPrompt ? compactCriticalSteeringMessage(ctx.hasUI) : [
-          "If the user says continue/resume after an interrupted pi-chalin run, call chalin_resume before answering from partial findings.",
+        customType: useCompactResumePrompt ? "pi-chalin-resume-orchestration" : useCompactPrompt ? "pi-chalin-direct-compact-orchestration" : useCompactCriticalPrompt ? "pi-chalin-critical-compact-orchestration" : "pi-chalin-orchestration",
+        content: useCompactResumePrompt && resumableRun ? compactResumeSteeringMessage(resumableRun) : useCompactPrompt ? compactDirectSteeringMessage(ctx.hasUI) : useCompactCriticalPrompt ? compactCriticalSteeringMessage(ctx.hasUI) : [
+          "If the user says continue/resume/continua/continúa/sigue/reanuda/retoma after an interrupted pi-chalin run, call chalin_resume before answering from partial findings.",
           "pi-chalin preflight: if this is branch/project analysis, architecture/planning, broad/project-wide review, project-wide refactor strategy, complex/risky multi-file implementation, or memory recall, call chalin_route first. Bounded read-only mini-project reviews, bounded scaffolding, named-file bugfixes, named-file refactors, and simple implementation with explicit acceptance criteria should stay direct.",
           "For explicit small bugfix/test requests with named files, inspect the target files once, edit promptly, and verify. Do not route or dry-run unless the change is broad, destructive, a security-sensitive mutation, or ambiguous.",
           "Also call chalin_route for risky surgical/long-file edits; use scout → planner → worker → reviewer so the edit stays targeted and verified.",
@@ -147,6 +155,33 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
 }
 
 
+async function globalMemoryContextForPrompt(cwd: string, prompt: string): Promise<string | undefined> {
+  const query = prompt.trim();
+  if (query.length < 8) return undefined;
+  try {
+    const bundle = await new MemoryStore({ cwd }).retrieve({
+      query,
+      sourceAgent: "primary-pi-global",
+      limit: 5,
+      tokenBudget: 520,
+    });
+    if (bundle.results.length === 0 || !bundle.text.trim()) return undefined;
+    return [
+      "## pi-chalin global memory context",
+      bundle.text,
+      "Use these memories as soft guidance for this turn, including direct-mode work. Current repository evidence and explicit user instructions override memory; if evidence contradicts memory, prefer the evidence and repair memory when a memory tool is available.",
+    ].join("\n");
+  } catch {
+    return undefined;
+  }
+}
+
+export function looksLikeContinuationPrompt(prompt: string): boolean {
+  const text = prompt.trim().toLowerCase();
+  if (!text) return false;
+  return /^(continua|continúa|continuar|continue|resume|resumir|reanuda|reanudar|retoma|retomar|sigue|seguir|dale|go on|keep going)(?:\b|[.!?]*)/i.test(text);
+}
+
 export function shouldUseCompactDirectOrchestrationPrompt(prompt: string): boolean {
   const text = prompt.toLowerCase();
   if (!text.trim()) return false;
@@ -162,6 +197,19 @@ export function shouldUseCompactChalinCriticalPrompt(prompt: string): boolean {
   const text = prompt.toLowerCase();
   return /\b(long-file|archivo largo|surgical|quir[uú]rgic|evita reescribir|avoid rewrite|auth|refresh token|security-sensitive|seguridad|dos cambios independientes|independent implementation|modulos separados|m[oó]dulos separados)\b/i.test(text)
     && /\b(implementa|implement|cambia|change|fix|corrige|agrega|add|tests|pruebas|worker|parallel|paralel)\b/i.test(text);
+}
+
+function compactResumeSteeringMessage(run: RunState): string {
+  const completed = run.steps.filter((step) => isUsableStepHandoff(step)).length;
+  const total = Math.max(run.steps.length, 1);
+  const next = run.steps.find((step) => !isUsableStepHandoff(step));
+  return [
+    "Continuation intent detected and a resumable pi-chalin run exists.",
+    `Run id: ${run.id}. Status: ${run.status}. Progress: ${completed}/${total}. Next agent: ${next?.agent ?? "unknown"}.`,
+    `First action MUST be \`chalin_resume\` with {"runId":"${run.id}"}.`,
+    "Do not call `chalin_route`; do not restart the workflow; do not answer from partial findings.",
+    "After `chalin_resume` returns, answer the user from its Final answer material.",
+  ].join("\n");
 }
 
 function compactCriticalSteeringMessage(hasUI?: boolean): string {

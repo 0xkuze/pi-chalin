@@ -6,13 +6,17 @@ import { AgentCatalog } from "./agents.ts";
 import { ArtifactStore } from "./artifacts.ts";
 import { loadEffectiveConfig } from "./config.ts";
 import { ChalinKernel, routeFromPlan } from "./kernel.ts";
-import { MemoryStore } from "./memory.ts";
+import { createMemoryCandidate, MemoryStore } from "./memory.ts";
 import { formatInterviewResult, runChalinInterview, type InterviewRequestInput } from "./interview.ts";
-import { loadResumableRunState } from "./runner.ts";
-import { beginChalinRouteInvocation, finishChalinRouteInvocation, setLatestRun, type ChalinRouteOutcome } from "./runtime-state.ts";
-import { clearLegacyChalinControlWidget, openSafetyApproval, setChalinStatus } from "./ui.ts";
+import { loadResumableRunState } from "./runner-state.ts";
+import { beginChalinRouteInvocation, finishChalinRouteInvocation, setLatestRun } from "./runtime-state.ts";
+import { openSafetyApproval } from "./ui.ts";
+import { clearLegacyChalinControlWidget, setChalinStatus } from "./ui-status.ts";
+import { chalinRouteUpdateDetails, colorizeChalinWidget, footerStateForRun, formatChalinRoutePlanWidget, formatChalinRunWidget, formatChalinRunWidgetFromDetails, isUsableStepStatus, plannedWidgetRun, routeIntent, type ChalinRouteWidgetDetails } from "./route-widget.ts";
 import { fetchWebUrls, formatWebBundle, searchWeb } from "./webfetch.ts";
-import type { AgentStep, RouteDecision, RunState, RunStatus } from "./schemas.ts";
+import type { RouteDecision, RunState } from "./schemas.ts";
+import { directExecutionRecommendation, ensureMutationRouteHasWorker } from "./route-guards.ts";
+import { compactRouteDetails, finalAnswerMaterial, formatDirectRecommendation, formatRoute, outcomeForResult } from "./route-format.ts";
 
 const AgentStepParams = Type.Object({
   id: Type.Optional(Type.String({ description: "Optional stable step id for DAG stages." })),
@@ -84,28 +88,6 @@ type ChalinRouteToolParams = {
   dryRun?: boolean;
 };
 
-type ChalinRouteWidgetStep = {
-  id?: string;
-  agent: string;
-  task?: string;
-  status?: RunStatus;
-  model?: string;
-  thinkingLevel?: string;
-  error?: string;
-  handoff?: string;
-};
-
-type ChalinRouteWidgetDetails = {
-  route?: RouteDecision;
-  run?: {
-    id: string;
-    status: RunStatus;
-    steps: ChalinRouteWidgetStep[];
-    metrics?: RunState["metrics"];
-    warnings?: string[];
-  };
-};
-
 const WebFreshnessParam = Type.Optional(Type.Union([
   Type.Literal("cache-ok"),
   Type.Literal("prefer-fresh"),
@@ -119,6 +101,30 @@ const ChalinWebSearchParams = Type.Object({
   maxSources: Type.Optional(Type.Number({ description: "Maximum search sources, default 5, max 10." })),
   depth: Type.Optional(Type.Union([Type.Literal("snippets"), Type.Literal("content")], { description: "snippets by default; content asks Exa for more page text." })),
   freshness: WebFreshnessParam,
+});
+
+const ChalinMemorySearchParams = Type.Object({
+  query: Type.String({ description: "Compact local memory search query." }),
+  limit: Type.Optional(Type.Number({ description: "Maximum memories to return. Default 6, max 10." })),
+  tokenBudget: Type.Optional(Type.Number({ description: "Approximate token budget for returned context. Default 700, max 1600." })),
+  includeEvidence: Type.Optional(Type.Boolean({ description: "Include evidence when checking contradictions or reviewing memory quality." })),
+});
+
+const ChalinMemoryWriteParams = Type.Object({
+  category: Type.String({ description: "Memory category such as testing, architecture, workflow, user-preference, or tooling." }),
+  content: Type.String({ description: "Compact durable project/user knowledge. Do not write logs, command output, or trivial completion notes." }),
+  confidence: Type.Optional(Type.Number({ description: "Confidence from 0 to 1. Default 0.85." })),
+  evidence: Type.Optional(Type.String({ description: "Short evidence for why this memory is durable." })),
+  topicKey: Type.Optional(Type.String({ description: "Optional stable topic key for revision/deduplication." })),
+});
+
+const ChalinMemoryReviseParams = Type.Object({
+  id: Type.String({ description: "Existing memory record id to revise." }),
+  content: Type.String({ description: "Corrected compact memory content." }),
+  category: Type.Optional(Type.String({ description: "Optional replacement category." })),
+  confidence: Type.Optional(Type.Number({ description: "Confidence from 0 to 1. Default 0.9." })),
+  evidence: Type.Optional(Type.String({ description: "Evidence proving the old memory is stale or weaker." })),
+  reason: Type.String({ description: "Why the revision is more accurate or useful than the prior memory." }),
 });
 
 
@@ -145,6 +151,30 @@ type ChalinWebSearchToolParams = {
   maxSources?: number;
   depth?: "snippets" | "content";
   freshness?: "cache-ok" | "prefer-fresh" | "must-be-fresh";
+};
+
+type ChalinMemorySearchToolParams = {
+  query: string;
+  limit?: number;
+  tokenBudget?: number;
+  includeEvidence?: boolean;
+};
+
+type ChalinMemoryWriteToolParams = {
+  category: string;
+  content: string;
+  confidence?: number;
+  evidence?: string;
+  topicKey?: string;
+};
+
+type ChalinMemoryReviseToolParams = {
+  id: string;
+  content: string;
+  category?: string;
+  confidence?: number;
+  evidence?: string;
+  reason: string;
 };
 
 export function registerChalinTools(pi: ExtensionAPI): void {
@@ -307,9 +337,9 @@ export function registerChalinTools(pi: ExtensionAPI): void {
     name: "chalin_resume",
     label: "Chalin Resume",
     description: "Resume the latest paused or stale pi-chalin subagent run, preserving completed steps and continuing pending DAG/chain work.",
-    promptSnippet: "chalin_resume: resume an interrupted pi-chalin run when the user says continue/resume after ESC, abort, terminal close, or a paused run.",
+    promptSnippet: "chalin_resume: resume an interrupted pi-chalin run when the user says continue/resume/continua/continúa/sigue/reanuda after ESC, abort, terminal close, or a paused run.",
     promptGuidelines: [
-      "Use this before answering from partial findings when the user asks to continue a paused/interrupted chalin run.",
+      "Use this before answering from partial findings when the user asks to continue a paused/interrupted chalin run, including short Spanish prompts like `continua`, `continúa`, `sigue`, `reanuda`, or `retoma`.",
       "Do not create a new chalin_route for a paused run; resume the persisted run instead.",
       "After chalin_resume returns, answer the user from the resumed Final answer material.",
     ],
@@ -370,6 +400,87 @@ export function registerChalinTools(pi: ExtensionAPI): void {
 
 
   pi.registerTool({
+    name: "chalin_memory_search",
+    label: "Chalin Memory Search",
+    description: "Search compact durable pi-chalin memory from the primary Pi agent, including direct-mode work. Use without waiting for an explicit memory request when prior decisions, project facts, workflows, or preferences can reduce rediscovery.",
+    promptSnippet: "chalin_memory_search: recall compact durable memory during direct or routed work when prior context may help.",
+    promptGuidelines: [
+      "Use this proactively for repeated project conventions, prior decisions, user preferences, workflows, and suspected stale assumptions.",
+      "Keep queries short and tokenBudget small. Current repository evidence and explicit user instructions override memory.",
+      "Ask for evidence only when checking contradictions, reviewing memory, or deciding whether to revise a memory.",
+    ],
+    parameters: ChalinMemorySearchParams,
+    async execute(_toolCallId, params: ChalinMemorySearchToolParams, _signal, _onUpdate, ctx) {
+      const memory = new MemoryStore({ cwd: ctx.cwd });
+      const bundle = await memory.retrieve({
+        query: params.query,
+        sourceAgent: "primary-pi",
+        limit: clampInteger(params.limit ?? 6, 1, 10),
+        tokenBudget: clampInteger(params.tokenBudget ?? 700, 80, 1600),
+        includeEvidence: Boolean(params.includeEvidence),
+      });
+      return textResult(bundle.text || "No memory matches.", bundle);
+    },
+  });
+
+  pi.registerTool({
+    name: "chalin_memory_write",
+    label: "Chalin Memory Write",
+    description: "Save compact durable project or user knowledge from the primary Pi agent. The MemoryStore WriteGuard decides active, pending, duplicate, revised, or rejected.",
+    promptSnippet: "chalin_memory_write: save durable verified knowledge discovered during direct or routed work.",
+    promptGuidelines: [
+      "Use this for durable project facts, decisions, workflows, user preferences, and lessons that should reduce future rediscovery.",
+      "Do not write logs, command output, code dumps, transient task completion notes, or facts that are not backed by evidence.",
+      "Prefer one compact sentence with evidence over multiple broad memories.",
+    ],
+    parameters: ChalinMemoryWriteParams,
+    async execute(_toolCallId, params: ChalinMemoryWriteToolParams, _signal, _onUpdate, ctx) {
+      const content = params.content.trim();
+      if (content.length < 24) return textResult("memory rejected: content is too short to be durable.", { status: "rejected" });
+      const memory = new MemoryStore({ cwd: ctx.cwd });
+      const [record] = await memory.submitCandidates([createMemoryCandidate({
+        category: params.category,
+        content,
+        sourceAgent: "primary-pi",
+        confidence: clampNumber(params.confidence ?? 0.85, 0, 1),
+        evidence: params.evidence,
+        topicKey: params.topicKey,
+        scope: "project",
+      })]);
+      if (!record) return textResult("memory rejected: no durable candidate was produced.", { status: "rejected" });
+      return textResult(`memory ${record.status}: ${record.id}`, { record });
+    },
+  });
+
+  pi.registerTool({
+    name: "chalin_memory_revise",
+    label: "Chalin Memory Revise",
+    description: "Correct or replace an existing pi-chalin memory when current evidence proves it stale, wrong, or weaker than the new formulation.",
+    promptSnippet: "chalin_memory_revise: repair stale or incorrect durable memory with evidence.",
+    promptGuidelines: [
+      "Use this when retrieved memory contradicts repository evidence or a newer instruction is clearly better.",
+      "Always include concise evidence and a reason. Keep the revised memory compact.",
+      "Do not revise memory just to restyle wording unless utility or correctness improves.",
+    ],
+    parameters: ChalinMemoryReviseParams,
+    async execute(_toolCallId, params: ChalinMemoryReviseToolParams, _signal, _onUpdate, ctx) {
+      const content = params.content.trim();
+      if (content.length < 24) return textResult("memory revision rejected: content is too short to be durable.", { status: "rejected" });
+      const memory = new MemoryStore({ cwd: ctx.cwd });
+      const record = await memory.revise(params.id, {
+        content,
+        category: params.category,
+        sourceAgent: "primary-pi",
+        confidence: clampNumber(params.confidence ?? 0.9, 0, 1),
+        evidence: params.evidence,
+        reason: params.reason,
+      });
+      if (!record) return textResult(`memory revision failed: ${params.id} was not found.`, { status: "missing", id: params.id });
+      return textResult(`memory revised: ${record.id}`, { record });
+    },
+  });
+
+  pi.registerTool({
     name: "chalin_artifact_resume",
     label: "Chalin Artifact Resume",
     description: "Load compact resumable pi-chalin artifact context for a long-running feature/task.",
@@ -409,6 +520,18 @@ export function registerChalinTools(pi: ExtensionAPI): void {
   });
 }
 
+function clampInteger(value: number, min: number, max: number): number {
+  const parsed = Math.floor(Number(value));
+  if (!Number.isFinite(parsed)) return min;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return min;
+  return Math.min(max, Math.max(min, parsed));
+}
+
 function textResult(text: string, details: unknown) {
   return { content: [{ type: "text" as const, text }], details };
 }
@@ -416,171 +539,6 @@ function textResult(text: string, details: unknown) {
 function finalToolResult(ctx: { hasUI: boolean; abort(): void; shutdown(): void }, text: string, details: unknown) {
   scheduleNonInteractiveShutdown(ctx);
   return textResult(text, details);
-}
-
-export function formatChalinRoutePlanWidget(params: ChalinRouteToolParams): string {
-  const steps = plannedWidgetSteps(params);
-  const title = routeTitle(params.topology, params.task);
-  const agents = steps.map((step) => step.agent).filter(Boolean);
-  return [
-    `pi-chalin · ${title}`,
-    agents.length ? `agents: ${compactAgentPath(agents)} · 0/${steps.length || 1}` : "agents: memory · 0/1",
-    ...steps.slice(0, 8).map((step, index) => `${treePrefix(index, steps.length)} ${statusGlyph(step.status ?? "pending")} ${step.agent} — ${truncate(step.task ?? "waiting", 76)}`),
-    steps.length > 8 ? `└ … +${steps.length - 8} more` : undefined,
-  ].filter((line): line is string => Boolean(line)).join("\n");
-}
-
-export function formatChalinRunWidget(run: RunState): string {
-  return formatChalinRunWidgetFromDetails(chalinRouteUpdateDetails(run));
-}
-
-function formatChalinRunWidgetFromDetails(details: ChalinRouteWidgetDetails): string {
-  const run = details.run;
-  if (!run) return "pi-chalin · no run";
-  const route = details.route;
-  const steps = run.steps;
-  const completed = steps.filter((step) => isUsableStepStatus(step.status)).length;
-  const active = activeWidgetStep(run.status, steps);
-  const title = route ? routeIntent(route) : "workflow";
-  const displayStatus = run.status === "budget-capped" && completed === (steps.length || 1) ? "done" : statusLabel(run.status);
-  const activeLabel = run.status === "failed" ? "blocked" : "current";
-  return [
-    `pi-chalin · ${title} · ${displayStatus} · ${completed}/${steps.length || 1}`,
-    active ? `${activeLabel}: ${active.agent} — ${truncate(active.error ?? active.task ?? statusLabel(active.status ?? "pending"), 86)}` : undefined,
-    ...steps.slice(0, 8).map((step, index) => formatWidgetStep(step, index, steps.length, run.status)),
-    steps.length > 8 ? `└ … +${steps.length - 8} more` : undefined,
-    formatWidgetGuards(run.metrics),
-  ].filter((line): line is string => Boolean(line)).join("\n");
-}
-
-function activeWidgetStep(runStatus: RunStatus, steps: ChalinRouteWidgetStep[]): ChalinRouteWidgetStep | undefined {
-  if (runStatus === "failed") return steps.find((step) => step.status === "failed");
-  if (runStatus === "running" || runStatus === "pending") {
-    return steps.find((step) => step.status === "running") ?? steps.find((step) => step.status === "pending");
-  }
-  return undefined;
-}
-
-function plannedWidgetRun(route: RouteDecision): ChalinRouteWidgetDetails["run"] {
-  return {
-    id: "planned",
-    status: "pending",
-    steps: route.plan ? plannedStepsFromRoute(route).map((step) => ({ ...step, status: "pending" })) : [],
-    warnings: [],
-  };
-}
-
-function chalinRouteUpdateDetails(run: RunState): ChalinRouteWidgetDetails {
-  return {
-    route: run.route,
-    run: {
-      id: run.id,
-      status: run.status,
-      metrics: run.metrics,
-      warnings: run.warnings,
-      steps: run.steps.map((step) => ({
-        id: step.id,
-        agent: step.agent,
-        task: step.task,
-        status: step.status,
-        model: step.model,
-        thinkingLevel: step.thinkingLevel,
-        error: step.error,
-        handoff: truncate(step.output?.handoff || step.output?.text || "", 180),
-      })),
-    },
-  };
-}
-
-function plannedStepsFromRoute(route: RouteDecision): ChalinRouteWidgetStep[] {
-  const plan = route.plan;
-  if (!plan) return [];
-  if (plan.kind === "single") return [{ agent: plan.agent, task: plan.task }];
-  if (plan.kind === "chain") return plan.steps;
-  if (plan.kind === "parallel") return plan.tasks;
-  return plan.stages.flatMap((stage) => stage.tasks.map((step) => ({ ...step, id: `${stage.id}:${step.id ?? step.agent}` })));
-}
-
-function plannedWidgetSteps(params: ChalinRouteToolParams): ChalinRouteWidgetStep[] {
-  if (params.topology === "single") {
-    const first = params.steps?.[0];
-    return first ? [first] : [];
-  }
-  if (params.topology === "chain" || params.topology === "parallel") return params.steps ?? [];
-  if (params.topology === "dag") return params.stages?.flatMap((stage) => stage.tasks.map((step) => ({ ...step, id: `${stage.id ?? "stage"}:${step.id ?? step.agent}` }))) ?? [];
-  return [{ agent: "memory", task: params.task, status: "pending" }];
-}
-
-function formatWidgetStep(step: ChalinRouteWidgetStep, index: number, total: number, runStatus?: RunStatus): string {
-  const detail = step.status === "complete"
-    ? step.handoff || "done"
-    : step.status === "failed"
-      ? step.error || "failed"
-      : step.status === "paused"
-        ? step.error || "paused"
-        : step.status === "budget-capped"
-          ? step.handoff || step.error || step.task || "checkpoint saved"
-          : step.status === "pending" && runStatus === "failed"
-            ? "skipped after failure"
-          : step.task || "working";
-  const suffix = step.status === "budget-capped" ? " · budget limit reached" : "";
-  return `${treePrefix(index, total)} ${statusGlyph(step.status)} ${step.agent} — ${truncate(detail, 88)}${suffix}`;
-}
-
-function statusGlyph(status: RunStatus | undefined): string {
-  if (status === "complete" || status === "budget-capped") return "✓";
-  if (status === "running") return "◆";
-  if (status === "failed") return "×";
-  if (status === "paused") return "■";
-  return "○";
-}
-
-function statusLabel(status: RunStatus): string {
-  if (status === "complete") return "done";
-  if (status === "failed") return "failed";
-  if (status === "paused") return "paused";
-  if (status === "budget-capped") return "checkpointed";
-  if (status === "running") return "running";
-  return "pending";
-}
-
-function isUsableStepStatus(status: RunStatus | undefined): boolean {
-  return status === "complete" || status === "budget-capped";
-}
-
-function treePrefix(index: number, total: number): string {
-  return index === total - 1 ? "└" : "├";
-}
-
-function routeTitle(topology: ChalinRouteToolParams["topology"], task: string): string {
-  if (topology === "memory-only") return "memory lookup";
-  return `${topology} · ${truncate(task, 52)}`;
-}
-
-function compactAgentPath(agents: string[]): string {
-  const compact = agents.slice(0, 5).join(" → ");
-  return agents.length > 5 ? `${compact} → +${agents.length - 5}` : compact;
-}
-
-function colorizeChalinWidget(text: string, theme: { fg(scope: string, value: string): string; bold(value: string): string }): string {
-  return text.split("\n").map((line, index) => {
-    if (index === 0) return theme.fg("toolTitle", theme.bold(line));
-    if (/current:/.test(line)) return theme.fg("muted", line);
-    if (/✓/.test(line)) return theme.fg("success", line);
-    if (/×|failed|attention/.test(line)) return theme.fg("error", line);
-    if (/budget: limit reached/.test(line)) return theme.fg("warning", line);
-    if (/◆/.test(line)) return theme.fg("accent", line);
-    return theme.fg("dim", line);
-  }).join("\n");
-}
-
-function formatWidgetGuards(metrics: RunState["metrics"] | undefined): string {
-  if (!metrics) return "tools: 0 · guards: checking";
-  const policyViolations = metrics.policyViolations?.length ?? 0;
-  const budgetStops = metrics.budgetStopCount ?? 0;
-  if (policyViolations > 0) return `tools: ${metrics.toolCalls} · guards: attention · ${policyViolations} policy`;
-  if (budgetStops > 0) return `tools: ${metrics.toolCalls} · guards: ok · budget: limit reached (${budgetStops} stops)`;
-  return `tools: ${metrics.toolCalls} · guards: ok`;
 }
 
 function scheduleNonInteractiveShutdown(ctx: { hasUI: boolean; abort(): void; shutdown(): void }): void {
@@ -597,246 +555,4 @@ function scheduleNonInteractiveShutdown(ctx: { hasUI: boolean; abort(): void; sh
     }
   }, delayMs);
   timer.unref?.();
-}
-
-function formatRoute(route: RouteDecision, result: Awaited<ReturnType<ChalinKernel["handleRoute"]>> | undefined, options: { availableAgents?: string[] } = {}): string {
-  if (!result) {
-    return [
-      `Chalin workflow: ${route.kind}`,
-      `Agents: ${route.agents.join(" → ") || "none"}`,
-      `Risk: ${route.risk}`,
-      `Reason: ${route.reason}`,
-      options.availableAgents ? `\nAvailable agents: ${options.availableAgents.join(", ") || "none"}` : undefined,
-    ].filter((line): line is string => line !== undefined).join("\n");
-  }
-
-  const finalMaterial = finalAnswerMaterial(result.run);
-  const supportingFindings = supportingAgentFindings(result.run);
-  const lines = [
-    `pi-chalin completed: ${route.agents.join(" → ") || route.kind}`,
-    `status: ${result.run?.status ?? result.approval.action}`,
-    result.approval.action === "allow"
-      ? "Instruction for the primary Pi agent: answer the user now from the Final answer material below. Do not call more tools unless it explicitly says a critical gap remains."
-      : "Instruction for the primary Pi agent: pi-chalin did not execute because approval is required. Do not claim completion. If this is a safe explicit user-requested edit, continue directly with native tools; otherwise explain that approval is required.",
-    result.approval.action !== "allow" ? `Approval: ${result.approval.action} — ${result.approval.reason}` : undefined,
-    result.memories.length > 0 ? `Memory used: ${result.memories.length}` : undefined,
-    finalMaterial ? "\nFinal answer material:" : undefined,
-    finalMaterial,
-    supportingFindings ? "\nSupporting findings:" : undefined,
-    supportingFindings,
-    !finalMaterial && result.run ? "\nSubagent handoff:" : undefined,
-    !finalMaterial && result.run ? result.run.steps.map(formatStep).join("\n") : undefined,
-    options.availableAgents ? `\nAvailable agents: ${options.availableAgents.join(", ") || "none"}` : undefined,
-  ];
-  return lines.filter((line): line is string => line !== undefined && line.length > 0).join("\n");
-}
-
-export function finalAnswerMaterial(run: RunState | undefined): string | undefined {
-  if (!run) return undefined;
-  const completeSteps = run.steps.filter((step) => isUsableStepStatus(step.status));
-  if (shouldAggregateFinalMaterial(run, completeSteps)) {
-    const material = completeSteps
-      .map((step) => {
-        const output = stepFullOutput(step);
-        return output ? `## ${step.agent}\n${output}` : undefined;
-      })
-      .filter((item): item is string => Boolean(item))
-      .join("\n\n");
-    return material ? truncate(material, finalAnswerMaterialBudget(run)) : undefined;
-  }
-  const primary = completeSteps.at(-1) ?? run.steps.at(-1);
-  const output = primary ? stepOutput(primary) : undefined;
-  return output ? truncate(output, finalAnswerMaterialBudget(run)) : undefined;
-}
-
-function shouldAggregateFinalMaterial(run: RunState, completeSteps: RunState["steps"]): boolean {
-  if (completeSteps.length <= 1) return false;
-  if (run.route.kind === "multi-agent-dag") return true;
-  return /\b(deep|in[- ]depth|profundidad|profundo|an[aá]lisis|project analysis|Coverage Matrix|Evidence Table)\b/i.test(run.route.reason);
-}
-
-function finalAnswerMaterialBudget(run: RunState): number {
-  const parsed = Number(process.env.PI_CHALIN_FINAL_MATERIAL_CHARS);
-  if (Number.isFinite(parsed) && parsed > 500) return Math.floor(parsed);
-  if (run.route.kind === "multi-agent-dag") return 12000;
-  if (/\b(deep|in[- ]depth|profundidad|profundo|an[aá]lisis|project analysis|Coverage Matrix|Evidence Table)\b/i.test(run.route.reason)) return 10000;
-  return 1200;
-}
-
-function supportingAgentFindings(run: RunState | undefined): string | undefined {
-  if (!run) return undefined;
-  const completeSteps = run.steps.filter((step) => isUsableStepStatus(step.status));
-  if (completeSteps.length <= 1) return undefined;
-  return completeSteps
-    .slice(0, -1)
-    .map((step) => `- ${step.agent}: ${truncate(stepOutput(step) || "no output", 260)}`)
-    .join("\n");
-}
-
-function stepOutput(step: RunState["steps"][number]): string | undefined {
-  return step.output?.handoff || step.output?.text || step.output?.raw || step.error;
-}
-
-function stepFullOutput(step: RunState["steps"][number]): string | undefined {
-  return step.output?.text || step.output?.raw || step.output?.handoff || step.error;
-}
-
-function outcomeForResult(result: Awaited<ReturnType<ChalinKernel["handleRoute"]>>): ChalinRouteOutcome {
-  if (result.approval.action === "ask") return "ask";
-  if (result.approval.action === "block") return "block";
-  if (result.run?.status === "failed") return "failed";
-  if (result.run?.status === "paused") return "paused";
-  return "complete";
-}
-
-export function ensureMutationRouteHasWorker(route: RouteDecision, task: string): RouteDecision {
-  if (!taskExpectsWorkspaceMutation(task) || route.kind === "memory-only" || route.kind === "ask-user" || route.agents.includes("worker")) return route;
-  if (!route.plan) return route;
-
-  const workerStep: AgentStep = {
-    id: "implementation",
-    agent: "worker",
-    task: [
-      "Implement the user's requested workspace changes.",
-      "Preserve existing behavior, satisfy every explicit acceptance criterion, and run or update relevant tests when available.",
-      `Original task: ${task}`,
-    ].join(" "),
-    budget: "normal",
-  };
-  const reason = `${route.reason} Mutation task normalized by pi-chalin: added a worker step because implementation routes must include an executor.`;
-
-  if (route.plan.kind === "dag") {
-    return {
-      ...route,
-      agents: [...route.agents, "worker"],
-      needsArtifacts: true,
-      reason,
-      plan: {
-        kind: "dag",
-        stages: [...route.plan.stages, { id: "implementation", tasks: [workerStep] }],
-      },
-    };
-  }
-
-  const existingSteps = route.plan.kind === "single"
-    ? [{ id: "existing", agent: route.plan.agent, task: route.plan.task, budget: route.plan.budget }]
-    : route.plan.kind === "chain" ? route.plan.steps : route.plan.tasks;
-  const reviewerIndex = existingSteps.findIndex((step) => step.agent === "reviewer");
-  const steps = reviewerIndex >= 0
-    ? [...existingSteps.slice(0, reviewerIndex), workerStep, ...existingSteps.slice(reviewerIndex)]
-    : [...existingSteps, workerStep];
-  return {
-    ...route,
-    kind: "multi-agent-chain",
-    agents: steps.map((step) => step.agent),
-    needsArtifacts: true,
-    reason,
-    plan: { kind: "chain", steps },
-  };
-}
-
-function taskExpectsWorkspaceMutation(task: string): boolean {
-  return /\b(refactoriza|implementa|a[nñ]ade|a[nñ]adir|actualiza|modifica|corrige|arregla|crea|extrae|implement|add|update|modify|fix|create|write|edit|extract|scaffold)\b/i.test(task)
-    || /\brefactor\b/i.test(task) && /\b(src\/|test\/|archivo|file|\.tsx?|\.jsx?|\.py|\.go|\.rs)\b/i.test(task);
-}
-
-export function directExecutionRecommendation(task: string, route: RouteDecision): string | undefined {
-  if (route.kind === "memory-only" || route.kind === "ask-user") return undefined;
-  if (route.risk === "high" || route.risk === "critical") return undefined;
-  if (isBoundedReadOnlyReview(task)) {
-    return [
-      "Direct execution recommended: this is a bounded read-only review that explicitly forbids file changes.",
-      "Use native read/grep/find/ls tools only; inspect the small relevant file set directly, perform no writes, and answer with concrete path evidence.",
-    ].join(" ");
-  }
-  if (!taskExpectsWorkspaceMutation(task)) return undefined;
-  if (!hasExplicitFileTargets(task)) return undefined;
-  if (hasBroadOrRiskyScope(task)) return undefined;
-  return [
-    "Direct execution recommended: this is a bounded explicit-file mutation.",
-    "Use native read/edit/write/bash tools instead of subagents; inspect the named target file(s), make the requested change, run the nearest relevant verification command, fix failures and rerun after the final edit, then answer with paths plus passing verification status.",
-  ].join(" ");
-}
-
-function hasExplicitFileTargets(task: string): boolean {
-  const matches = task.match(/\b[\w@.-]+(?:\/[\w@.-]+)+\.[a-zA-Z0-9]+\b/g) ?? [];
-  return matches.length > 0 && new Set(matches).size <= 3;
-}
-
-function isBoundedReadOnlyReview(task: string): boolean {
-  if (taskExpectsWorkspaceMutation(task)) return false;
-  if (!/\b(revisa|review|audit|audita|inspect|inspecciona)\b/i.test(task)) return false;
-  if (!/\b(no modifiques|no modificar|no edits?|do not modify|don't modify|read[- ]only|solo lectura|sin modificar)\b/i.test(task)) return false;
-  if (hasBroadReadOnlyScope(task)) return false;
-  return /\b(mini|small|peque[nñ]o|bounded|concret[oa]s?|specific paths?|paths concretos|file evidence|evidencia)\b/i.test(task)
-    || hasExplicitFileTargets(task);
-}
-
-function hasBroadReadOnlyScope(task: string): boolean {
-  return /\b(project[- ]wide|entire project|whole project|all files|monorepo|architecture|migration|migraci[oó]n|deep|en profundidad|broad|amplio|large|complex|risky)\b/i.test(task);
-}
-
-function hasBroadOrRiskyScope(task: string): boolean {
-  return /\b(project[- ]wide|entire project|whole project|all files|monorepo|architecture|migration|migraci[oó]n|security|seguridad|auth|authentication|authorization|permissions?|database|schema|concurrency|race condition|large|complex|risky|long file|archivo largo|surgical|quir[uú]rgic|no rewrite|sin reescribir)\b/i.test(task);
-}
-
-function formatDirectRecommendation(route: RouteDecision, reason: string): string {
-  return [
-    "pi-chalin direct execution recommended",
-    "status: direct-recommended",
-    reason,
-    `Original route: ${route.kind} · ${route.agents.join(" → ") || "none"}`,
-    "Instruction for the primary Pi agent: do not claim completion from this tool result. Continue now with native tools and complete the bounded edit directly.",
-  ].join("\n");
-}
-
-function formatStep(step: RunState["steps"][number]): string {
-  return `- ${step.agent}: ${truncate(stepOutput(step) || "no output", 420)}`;
-}
-
-function compactRouteDetails(route: RouteDecision, result: Awaited<ReturnType<ChalinKernel["handleRoute"]>>, diagnostics: unknown[]) {
-  return {
-    route,
-    approval: result.approval,
-    memoriesUsed: result.memories?.length ?? 0,
-    run: result.run ? {
-      id: result.run.id,
-      status: result.run.status,
-      logsPath: result.run.logsPath,
-      metrics: result.run.metrics,
-      steps: result.run.steps.map((step) => ({
-        agent: step.agent,
-        status: step.status,
-      model: step.model,
-      thinkingLevel: step.thinkingLevel,
-      error: step.error,
-        handoff: truncate(step.output?.handoff || step.output?.text || step.error || "", 600),
-      })),
-    } : undefined,
-    diagnostics,
-  };
-}
-
-function footerStateForRun(run: RunState): Parameters<typeof setChalinStatus>[1] {
-  const active = run.steps.find((step) => step.status === "running") ?? run.steps.find((step) => step.status === "pending");
-  const completed = run.steps.filter((step) => isUsableStepStatus(step.status)).length;
-  const total = run.steps.length || 1;
-  if (run.status === "complete") return { kind: "complete", intent: routeIntent(run.route) };
-  if (run.status === "paused") return { kind: "stopped" };
-  if (run.status === "failed") return { kind: "failed" };
-  return { kind: "running", intent: routeIntent(run.route), agent: active?.agent ?? run.route.agents[0] ?? run.status, completed, total };
-}
-
-function routeIntent(route: RouteDecision): string {
-  if (route.kind === "memory-only") return "memory lookup";
-  if (route.agents.includes("worker")) return "implement safely";
-  if (route.agents.includes("reviewer")) return "review";
-  if (route.agents.includes("context-builder")) return "understand";
-  if (route.agents.includes("planner")) return "plan";
-  return route.agents[0] ?? route.kind;
-}
-
-function truncate(text: string, max: number): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  return normalized.length <= max ? normalized : `${normalized.slice(0, max - 1)}…`;
 }

@@ -4,7 +4,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
 import { afterEach, test } from "bun:test";
-import { MockWorkerRunner, buildConflictResolverTask, buildSdkPrompt, childToolNames, createRunState, hasUnrecoverableFailedSteps, loadResumableRunState, parseAgentOutput, prepareRunForResume, resolveAgentModel, resolveAgentThinking, resolveStepCompletionStatus, shouldStopAfterDagStage, toolBudgetForStep, withIdleTimeout } from "../src/runner.ts";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { chalinChildSessionDir, createChalinChildSessionManager, hideLegacyTopLevelChildSessions } from "../src/child-sessions.ts";
+import { resolveAgentModel, resolveAgentThinking } from "../src/model-resolution.ts";
+import { buildSdkPrompt, childToolNames, resolveStepCompletionStatus, toolBudgetForStep } from "../src/runner-prompt.ts";
+import { MockWorkerRunner, buildConflictResolverTask, hasUnrecoverableFailedSteps, parseAgentOutput, shouldStopAfterDagStage, withIdleTimeout } from "../src/runner.ts";
+import { createRunState, loadResumableRunState, prepareRunForResume } from "../src/runner-state.ts";
 import type { AgentDefinition, RouteDecision, RunState } from "../src/schemas.ts";
 
 const tempDirs: string[] = [];
@@ -17,6 +22,14 @@ function git(cwd: string, args: string[]) {
 }
 function agent(name: string, caps: AgentDefinition["capabilities"]): AgentDefinition {
   return { name, scope: "built-in", concern: "implementation", capabilities: caps, description: name, model: "inherit", tools: [], memory: { read: false, write: "never", categories: [] }, systemPrompt: "", diagnostics: [] };
+}
+
+function userMessage(content: string): Parameters<SessionManager["appendMessage"]>[0] {
+  return { role: "user", content } as Parameters<SessionManager["appendMessage"]>[0];
+}
+
+function assistantMessage(content: string): Parameters<SessionManager["appendMessage"]>[0] {
+  return { role: "assistant", content } as unknown as Parameters<SessionManager["appendMessage"]>[0];
 }
 
 function readOnlyAgent(name: string, concern: AgentDefinition["concern"] = "context-building"): AgentDefinition {
@@ -148,6 +161,76 @@ test("MockWorkerRunner persists in-flight run state for terminal/process recover
     if (previousDelay === undefined) delete process.env.PI_CHALIN_MOCK_STEP_DELAY_MS;
     else process.env.PI_CHALIN_MOCK_STEP_DELAY_MS = previousDelay;
   }
+});
+
+test("pi-chalin child sessions are stored outside Pi resume top-level index", async () => {
+  const cwd = tempDir("pi-chalin-child-cwd-");
+  const parentSessionDir = tempDir("pi-chalin-parent-sessions-");
+  const parent = SessionManager.create(cwd, parentSessionDir);
+  parent.appendMessage(userMessage("Implement a parent orchestrator task"));
+  parent.appendMessage(assistantMessage("Parent orchestrator response"));
+  const parentSessionFile = parent.getSessionFile();
+  assert.ok(parentSessionFile);
+
+  const step = { id: "step:1", agent: "worker", task: "implement", status: "pending" as const };
+  const child = createChalinChildSessionManager({
+    cwd,
+    runId: "run-123",
+    step,
+    extensionContext: { sessionManager: parent },
+  });
+  child.appendMessage(userMessage("You are pi-chalin worker: Single-write implementation agent for approved scoped changes."));
+  child.appendMessage(assistantMessage("Child worker response"));
+
+  const topLevelSessions = await SessionManager.list(cwd, parentSessionDir);
+  assert.deepEqual(topLevelSessions.map((session) => session.path), [parentSessionFile]);
+  assert.equal(topLevelSessions.some((session) => session.firstMessage.includes("You are pi-chalin worker")), false);
+
+  const childSessionDir = child.getSessionDir();
+  const expectedChildRoot = path.join(parentSessionDir, path.basename(parentSessionFile, ".jsonl"), "pi-chalin", "run-123");
+  assert.ok(childSessionDir.startsWith(expectedChildRoot + path.sep), childSessionDir);
+
+  const nestedSessions = await SessionManager.list(cwd, childSessionDir);
+  assert.equal(nestedSessions.length, 1);
+  assert.equal(nestedSessions[0]?.parentSessionPath, parentSessionFile);
+});
+
+test("pi-chalin child session fallback stays in project-local hidden state", () => {
+  const cwd = tempDir("pi-chalin-child-fallback-");
+  const sessionDir = chalinChildSessionDir({
+    cwd,
+    runId: "run:with/spaces",
+    stepId: "stage:2/reviewer",
+    agent: "reviewer",
+  });
+
+  assert.equal(
+    sessionDir,
+    path.join(cwd, ".pi-chalin", "child-sessions", "run-with-spaces", "stage-2-reviewer-reviewer"),
+  );
+});
+
+test("legacy top-level child sessions are hidden without moving parent sessions", async () => {
+  const cwd = tempDir("pi-chalin-legacy-cwd-");
+  const parentSessionDir = tempDir("pi-chalin-legacy-sessions-");
+  const parent = SessionManager.create(cwd, parentSessionDir);
+  parent.appendMessage(userMessage("Parent task visible in resume"));
+  parent.appendMessage(assistantMessage("Parent response"));
+
+  const legacyChild = SessionManager.create(cwd, parentSessionDir);
+  legacyChild.appendMessage(userMessage("You are pi-chalin planner: Turns context into an implementation plan."));
+  legacyChild.appendMessage(assistantMessage("Planner response"));
+  const legacyChildFile = legacyChild.getSessionFile();
+  assert.ok(legacyChildFile);
+
+  const cleanup = await hideLegacyTopLevelChildSessions({ sessionManager: parent });
+  assert.equal(cleanup.moved.length, 1);
+  assert.equal(cleanup.failed.length, 0);
+  assert.equal(fs.existsSync(legacyChildFile), false);
+  assert.equal(fs.existsSync(cleanup.moved[0]!), true);
+
+  const topLevelSessions = await SessionManager.list(cwd, parentSessionDir);
+  assert.deepEqual(topLevelSessions.map((session) => session.firstMessage), ["Parent task visible in resume"]);
 });
 
 test("MockWorkerRunner prepares and cleans isolated worktrees for parallel writer routes", async () => {
@@ -462,6 +545,35 @@ test("buildSdkPrompt compresses repeated policy when previous handoff is availab
   assert.ok(prompt.length < 6500, `prompt should stay compact, got ${prompt.length}`);
 });
 
+test("buildSdkPrompt injects compact memory context without bloating discovery", () => {
+  const agent: AgentDefinition = {
+    name: "worker",
+    scope: "built-in",
+    concern: "implementation",
+    capabilities: ["inspect-files", "search-files", "memory-read", "memory-write"],
+    description: "Implements scoped changes.",
+    model: "inherit",
+    tools: [],
+    memory: { read: true, write: "candidate", categories: [] },
+    systemPrompt: "",
+    diagnostics: [],
+  };
+  const prompt = buildSdkPrompt(
+    agent,
+    "Fix async retry tests.",
+    tempDir("pi-chalin-memory-prompt-"),
+    undefined,
+    80,
+    "normal",
+    { memoryContext: "Memory context (1 records, <=120 token budget). Treat as guidance; current repo evidence wins.\n- [memory-1 · testing · 95%] Project tests use Bun and avoid setTimeout sleeps." },
+  );
+
+  assert.match(prompt, /autonomous memory policy/i);
+  assert.match(prompt, /Compact Memory Context/);
+  assert.match(prompt, /Project tests use Bun/);
+  assert.ok(prompt.length < 7000, `prompt should stay compact, got ${prompt.length}`);
+});
+
 test("buildSdkPrompt puts context-builder into handoff-first gap-read mode", () => {
   const agent: AgentDefinition = {
     name: "context-builder",
@@ -592,6 +704,28 @@ test("childToolNames keeps inspection tools for deep synthesis with possible cov
   assert.ok(tools.includes("grep"));
   assert.ok(tools.includes("find"));
   assert.ok(tools.includes("ls"));
+});
+
+test("childToolNames exposes autonomous memory tools only to memory-capable agents", () => {
+  const memoryAgent: AgentDefinition = {
+    name: "worker",
+    scope: "built-in",
+    concern: "implementation",
+    capabilities: ["inspect-files", "search-files", "memory-read", "memory-write"],
+    description: "Memory capable.",
+    model: "inherit",
+    tools: [],
+    memory: { read: true, write: "candidate", categories: [] },
+    systemPrompt: "",
+    diagnostics: [],
+  };
+  const noMemoryAgent: AgentDefinition = { ...memoryAgent, capabilities: ["inspect-files", "search-files"], memory: { read: false, write: "never", categories: [] } };
+
+  const memoryTools = childToolNames(memoryAgent, "Implement feature with prior project rules.", true, false);
+  assert.ok(memoryTools.includes("chalin_memory_search"));
+  assert.ok(memoryTools.includes("chalin_memory_write"));
+  assert.ok(memoryTools.includes("chalin_memory_revise"));
+  assert.equal(childToolNames(noMemoryAgent, "Implement feature.", true, false).some((tool) => tool.startsWith("chalin_memory_")), false);
 });
 
 test("childToolNames uses discovery plus snapshot mode for branch reconnaissance", () => {

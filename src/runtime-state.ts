@@ -1,6 +1,7 @@
 import type { RouteDecision, RunState } from "./schemas.ts";
 
 let lastRun: RunState | undefined;
+const liveStepSessions = new Map<string, LiveStepSessionRef>();
 let routeInvocations: ChalinRouteInvocation[] = [];
 let directCompletion: DirectCompletionState = freshDirectCompletionState();
 
@@ -26,6 +27,15 @@ interface DirectCompletionState {
   nudgeSent: boolean;
 }
 
+export interface LiveStepSessionRef {
+  runId: string;
+  stepId: string;
+  agent: string;
+  cwd: string;
+  startedAt: string;
+  getMessages(): readonly unknown[];
+}
+
 export function setLatestRun(run: RunState | undefined): void {
   lastRun = run;
 }
@@ -36,6 +46,20 @@ export function getLatestRun(): RunState | undefined {
 
 export function getActiveRun(): RunState | undefined {
   return lastRun?.status === "running" ? lastRun : undefined;
+}
+
+export function setLiveStepSession(ref: LiveStepSessionRef): void {
+  liveStepSessions.set(liveStepKey(ref.runId, ref.stepId), ref);
+}
+
+export function getLiveStepSession(runId: string, stepId: string): LiveStepSessionRef | undefined {
+  return liveStepSessions.get(liveStepKey(runId, stepId));
+}
+
+export function clearLiveStepSession(runId: string, stepId: string, ref?: LiveStepSessionRef): void {
+  const key = liveStepKey(runId, stepId);
+  if (ref && liveStepSessions.get(key) !== ref) return;
+  liveStepSessions.delete(key);
 }
 
 export function beginChalinTurn(options: { prompt?: string } = {}): void {
@@ -123,8 +147,13 @@ export function getChalinRouteInvocations(): readonly ChalinRouteInvocation[] {
 
 export function resetRuntimeState(): void {
   lastRun = undefined;
+  liveStepSessions.clear();
   routeInvocations = [];
   directCompletion = freshDirectCompletionState();
+}
+
+function liveStepKey(runId: string, stepId: string): string {
+  return `${runId}:${stepId}`;
 }
 
 function freshDirectCompletionState(): DirectCompletionState {

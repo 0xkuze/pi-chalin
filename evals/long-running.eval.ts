@@ -4,7 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ArtifactStore } from "../src/artifacts.ts";
-import { createRunState, loadResumableRunState, MockWorkerRunner } from "../src/runner.ts";
+import { MockWorkerRunner } from "../src/runner.ts";
+import { createRunState, loadResumableRunState } from "../src/runner-state.ts";
 import type { AgentOutput, RouteDecision, RunState } from "../src/schemas.ts";
 
 interface LongRunningCheck {

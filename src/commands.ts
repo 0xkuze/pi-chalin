@@ -5,15 +5,15 @@ import { ArtifactStore } from "./artifacts.ts";
 import { loadEffectiveConfig, writeProjectConfig } from "./config.ts";
 import { MemoryStore } from "./memory.ts";
 import { getActiveRun, getLatestRun } from "./runtime-state.ts";
+import { openAgentManager } from "./ui-agents.ts";
 import {
-  openAgentManager,
   openMemoryReview,
   openArtifactPanel,
   openActivityMonitor,
   openWebFetchAuditPanel,
   openSmartPanel,
-  setChalinStatus,
 } from "./ui.ts";
+import { setChalinStatus } from "./ui-status.ts";
 import { listWebFetchAudit } from "./webfetch.ts";
 
 export function registerChalinCommands(pi: ExtensionAPI): void {
@@ -55,8 +55,8 @@ export function registerChalinCommands(pi: ExtensionAPI): void {
       if (command === "memory") {
         const query = rest.join(" ").trim();
         if (query) {
-          const results = await memory.search(query, 10);
-          ctx.ui.notify(results.map((result) => `${result.score} · ${result.record.category}: ${result.record.content}`).join("\n") || "No memory matches.", "info");
+          const bundle = await memory.retrieve({ query, sourceAgent: "human-command", limit: 10, tokenBudget: 1200, includeEvidence: true });
+          ctx.ui.notify(bundle.text || "No memory matches.", "info");
         } else {
           await openMemoryReview(ctx, await memory.list(), {
             approve: (id) => void memory.approve(id),

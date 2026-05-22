@@ -1,21 +1,18 @@
-import * as fs from "node:fs";
-import * as path from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { AgentCapability, AgentDefinition, AgentThinkingLevel, ModelResolutionAttempt, ModelResolutionLog, RouteKind, ToolBudgetProfile } from "./schemas.ts";
-import { evaluateBudgetUsage, estimateBudgetPreflight, policyForStep, recordBudgetCheckpoint, summarizeToolUtility } from "./budget.ts";
-import { resolveChalinPaths, type ChalinPathsOptions } from "./paths.ts";
-import { createMemoryCandidate } from "./memory.ts";
+import type { AgentDefinition, AgentThinkingLevel } from "./schemas.ts";
+import { evaluateBudgetUsage, policyForStep, recordBudgetCheckpoint, summarizeToolUtility } from "./budget.ts";
+import type { ChalinPathsOptions } from "./paths.ts";
+import { createMemoryCandidate, MemoryStore } from "./memory.ts";
 import type { AgentOutput, AgentStep, MemoryCandidate, RouteDecision, RoutePlan, RunState, RunStepMetrics, RunStepState, TokenUsageSummary } from "./schemas.ts";
 import { createChildToolPolicy, createChildTools, type ChildToolActivity, type ChildToolPolicy } from "./child-tools.ts";
+import { createChalinChildSessionManager } from "./child-sessions.ts";
 import { buildProjectSnapshot, formatProjectSnapshot } from "./snapshot.ts";
 import { ArtifactStore } from "./artifacts.ts";
-import { buildProjectDiscoveryIndex, formatProjectDiscoveryIndex } from "./discovery.ts";
+import { resolveAgentModel, resolveAgentThinking } from "./model-resolution.ts";
+import { buildSdkPrompt, childToolNames, handoffReviewToolCallLimit, isHandoffGapReadMode, resolveStepCompletionStatus, synthesisCrossStepDuplicateReadLimit, synthesisGapReadLimit, synthesisToolCallLimit, type SdkPromptOptions } from "./runner-prompt.ts";
+import { createRunState, isUsableStepHandoff, persistRun, prepareRunForResume } from "./runner-state.ts";
+import { clearLiveStepSession, setLiveStepSession, type LiveStepSessionRef } from "./runtime-state.ts";
 import { cleanupWorktrees, mergeWorktreeChanges, needsWorktreeIsolation, prepareWorktreeIsolation, type WorktreeIsolationPlan } from "./worktrees.ts";
-
-interface SdkPromptOptions {
-  priorFilesRead?: string[];
-  synthesisGapReadLimit?: number;
-}
 
 export interface WorkerRunnerContext extends ChalinPathsOptions {
   agents: Map<string, AgentDefinition>;
@@ -311,10 +308,6 @@ async function runSdkDag(
   }
 }
 
-function isUsableStepHandoff(step: RunStepState): boolean {
-  return step.status === "complete" || step.status === "budget-capped";
-}
-
 function aggregateStageHandoff(stageSteps: RunStepState[]): string {
   return aggregateHandoff(stageSteps.map((step) => {
     if (isUsableStepHandoff(step)) return { agent: step.agent, text: step.output?.handoff ?? step.output?.text ?? "" };
@@ -407,6 +400,7 @@ async function runSdkStep(
     step.thinkingLevel = selectedThinking.label;
     const promptOptions = buildPromptOptionsForStep(run, step, agent, options.previous);
     const budgetPolicy = budgetPolicyForSdkStep(policyForStep(agent, step, run.route.kind, run.route.risk), agent, step, options.previous);
+    promptOptions.memoryContext = await compactMemoryContextForStep(options.cwd, step, agent, options.previous);
     const maxToolCalls = budgetPolicy.caps.maxToolCalls;
     step.budget = budgetPolicy.profile;
     step.maxToolCalls = maxToolCalls;
@@ -424,6 +418,7 @@ async function runSdkStep(
     });
     const prompt = buildSdkPrompt(agent, step.task, options.cwd, options.previous, budgetPolicy, "normal", promptOptions);
     const { createAgentSession } = await import("@earendil-works/pi-coding-agent");
+    const sessionManager = createChalinChildSessionManager({ cwd: options.cwd, runId: run.id, step, extensionContext });
     const releaseChildEnv = enterChildEnv();
     try {
       const created = await createAgentSession({
@@ -431,11 +426,21 @@ async function runSdkStep(
         model: selectedModel.model,
         ...(selectedThinking.level ? { thinkingLevel: selectedThinking.level as never } : {}),
         modelRegistry: extensionContext.modelRegistry,
+        sessionManager,
         tools: allowedTools,
         customTools: createChildTools(childPolicy),
         sessionStartEvent: { type: "session_start", reason: "new" },
       });
       step.thinkingLevel = (created.session.thinkingLevel as AgentThinkingLevel | undefined) ?? step.thinkingLevel;
+      const liveRef: LiveStepSessionRef = {
+        runId: run.id,
+        stepId: step.id,
+        agent: step.agent,
+        cwd: options.cwd,
+        startedAt: new Date().toISOString(),
+        getMessages: () => Array.isArray(created.session.state.messages) ? created.session.state.messages as unknown[] : [],
+      };
+      setLiveStepSession(liveRef);
       let text = "";
       try {
         const abortChild = () => { void created.session.abort(); };
@@ -448,7 +453,11 @@ async function runSdkStep(
               message: `SDK runner idle timed out for ${step.agent}`,
               signal: context.signal,
               activeOperations: activity.activeOperations,
-              pollActivitySignature: () => sessionActivitySignature(created.session.state.messages as unknown[], childPolicy),
+              pollActivitySignature: () => {
+                const messages = created.session.state.messages as unknown[];
+                activity.onSessionActivity(messages);
+                return sessionActivitySignature(messages, childPolicy);
+              },
               onTimeout: abortChild,
             },
           );
@@ -456,6 +465,7 @@ async function runSdkStep(
           context.signal?.removeEventListener("abort", abortChild);
           step.currentTool = undefined;
         }
+        activity.onSessionActivity(created.session.state.messages as unknown[]);
         text = extractLastAssistantText(created.session.state.messages as unknown[]);
         step.output = parseAgentOutput(step.agent, text || `SDK run completed for ${step.agent}.`);
         step.metrics = finalizeStepMetrics(
@@ -465,6 +475,7 @@ async function runSdkStep(
           promptOptions.priorFilesRead,
         );
       } finally {
+        clearLiveStepSession(run.id, step.id, liveRef);
         created.session.dispose();
       }
     } finally {
@@ -530,6 +541,26 @@ function buildPromptOptionsForStep(run: RunState, step: RunStepState, agent: Age
   };
 }
 
+async function compactMemoryContextForStep(cwd: string, step: RunStepState, agent: AgentDefinition | undefined, previous?: string): Promise<string | undefined> {
+  if (!agent?.memory.read || !agent.capabilities.includes("memory-read")) return undefined;
+  const query = [step.task, previous ? `Previous handoff: ${previous.slice(0, 700)}` : ""].filter(Boolean).join("\n");
+  const bundle = await new MemoryStore({ cwd }).retrieve({
+    query,
+    sourceAgent: step.agent,
+    agentConcern: agent.concern,
+    tokenBudget: memoryPromptTokenBudget(agent),
+    limit: 8,
+  });
+  return bundle.text || undefined;
+}
+
+function memoryPromptTokenBudget(agent: AgentDefinition): number {
+  if (agent.concern === "review" || agent.concern === "decision-consistency") return 700;
+  if (agent.concern === "planning" || agent.concern === "context-building") return 560;
+  if (agent.concern === "implementation" || agent.concern === "conflict-resolution") return 420;
+  return 320;
+}
+
 function priorFilesReadBeforeStep(run: RunState, currentStep: RunStepState): string[] {
   const index = run.steps.indexOf(currentStep);
   const previousSteps = index >= 0 ? run.steps.slice(0, index) : run.steps.filter((step) => step !== currentStep);
@@ -554,80 +585,11 @@ function budgetPolicyForSdkStep(policy: ReturnType<typeof policyForStep>, agent:
   };
 }
 
-export function createRunState(route: RouteDecision, cwd: string): RunState {
-  const id = `chalin-${Date.now().toString(36)}`;
-  return {
-    id,
-    route,
-    status: "running",
-    startedAt: new Date().toISOString(),
-    steps: route.plan ? planSteps(route.plan) : [],
-    logsPath: path.join(resolveChalinPaths({ cwd }).projectRoot, ".pi-chalin", "runs", `${id}.json`),
-    warnings: [],
-    budgetPreflight: estimateBudgetPreflight({
-      task: route.reason,
-      routeKind: route.kind,
-      steps: route.plan ? planAgentSteps(route.plan) : undefined,
-      risk: route.risk,
-      needsArtifacts: route.needsArtifacts,
-    }),
-  };
-}
-
-export function prepareRunForResume(run: RunState): RunState {
-  run.status = "running";
-  run.endedAt = undefined;
-  run.warnings = [...run.warnings, `Resumed paused pi-chalin run ${run.id}.`];
-  for (const step of run.steps) {
-    if (isUsableStepHandoff(step) || step.status === "failed") continue;
-    step.status = "pending";
-    step.error = undefined;
-    step.currentTool = undefined;
-    step.endedAt = undefined;
-  }
-  persistRun(run);
-  return run;
-}
-
 function aggregateCompletedHandoffBefore(steps: RunStepState[], endIndex: number): string {
   return aggregateHandoff(steps
     .slice(0, endIndex)
     .filter((step) => isUsableStepHandoff(step))
     .map((step) => ({ agent: step.agent, text: step.output?.handoff ?? step.output?.text ?? "" })));
-}
-
-export function loadResumableRunState(options: ChalinPathsOptions & { runId?: string }): RunState | undefined {
-  const runsDir = path.join(resolveChalinPaths(options).projectRoot, ".pi-chalin", "runs");
-  if (!fs.existsSync(runsDir)) return undefined;
-  const files = fs.readdirSync(runsDir)
-    .filter((name) => name.endsWith(".json"))
-    .map((name) => path.join(runsDir, name))
-    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
-  for (const file of files) {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(file, "utf-8")) as RunState;
-      if (options.runId && parsed.id !== options.runId) continue;
-      if (isResumableRun(parsed)) {
-        parsed.logsPath ??= file;
-        if (parsed.status === "running") {
-          parsed.status = "paused";
-          parsed.warnings = [...(parsed.warnings ?? []), "Recovered stale running run from disk after process shutdown."];
-          persistRun(parsed);
-        }
-        return parsed;
-      }
-    } catch {
-      // Ignore corrupt run files; a newer/older run may still be resumable.
-    }
-  }
-  return undefined;
-}
-
-function isResumableRun(run: RunState): boolean {
-  if (!run.route?.plan) return false;
-  if (run.status !== "paused" && run.status !== "running") return false;
-  if (run.steps.some((step) => !isUsableStepHandoff(step) && step.status !== "failed")) return true;
-  return run.status === "running" && run.steps.length > 0 && run.steps.every((step) => isUsableStepHandoff(step));
 }
 
 export function parseAgentOutput(agent: string, raw: string): AgentOutput {
@@ -666,27 +628,6 @@ function parseMemoryCandidateLine(line: string): { category: string; content: st
     return { category, content: tagged[2].trim(), confidence: category === "agent-note" ? 0.7 : 0.9 };
   }
   return { category: "agent-note", content: normalized, confidence: 0.7 };
-}
-
-function planSteps(plan: RoutePlan): RunStepState[] {
-  if (plan.kind === "dag") {
-    return plan.stages.flatMap((stage) => stage.tasks.map((step, index) => ({
-      id: `${stage.id}:step-${index + 1}`,
-      agent: step.agent,
-      task: step.task,
-      budget: step.budget,
-      status: "pending" as const,
-    })));
-  }
-  const rawSteps = plan.kind === "single" ? [{ agent: plan.agent, task: plan.task }] : plan.kind === "chain" ? plan.steps : plan.tasks;
-  return rawSteps.map((step, index) => ({ id: `step-${index + 1}`, agent: step.agent, task: step.task, budget: step.budget, status: "pending" }));
-}
-
-function planAgentSteps(plan: RoutePlan): AgentStep[] {
-  if (plan.kind === "single") return [{ agent: plan.agent, task: plan.task, budget: plan.budget }];
-  if (plan.kind === "chain") return plan.steps;
-  if (plan.kind === "parallel") return plan.tasks;
-  return plan.stages.flatMap((stage) => stage.tasks);
 }
 
 function aggregateHandoff(items: Array<{ agent: string; text: string }>): string {
@@ -825,13 +766,6 @@ function stageIdForStep(stepId: string): string {
   return stepId.includes(":") ? stepId.split(":")[0] ?? stepId : stepId;
 }
 
-function persistRun(run: RunState): void {
-  if (run.logsPath) {
-    fs.mkdirSync(path.dirname(run.logsPath), { recursive: true });
-    fs.writeFileSync(run.logsPath, `${JSON.stringify(run, null, 2)}\n`, "utf-8");
-  }
-}
-
 function shouldUseMockSdkFallback(context: WorkerRunnerContext): boolean {
   return process.env.PI_CHALIN_RUNNER === "mock" || process.env.PI_OFFLINE === "1" || !context.extensionContext?.model;
 }
@@ -846,6 +780,7 @@ function mockFallbackReason(context: WorkerRunnerContext): string {
 function createStepActivityMonitor(step: RunStepState, run: RunState, context: WorkerRunnerContext) {
   let activeTools = 0;
   let lastActivityAt = Date.now();
+  let lastActivitySignature = "";
   return {
     onToolActivity(activity: ChildToolActivity) {
       lastActivityAt = activity.at;
@@ -858,6 +793,12 @@ function createStepActivityMonitor(step: RunStepState, run: RunState, context: W
       }
       context.onUpdate?.(run);
     },
+    onSessionActivity(messages: unknown[]) {
+      const signature = sessionActivityMarker(messages);
+      if (signature === lastActivitySignature) return;
+      lastActivitySignature = signature;
+      lastActivityAt = Date.now();
+    },
     activeOperations() {
       return activeTools;
     },
@@ -865,6 +806,12 @@ function createStepActivityMonitor(step: RunStepState, run: RunState, context: W
       return lastActivityAt;
     },
   };
+}
+
+function sessionActivityMarker(messages: unknown[]): string {
+  const last = messages.at(-1);
+  const lastText = typeof last === "object" && last !== null ? JSON.stringify(last).slice(-512) : String(last ?? "");
+  return `${messages.length}:${lastText.length}:${lastText}`;
 }
 
 function sessionActivitySignature(messages: unknown[], policy: ChildToolPolicy): string {
@@ -977,317 +924,6 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-export function buildSdkPrompt(agent: AgentDefinition | undefined, task: string, cwd: string, previous?: string, budget: ReturnType<typeof policyForStep> | number = toolBudgetForAgent(agent), budgetProfile: ToolBudgetProfile = "normal", options: SdkPromptOptions = {}): string {
-  const discoveryIndex = formatProjectDiscoveryIndex(buildProjectDiscoveryIndex(cwd));
-  const capabilities = agent?.capabilities ?? [];
-  const deepProjectAnalysis = isDeepProjectAnalysisTask(task) || budgetProfile === "deep" || (typeof budget !== "number" && budget.profile === "deep");
-  const handoffGapMode = isHandoffGapReadMode(agent, task, previous);
-  const budgetPolicy = typeof budget === "number"
-    ? policyForStep(agent, { agent: agent?.name ?? "agent", task, budget: budgetProfile }, "single-agent")
-    : budget;
-  const maxTools = typeof budget === "number" ? budget : budget.caps.maxToolCalls;
-  const profile = typeof budget === "number" ? budgetProfile : budget.profile;
-  return [
-    compactAgentInstructions(agent),
-    "",
-    "## pi-chalin concern/capability policy",
-    `- Concern: ${agent?.concern ?? "delegation"}.`,
-    `- Capabilities: ${capabilities.join(", ") || "inspect-files, search-files"}.`,
-    "- Runtime tools are derived from capabilities; do not assume a tool exists because another agent has it.",
-    "",
-    "## pi-chalin child tool policy",
-    "- Use Pi-native tools directly: read/find/grep/ls for inspection, edit for minimal line-level changes.",
-    "- Use chalin_project_discovery first for broad project understanding. It is a raw file index, not semantic truth; read evidence files before making claims.",
-    "- Use chalin_project_snapshot only as legacy compact stack/git context or for branch-summary reconnaissance; never treat it as proof of architecture.",
-    "- Bash is guarded and only for safe inspection or explicit validation commands: git status/log/diff/show/rev-parse, pwd, ls, find, grep/rg, cat for one explicit small file, and known test/typecheck commands.",
-    "- Never create temporary Python/Node/shell scripts to read, inspect, summarize, or modify project files.",
-    "- Never modify files through bash. No redirection, tee, sed -i, rm/cp/mv/mkdir/touch/chmod, or generated scripts.",
-    "- For existing files, never rewrite the whole file when a targeted edit is possible. Use edit with the smallest exact old/new block. Use write only for new files.",
-    "",
-    "## pi-chalin runtime budget",
-    `- Tool budget profile: ${profile}. Max tool calls for this child turn: ${maxTools}.`,
-    `- Budget caps: ${budgetPolicy.caps.maxSeconds}s, $${budgetPolicy.caps.maxUsd}, ${budgetPolicy.caps.maxTurns} turns, ${budgetPolicy.caps.maxOutputChars} output chars, ${budgetPolicy.caps.maxReadBytes} read bytes, ${budgetPolicy.caps.maxFilesTouched} files touched, ${budgetPolicy.caps.maxRetriesPerTool} retries/tool.`,
-    "- Stay bounded. Do not perform an exhaustive repository crawl unless the task explicitly requires it.",
-    agent?.concern === "recon" || deepProjectAnalysis
-      ? "- AGENTS/JIT-first: when the discovery index lists AGENTS.md, CONTEXT.md, ADRs, or package instruction files, read the root instructions first and then only the package instruction files relevant to the task before broad source reads."
-      : undefined,
-    profile === "tight"
-      ? "- Tight profile: use the discovery index first, then inspect only the smallest evidence set needed to answer."
-      : profile === "deep" || profile === "extended"
-        ? "- Deep/autonomous profile: use the discovery index first, formulate an inspection plan, then inspect breadth-first with compact notes; checkpoint/compress at stage boundaries instead of exhaustive context stuffing."
-        : "- Normal profile: use the discovery index first, then inspect the evidence files needed; avoid exhaustive crawls unless the task requires it.",
-    "- Prefer concise findings with evidence. Stop after the highest-value actionable issues; do not spend budget proving low-value metadata already present in the snapshot.",
-    `- Use at most ${maxTools} tool calls for this role. If you hit the budget, stop and report partial findings plus uncertainty.`,
-    "- If you hit any budget cap, treat it as a checkpoint boundary, not a failure: return partial handoff, uncertainty, and the next split/continue recommendation.",
-    "- For hours/days-long autonomous work, do not try to solve everything inside one child turn. Write artifacts/checkpoints, return a handoff, and let the orchestrator continue with another bounded stage.",
-    "- Do not browse the web unless this agent role and task explicitly request fresh external context.",
-    deepProjectAnalysis
-      ? "- Output budget for deep analysis: `## Findings` max 10 evidence-backed bullets, `## Handoff` max 14 bullets or 2600 characters, `## Memory Candidates` max 3 bullets. Accuracy beats brevity; do not pad."
-      : "- Output budget: `## Findings` max 5 bullets, `## Handoff` max 8 bullets or 1200 characters, `## Memory Candidates` max 3 bullets.",
-    "- For long-running work, use chalin_artifact_write only at meaningful boundaries: feature-state at start, checkpoint after a completed handoff, validation-contract before reviewer/worker handoff, worker-skill for reusable feature-specific rules.",
-    "- Do not paste raw command output or long code snippets. Cite file paths and line-level evidence when useful.",
-    deepProjectAnalysis ? deepProjectAnalysisContract() : undefined,
-    handoffGapMode ? handoffGapReadContract(options, agent) : undefined,
-    "",
-    "## Stop conditions",
-    stopConditionsForAgent(agent, task),
-    "",
-    previous ? "## Previous Handoff" : undefined,
-    previous || undefined,
-    previous ? "" : undefined,
-    previous && options.priorFilesRead?.length ? "## Already Covered Evidence Paths" : undefined,
-    previous && options.priorFilesRead?.length ? formatPriorFilesRead(options.priorFilesRead) : undefined,
-    previous && options.priorFilesRead?.length ? "" : undefined,
-    "## Task",
-    task,
-    "",
-    "## Cached Project Discovery Index",
-    previous ? "Discovery index omitted because Previous Handoff is available. Call chalin_project_discovery only if the handoff lacks required repo facts." : discoveryIndex,
-    "",
-    "Return a concise result with these sections when useful:",
-    "## Findings",
-    deepProjectAnalysis
-      ? "- Evidence-backed discoveries that the orchestrator should show the user. Include claim + evidence; do not merge unsupported guesses."
-      : "- Evidence-backed discoveries that the orchestrator should show the user. Max 5 bullets.",
-    "## Handoff",
-    deepProjectAnalysis
-      ? "- Preserve the Coverage Matrix, Evidence Table, Unknowns/Gaps, and final synthesis material. Do not drop domain-critical subsystems."
-      : "- A compact summary for the next agent or the orchestrator. Max 8 bullets or 1200 characters.",
-    "## Memory Candidates",
-    "- Only durable, human-readable project knowledge that will help future work.",
-    "- Max 3 bullets.",
-    "- Use 1-3 complete sentences per bullet. Prefer categories like `project-fact:`, `pattern:`, `tooling:`, `testing:`, `workflow:`, `bugfix:`, `decision:`, or `preference:`.",
-    "- Good: `tooling: This project uses Bun for tests, and tests should avoid setTimeout-based waits because they are flaky.`",
-    "- Good: `workflow: Long-running feature work should checkpoint validation contracts after each stage so later agents can resume safely.`",
-    "- Bad: commands, logs, code snippets, raw stdout/stderr, stack traces, task completion notes, or obvious one-line facts.",
-    "- Write `- None.` when there is nothing worth remembering.",
-  ].filter(Boolean).join("\n");
-}
-
-
-function compactAgentInstructions(agent: AgentDefinition | undefined): string | undefined {
-  if (!agent) return undefined;
-  const rules = extractAgentSection(agent.systemPrompt, "Rules", "Tool discipline")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith("-"))
-    .slice(0, 4);
-  return [
-    `You are pi-chalin ${agent.name}: ${agent.description}`,
-    rules.length ? "Role rules:" : undefined,
-    ...rules,
-  ].filter(Boolean).join("\n");
-}
-
-function extractAgentSection(text: string, start: string, end: string): string {
-  const pattern = new RegExp(`${escapeRegExp(start)}:\\s*([\\s\\S]*?)(?:\\n\\s*${escapeRegExp(end)}:|$)`, "i");
-  return pattern.exec(text)?.[1]?.trim() ?? "";
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-
-
-function isSnapshotOnlyRecon(task: string, agent: AgentDefinition | undefined): boolean {
-  return agent?.concern === "recon"
-    && /\b(branch|diff|git state|status|recent commits?|changed files?)\b/i.test(task)
-    && !/\b(implement|fix|edit|security|deep|exact behavior|line-level)\b/i.test(task);
-}
-
-function shouldUseHandoffOnlyMode(task: string, agent: AgentDefinition | undefined): boolean {
-  if (!agent || agent.concern === "implementation") return false;
-  if (isDeepProjectAnalysisTask(task)) return false;
-  const explicitDeepInspection = /\b(exact line|line-level|verify|validate|run tests?|execute tests?|security|correctness|must inspect|full review)\b/i.test(task);
-  if (explicitDeepInspection) return false;
-  if (agent.concern === "context-building") return /\b(synthesize|summarize|explain|final answer|answer material|consolidate|plain language|package|using scout findings|changed files enough)\b/i.test(task);
-  return /\b(synthesize|summarize|explain|final answer|answer material|consolidate|package)\b/i.test(task);
-}
-
-function taskNeedsArtifactWrite(task: string): boolean {
-  return /\b(artifact|checkpoint|validation contract|worker skill|resume|continuation|long-running|long running)\b/i.test(task);
-}
-
-function taskNeedsExternalContext(task: string, agent: AgentDefinition): boolean {
-  if (agent.concern === "research") return true;
-  return /\b(web|internet|online|current|latest|recent|docs?|url|https?:\/\/|exa|source|sources)\b/i.test(task);
-}
-
-function taskNeedsBash(task: string, agent: AgentDefinition): boolean {
-  if (agent.concern === "implementation") return true;
-  return /\b(test|validate|validation|lint|typecheck|git|branch|diff|commit|status|log)\b/i.test(task);
-}
-
-export function childToolNames(agent: AgentDefinition | undefined, task = "", needsArtifacts = false, hasPrevious = false): string[] {
-  if (hasPrevious && shouldUseHandoffOnlyMode(task, agent)) return taskNeedsArtifactWrite(task) && needsArtifacts ? ["chalin_artifact_write"] : [];
-  if (isSnapshotOnlyRecon(task, agent)) return ["chalin_project_discovery", "chalin_project_snapshot"];
-  if (!agent?.capabilities.length) {
-    const fallback = new Set(agent?.tools.length ? agent.tools : ["read", "grep", "find", "ls"]);
-    fallback.add("chalin_project_discovery");
-    return [...fallback];
-  }
-  const names = new Set<string>();
-  if (hasAnyCapability(agent, ["inspect-files"])) {
-    names.add("read");
-    names.add("ls");
-  }
-  if (hasAnyCapability(agent, ["search-files"])) {
-    names.add("grep");
-    names.add("find");
-  }
-  if (hasAnyCapability(agent, ["run-safe-bash", "validate"]) && taskNeedsBash(task, agent)) names.add("bash");
-  if (hasAnyCapability(agent, ["edit-files"])) names.add("edit");
-  if (hasAnyCapability(agent, ["write-new-files"])) names.add("write");
-  if (hasAnyCapability(agent, ["external-context"]) && taskNeedsExternalContext(task, agent)) names.add("chalin_web_search");
-  if (needsArtifacts && taskNeedsArtifactWrite(task) && hasAnyCapability(agent, ["memory-write", "coordinate", "validate", "edit-files"])) names.add("chalin_artifact_write");
-  names.add("chalin_project_discovery");
-  return [...names];
-}
-
-function toolBudgetForAgent(agent: AgentDefinition | undefined, fallbackName?: string): number {
-  const env = Number(process.env.PI_CHALIN_CHILD_TOOL_BUDGET);
-  if (Number.isFinite(env) && env > 0) return Math.floor(env);
-  return baseToolBudget(agent, fallbackName);
-}
-
-export function toolBudgetForStep(agent: AgentDefinition | undefined, step: Pick<RunStepState, "agent" | "task" | "budget">, routeKind: RouteKind = "single-agent"): number {
-  const env = Number(process.env.PI_CHALIN_CHILD_TOOL_BUDGET);
-  if (Number.isFinite(env) && env > 0) return Math.floor(env);
-  return policyForStep(agent, step, routeKind).caps.maxToolCalls;
-}
-
-export function resolveStepCompletionStatus(step: Pick<RunStepState, "metrics" | "output" | "error">): RunStepState["status"] {
-  if (!step.metrics?.budgetStopCount) return "complete";
-  if (hasUsableHandoff(step)) return "complete";
-  return "budget-capped";
-}
-
-function hasUsableHandoff(step: Pick<RunStepState, "output" | "error">): boolean {
-  const text = [step.output?.handoff, step.output?.text].filter(Boolean).join("\n").trim();
-  if (text.length < 80) return false;
-  if (/^(done|complete|ok|no output)\.?$/i.test(text)) return false;
-  return /\b(file|path|module|test|risk|finding|because|uses|contains|should|next|changed|review|implementation|architecture|project)\b/i.test(text);
-}
-
-function baseToolBudget(agent: AgentDefinition | undefined, fallbackName?: string): number {
-  if (agent?.concern === "recon") return 40;
-  if (agent?.concern === "context-building") return 60;
-  if (agent?.concern === "planning") return 25;
-  if (agent?.concern === "review") return 50;
-  if (agent?.concern === "implementation") return 80;
-  if (agent?.concern === "research") return 60;
-  if (agent?.concern === "decision-consistency") return 8;
-  if (agent?.concern === "conflict-resolution") return 16;
-  if (fallbackName === "scout") return 40;
-  if (fallbackName === "context-builder") return 60;
-  if (fallbackName === "planner") return 25;
-  if (fallbackName === "reviewer") return 50;
-  if (fallbackName === "worker") return 80;
-  return 40;
-}
-
-function stopConditionsForAgent(agent: AgentDefinition | undefined, task = ""): string {
-  if (isDeepProjectAnalysisTask(task) && agent?.concern === "recon") {
-    return "- Stop only after producing a coverage map across top-level functional areas: entrypoints, commands/tools/routes, storage/sync, integrations, UI/cloud surfaces, tests/evals/tooling, and explicit unknowns.";
-  }
-  if (isDeepProjectAnalysisTask(task) && (agent?.concern === "context-building" || agent?.concern === "review")) {
-    return "- Stop only after the Coverage Matrix marks each critical surface as covered with evidence, not present with evidence, or unknown/gap.";
-  }
-  if (agent?.concern === "recon") return "- Stop once stack signals, test/build commands, entrypoints, changed files, and 3-5 high-signal files are identified.";
-  if (agent?.concern === "context-building") return "- Stop once the next agent has enough facts, constraints, relevant paths, and uncertainties to act without re-scanning.";
-  if (agent?.concern === "planning") return "- Stop once the plan has ordered phases, likely files, validation, risks, and rollback notes; do not inspect implementation details deeply.";
-  if (agent?.concern === "review") return "- Stop after the top 3-5 evidence-backed risks/findings; do not keep searching for marginal issues.";
-  if (agent?.concern === "implementation") return "- Stop after the scoped change and nearest validation are complete; do not broaden scope or rewrite unrelated code.";
-  if (agent?.concern === "research") return "- Stop after current sourced context is enough; do not browse or fetch beyond the task scope.";
-  return "- Stop when the bounded task can be answered with evidence and remaining uncertainty is explicit.";
-}
-
-function isDeepProjectAnalysisTask(task: string): boolean {
-  return /\b(deep|thorough|in[- ]depth|profundidad|profundo|profunda|revisa este proyecto|review this project|what (does|is) this project|que hace este proyecto|analiza este (repo|proyecto)|understand this project|project analysis)\b/i.test(task);
-}
-
-function deepProjectAnalysisContract(): string {
-  return [
-    "",
-    "## Deep project analysis accuracy contract",
-    "- Optimize for accuracy, not length. A short answer that misses core subsystems is wrong; a long answer without evidence is also wrong.",
-    "- Produce a Coverage Matrix before synthesis. Required surfaces: runtime/entrypoints; commands/tools/routes; data/storage/sync; local project detection; external integrations/MCP/tools; HTTP/API routes; UI/dashboard/cloud surfaces; memory/conflict/governance; tests/evals/tooling; known gaps.",
-    "- Mark every Coverage Matrix item as one of: covered with evidence, not present with evidence, or unknown/gap. Do not pretend an unknown is absent.",
-    "- Produce an Evidence Table using claim + evidence + confidence + gap. Evidence should include file paths and symbol/function/route/config keys when available.",
-    "- For memory/agent/orchestration projects, explicitly check: local/project detection, memory persistence and sync, MCP/tool surface, HTTP/API surface, conflict detection/surfacing, external integrations, UI/dashboard/cloud, and test/eval status.",
-    "- For command/tool/route surfaces, include representative exact commands, endpoints, and tool names (for example `engram mcp`, `/observations`, or `mem_save`) instead of generic labels only.",
-    "- For local-first persistence/sync, state what is the source of truth and name concrete sync artifacts such as manifests/chunks when present.",
-    "- Do not merge a claim into final synthesis unless it has evidence or is explicitly labeled as inference.",
-    "- Final synthesis must preserve domain-critical subsystems discovered in docs, routes, tools, tests, or config.",
-  ].join("\n");
-}
-
-function isSynthesisGapReadMode(agent: AgentDefinition | undefined, task: string, previous?: string): boolean {
-  if (!previous?.trim()) return false;
-  if (agent?.concern !== "context-building") return false;
-  return isDeepProjectAnalysisTask(task) || /\b(synthesize|summarize|explain|final answer|answer material|consolidate|context-builder|a partir del handoff|scout findings|síntesis|sintetiza|resumen)\b/i.test(task);
-}
-
-function isReviewGapReadMode(agent: AgentDefinition | undefined, task: string, previous?: string): boolean {
-  if (!previous?.trim()) return false;
-  if (agent?.concern !== "review") return false;
-  return isDeepProjectAnalysisTask(task) || /\b(review|validate|verify|audit|risk|gap|quality|correctness|revisa|verifica|valida|riesgos?|gaps?)\b/i.test(task);
-}
-
-function isHandoffGapReadMode(agent: AgentDefinition | undefined, task: string, previous?: string): boolean {
-  return isSynthesisGapReadMode(agent, task, previous) || isReviewGapReadMode(agent, task, previous);
-}
-
-function synthesisToolCallLimit(): number {
-  const parsed = Number(process.env.PI_CHALIN_SYNTHESIS_TOOL_LIMIT);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 35;
-}
-
-function handoffReviewToolCallLimit(): number {
-  const parsed = Number(process.env.PI_CHALIN_REVIEW_TOOL_LIMIT);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 12;
-}
-
-function synthesisGapReadLimit(): number {
-  const parsed = Number(process.env.PI_CHALIN_SYNTHESIS_GAP_READ_LIMIT);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 12;
-}
-
-function synthesisCrossStepDuplicateReadLimit(agent?: AgentDefinition): number {
-  const parsed = Number(process.env.PI_CHALIN_SYNTHESIS_CROSS_READ_LIMIT);
-  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : agent?.concern === "review" ? 1 : 3;
-}
-
-function handoffGapReadContract(options: SdkPromptOptions, agent: AgentDefinition | undefined): string {
-  const gapReadLimit = options.synthesisGapReadLimit ?? synthesisGapReadLimit();
-  const reviewMode = agent?.concern === "review";
-  return [
-    "",
-    reviewMode ? "## Handoff-first review / sampled-audit contract" : "## Handoff-first synthesis / gap-read contract",
-    reviewMode
-      ? "- Treat `Previous Handoff` as the primary evidence map. Your job is targeted quality audit, not a second repository crawl."
-      : "- Treat `Previous Handoff` as the primary evidence map. Your job is synthesis, not a second repository crawl.",
-    `- You may do at most ${gapReadLimit} gap reads/searches when the handoff has a concrete unknown, contradiction, or missing evidence needed for the final answer.`,
-    reviewMode ? "- For review, sample only the highest-risk or least-supported claims. Prefer grep/find for exact symbols/config keys; avoid full reads of already-covered files." : undefined,
-    "- Do not reread files listed in `Already Covered Evidence Paths` unless you name the specific missing symbol/line/claim you are verifying.",
-    "- If a read is blocked by the cross-step duplicate-read policy, do not retry variants of the same evidence path; use the handoff evidence and mark the claim as sampled/not rechecked.",
-    "- Prefer citing evidence already present in the handoff. Use new reads only to close explicit gaps, then stop.",
-    "- If coverage is incomplete, say exactly what remains unknown instead of expanding into a broad crawl.",
-    "- Return final answer material plus a compact handoff; do not emit a second raw exploration log.",
-  ].filter((line): line is string => Boolean(line)).join("\n");
-}
-
-function formatPriorFilesRead(files: string[]): string {
-  const unique = [...new Set(files)].slice(0, 40);
-  const extra = files.length > unique.length ? `\n- …${files.length - unique.length} more` : "";
-  return `${unique.map((file) => `- ${file}`).join("\n")}${extra}`;
-}
-
-function hasAnyCapability(agent: AgentDefinition, capabilities: AgentCapability[]): boolean {
-  return capabilities.some((capability) => agent.capabilities.includes(capability));
-}
-
 function extractLastAssistantText(messages: unknown[]): string {
   for (const message of [...messages].reverse()) {
     if (!message || typeof message !== "object") continue;
@@ -1299,106 +935,6 @@ function extractLastAssistantText(messages: unknown[]): string {
     }
   }
   return "";
-}
-
-export function resolveAgentModel(agent: AgentDefinition | undefined, agentName: string, context: WorkerRunnerContext): { model: ExtensionContext["model"]; label: string; resolution: ModelResolutionLog; warnings: string[] } {
-  const fallback = context.extensionContext?.model;
-  const tier = agentTier(agentName);
-  const candidates: Array<{ source: ModelResolutionAttempt["source"]; ref?: string }> = [
-    { source: "session-override", ref: context.modelOverrides?.[`${agent?.scope ?? "built-in"}/${agentName}`] ?? context.modelOverrides?.[agentName] },
-    { source: "agent", ref: agent?.model && agent.model !== "inherit" ? agent.model : undefined },
-    { source: "tier", ref: context.modelOverrides?.[`tier/${tier}`] ?? process.env[`PI_CHALIN_${tier.toUpperCase()}_MODEL`] },
-  ];
-  const attempts: ModelResolutionAttempt[] = [];
-
-  for (const candidate of candidates) {
-    if (!candidate.ref) continue;
-    const resolved = resolveModelRef(candidate.ref, context);
-    attempts.push({ source: candidate.source, ref: candidate.ref, status: resolved.status, model: resolved.model ? `${resolved.model.provider}/${resolved.model.id}` : undefined, reason: resolved.reason });
-    if (resolved.status === "selected" && resolved.model) {
-      const selected = `${resolved.model.provider}/${resolved.model.id}`;
-      return {
-        model: resolved.model,
-        label: selected,
-        resolution: { selected, tier, attempts },
-        warnings: fallbackWarnings(agentName, attempts, selected),
-      };
-    }
-  }
-
-  const inherited = fallback ? `${fallback.provider}/${fallback.id}` : "inherit";
-  attempts.push({ source: "inherit", status: fallback ? "selected" : "fallback", model: inherited, reason: fallback ? undefined : "no active Pi model available" });
-  return {
-    model: fallback,
-    label: fallback ? `${inherited} (${tier}:inherit)` : `inherit (${tier})`,
-    resolution: { selected: inherited, tier, attempts },
-    warnings: fallbackWarnings(agentName, attempts, inherited),
-  };
-}
-
-export function resolveAgentThinking(
-  agent: AgentDefinition | undefined,
-  agentName: string,
-  context: WorkerRunnerContext,
-  modelResolution?: ModelResolutionLog,
-): { level?: Exclude<AgentThinkingLevel, "inherit">; label: AgentThinkingLevel } {
-  const explicit = context.thinkingOverrides?.[`${agent?.scope ?? "built-in"}/${agentName}`] ?? context.thinkingOverrides?.[agentName];
-  const frontmatter = agent?.thinking && agent.thinking !== "inherit" ? agent.thinking : undefined;
-  const modelSuffix = selectedThinkingSuffix(modelResolution);
-  const level = explicit && explicit !== "inherit" ? explicit : frontmatter ?? modelSuffix;
-  return level ? { level, label: level } : { label: "inherit" };
-}
-
-function selectedThinkingSuffix(modelResolution?: ModelResolutionLog): Exclude<AgentThinkingLevel, "inherit"> | undefined {
-  const selected = modelResolution?.attempts.find((attempt) => attempt.status === "selected" && attempt.ref)?.ref;
-  if (!selected) return undefined;
-  return splitThinkingSuffix(selected).thinking;
-}
-
-function resolveModelRef(ref: string, context: WorkerRunnerContext): { status: ModelResolutionAttempt["status"]; model?: ExtensionContext["model"]; reason?: string } {
-  const parsed = parseModelRef(stripThinkingSuffix(ref).model);
-  if (!parsed) return { status: "invalid", reason: "expected provider/model-id" };
-  const registry = context.extensionContext?.modelRegistry;
-  const model = registry?.find(parsed.provider, parsed.modelId);
-  if (!model) return { status: "unavailable", reason: "not found in Pi model registry" };
-  if (!registry?.hasConfiguredAuth(model)) return { status: "unauthenticated", model, reason: "provider is not configured" };
-  return { status: "selected", model };
-}
-
-function splitThinkingSuffix(ref: string): { model: string; thinking?: Exclude<AgentThinkingLevel, "inherit"> } {
-  const trimmed = ref.trim();
-  const colon = trimmed.lastIndexOf(":");
-  if (colon === -1) return { model: trimmed };
-  const suffix = trimmed.slice(colon + 1);
-  if (suffix === "off" || suffix === "minimal" || suffix === "low" || suffix === "medium" || suffix === "high" || suffix === "xhigh") {
-    return { model: trimmed.slice(0, colon), thinking: suffix };
-  }
-  return { model: trimmed };
-}
-
-function stripThinkingSuffix(ref: string): { model: string } {
-  return { model: splitThinkingSuffix(ref).model };
-}
-
-function parseModelRef(ref: string): { provider: string; modelId: string } | undefined {
-  const trimmed = ref.trim();
-  if (!trimmed || trimmed === "inherit") return undefined;
-  const slash = trimmed.indexOf("/");
-  if (slash <= 0 || slash === trimmed.length - 1) return undefined;
-  return { provider: trimmed.slice(0, slash), modelId: trimmed.slice(slash + 1) };
-}
-
-function agentTier(agentName: string): "fast" | "balanced" | "strong" {
-  if (["scout", "context-builder", "delegate"].includes(agentName)) return "fast";
-  if (["worker", "oracle"].includes(agentName)) return "strong";
-  return "balanced";
-}
-
-function fallbackWarnings(agentName: string, attempts: ModelResolutionAttempt[], selected: string): string[] {
-  const failed = attempts.filter((attempt) => ["invalid", "unavailable", "unauthenticated", "fallback"].includes(attempt.status) && attempt.source !== "inherit");
-  if (failed.length === 0) return [];
-  const refs = failed.map((attempt) => `${attempt.ref ?? attempt.source} ${attempt.status}`).join("; ");
-  return [`Model fallback for ${agentName}: ${refs}; selected ${selected}.`];
 }
 
 function extractSessionMetrics(messages: unknown[], startedAtMs: number): RunStepMetrics {

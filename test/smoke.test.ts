@@ -3,12 +3,17 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, test } from "bun:test";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import registerPiChalin from "../src/index.ts";
-import { shouldUseCompactDirectOrchestrationPrompt, shouldUseCompactChalinCriticalPrompt } from "../src/autoroute.ts";
-import { resetRuntimeState, setLatestRun } from "../src/runtime-state.ts";
-import { chalinFooterText, openAgentManager, openAgentModelPicker, openMemoryReview, openSmartPanel, summarizeRuntimeGuards } from "../src/ui.ts";
-import { finalAnswerMaterial, formatChalinRoutePlanWidget, formatChalinRunWidget } from "../src/tools.ts";
-import { createRunState } from "../src/runner.ts";
+import { looksLikeContinuationPrompt, shouldUseCompactDirectOrchestrationPrompt, shouldUseCompactChalinCriticalPrompt } from "../src/autoroute.ts";
+import { resetRuntimeState, setLatestRun, setLiveStepSession } from "../src/runtime-state.ts";
+import { openAgentManager, openAgentModelPicker } from "../src/ui-agents.ts";
+import { openMemoryReview, openSmartPanel, summarizeRuntimeGuards } from "../src/ui.ts";
+import { finalAnswerMaterial } from "../src/route-format.ts";
+import { formatChalinRoutePlanWidget, formatChalinRunWidget } from "../src/route-widget.ts";
+import { createRunState, persistRun } from "../src/runner-state.ts";
+import { chalinFooterText } from "../src/ui-status.ts";
+import { createMemoryCandidate, MemoryStore } from "../src/memory.ts";
 import type { AgentDefinition, MemoryRecord, RunState } from "../src/schemas.ts";
 
 const tempDirs: string[] = [];
@@ -17,6 +22,16 @@ afterEach(() => {
   while (tempDirs.length > 0) fs.rmSync(tempDirs.pop()!, { recursive: true, force: true });
 });
 function tempDir(prefix: string): string { const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); tempDirs.push(dir); return dir; }
+function emptyTestUsage() {
+  return {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+}
 function memoryRecord(overrides: Partial<MemoryRecord>): MemoryRecord {
   const now = new Date().toISOString();
   return {
@@ -54,7 +69,7 @@ function createFakePi() {
         tools.set(tool.name, tool);
       },
       on(event: string, handler: unknown) {
-        handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+        handlers.getOrInsertComputed(event, () => []).push(handler);
       },
       sendMessage(message: unknown, options?: unknown) {
         fake.messages.push({ message, options });
@@ -73,6 +88,9 @@ test("pi-chalin extension registers Phase 0 command and tool", () => {
   assert.equal(fake.tools.has("chalin_resume"), true);
   assert.equal(fake.tools.has("chalin_interview"), true);
   assert.equal(fake.tools.has("chalin_web_search"), true);
+  assert.equal(fake.tools.has("chalin_memory_search"), true);
+  assert.equal(fake.tools.has("chalin_memory_write"), true);
+  assert.equal(fake.tools.has("chalin_memory_revise"), true);
   assert.equal(fake.handlers.has("session_start"), true);
   assert.equal(fake.handlers.has("input"), true);
 });
@@ -166,7 +184,88 @@ test("pi-chalin keeps the native prompt and teaches the primary Pi agent to deci
   assert.equal(promptResult?.message?.display, false);
 });
 
+test("primary Pi agent receives compact global memory context before direct or routed decisions", async () => {
+  const fake = createFakePi();
+  registerPiChalin(fake.api as never);
+  const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<{ systemPrompt?: string; message?: { customType?: string; content?: string; display?: boolean } } | undefined>;
+  const cwd = tempDir("pi-chalin-global-memory-");
+  const memory = new MemoryStore({ cwd });
+  const [record] = await memory.submitCandidates([createMemoryCandidate({
+    category: "testing",
+    content: "Async retry tests should avoid time.Sleep and prefer channel barriers, deterministic fake timers, or promise hooks.",
+    sourceAgent: "reviewer",
+    confidence: 0.96,
+    evidence: "Prior retry testing review",
+    scope: "project",
+  })]);
+  assert.ok(record);
 
+  const promptResult = await beforeAgentStart({
+    type: "before_agent_start",
+    prompt: "Implementa una mejora pequeña en tests async retry evitando sleeps frágiles",
+    systemPrompt: "base",
+    systemPromptOptions: {},
+  }, { cwd, hasUI: false, model: undefined, modelRegistry: { getAvailable: () => [] } });
+
+  assert.match(promptResult?.systemPrompt ?? "", /pi-chalin global memory context/i);
+  assert.match(promptResult?.systemPrompt ?? "", /Async retry tests should avoid time\.Sleep/i);
+  const events = await memory.events(record.id);
+  assert.ok(events.some((event) => event.type === "retrieve" && event.actor === "primary-pi-global"));
+});
+
+test("spanish continuation prompt steers the resumed parent session to chalin_resume", async () => {
+  assert.equal(looksLikeContinuationPrompt("continua"), true);
+  assert.equal(looksLikeContinuationPrompt("continúa donde se quedaron"), true);
+  assert.equal(looksLikeContinuationPrompt("sigue con el workflow"), true);
+
+  const fake = createFakePi();
+  registerPiChalin(fake.api as never);
+  const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<{ systemPrompt?: string; message?: { customType?: string; content?: string; display?: boolean } } | undefined>;
+  const cwd = tempDir("pi-chalin-resume-steer-");
+  const route: RunState["route"] = {
+    kind: "multi-agent-chain",
+    agents: ["scout", "planner", "worker"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    reason: "interrupted workflow",
+    plan: { kind: "chain", steps: [{ agent: "scout", task: "scan" }, { agent: "planner", task: "plan" }, { agent: "worker", task: "implement" }] },
+  };
+  const stale = createRunState(route, cwd);
+  stale.status = "running";
+  stale.steps[0]!.status = "complete";
+  stale.steps[0]!.output = { agent: "scout", text: "mapped", handoff: "Scout mapped the repo.", memoryCandidates: [], raw: "mapped", warnings: [] };
+  stale.steps[1]!.status = "running";
+  stale.steps[1]!.currentTool = "read";
+  persistRun(stale);
+
+  const promptResult = await beforeAgentStart({
+    type: "before_agent_start",
+    prompt: "continua",
+    systemPrompt: "base",
+    systemPromptOptions: {},
+  }, {
+    cwd,
+    hasUI: true,
+    model: undefined,
+    modelRegistry: { getAvailable: () => [] },
+    ui: { notify: () => {}, setStatus: () => {}, setWidget: () => {} },
+  });
+
+  assert.equal(promptResult?.message?.customType, "pi-chalin-resume-orchestration");
+  assert.equal(promptResult?.message?.display, false);
+  assert.match(promptResult?.systemPrompt ?? "", /resume orchestration \(compact\)/i);
+  assert.match(promptResult?.systemPrompt ?? "", /continua/i);
+  assert.doesNotMatch(promptResult?.systemPrompt ?? "", /Available pi-chalin agents/i);
+  assert.match(promptResult?.message?.content ?? "", /First action MUST be `chalin_resume`/);
+  assert.match(promptResult?.message?.content ?? "", new RegExp(stale.id));
+  assert.match(promptResult?.message?.content ?? "", /"runId"/);
+
+  const recovered = JSON.parse(fs.readFileSync(stale.logsPath!, "utf-8")) as RunState;
+  assert.equal(recovered.status, "paused");
+  assert.match(recovered.warnings.join("\n"), /Recovered stale running run/);
+});
 
 test("pi-chalin uses compact orchestration context for bounded scaffold prompts", async () => {
   assert.equal(shouldUseCompactDirectOrchestrationPrompt("Scaffoldea una mini librería TypeScript de config: package.json, src/config.ts, tests y README. Sin dependencias externas."), true);
@@ -331,6 +430,56 @@ test("direct bounded edits do not complete when requested tests were not changed
   toolExecutionEnd({ toolName: "bash", isError: false, args: { command: "bun test" } }, ctx);
 
   assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-completion-nudge").length, 1);
+});
+
+test("primary memory tools search write and revise durable memories", async () => {
+  const fake = createFakePi();
+  registerPiChalin(fake.api as never);
+  const search = fake.tools.get("chalin_memory_search") as unknown as { execute: (...args: never[]) => Promise<{ content: Array<{ type: string; text: string }>; details: { results?: unknown[] } }> };
+  const write = fake.tools.get("chalin_memory_write") as unknown as { execute: (...args: never[]) => Promise<{ content: Array<{ type: string; text: string }>; details: { record?: MemoryRecord } }> };
+  const revise = fake.tools.get("chalin_memory_revise") as unknown as { execute: (...args: never[]) => Promise<{ content: Array<{ type: string; text: string }>; details: { record?: MemoryRecord } }> };
+  const cwd = tempDir("pi-chalin-primary-memory-tools-");
+  const ctx = { cwd, hasUI: false };
+
+  const written = await write.execute(
+    "memory-write" as never,
+    {
+      category: "testing",
+      content: "Retry tests should use deterministic coordination instead of wall-clock sleeps when asserting concurrent behavior.",
+      confidence: 0.94,
+      evidence: "Primary memory tool smoke test",
+    } as never,
+    undefined as never,
+    undefined as never,
+    ctx as never,
+  );
+  assert.match(written.content.map((part) => part.text).join("\n"), /memory active|memory pending/);
+  assert.ok(written.details.record);
+
+  const found = await search.execute(
+    "memory-search" as never,
+    { query: "retry tests deterministic sleeps", tokenBudget: 120 } as never,
+    undefined as never,
+    undefined as never,
+    ctx as never,
+  );
+  assert.match(found.content.map((part) => part.text).join("\n"), /Retry tests should use deterministic coordination/i);
+
+  const revised = await revise.execute(
+    "memory-revise" as never,
+    {
+      id: written.details.record!.id,
+      content: "Retry tests should use deterministic coordination such as channel barriers or fake timers instead of wall-clock sleeps.",
+      confidence: 0.98,
+      evidence: "The revised wording names preferred deterministic mechanisms.",
+      reason: "More specific and actionable than the prior memory.",
+    } as never,
+    undefined as never,
+    undefined as never,
+    ctx as never,
+  );
+  assert.match(revised.content.map((part) => part.text).join("\n"), /memory revised/);
+  assert.match(revised.details.record?.content ?? "", /channel barriers or fake timers/);
 });
 
 test("chalin_interview asks TUI questions and persists artifact answers", async () => {
@@ -670,6 +819,149 @@ test("/chalin shows active run status while subagents are running", async () => 
   assert.ok(widgets.every((entry) => entry.content === undefined), "/chalin may clear the legacy widget but must not create a second persistent widget; the tool-result tree is the single live surface");
   assert.match(statuses.join("\n"), /chalin .*chain.*reviewer 1\/2/);
   assert.doesNotMatch(notifications.join("\n"), /Abort \(placeholder\)|run: chalin-live|step-2 running reviewer/);
+});
+
+test("Live status opens a tabbed overlay with current subagent history", async () => {
+  const fake = createFakePi();
+  registerPiChalin(fake.api as never);
+  const command = fake.commands.get("chalin") as { handler: (args: string, ctx: unknown) => Promise<void> };
+  const run: RunState = {
+    id: "chalin-live-overlay",
+    route: {
+      kind: "multi-agent-parallel",
+      agents: ["worker", "reviewer"],
+      risk: "low",
+      ambiguity: "low",
+      needsMemory: true,
+      needsArtifacts: true,
+      reason: "test live overlay",
+      plan: { kind: "parallel", tasks: [] },
+    },
+    status: "running",
+    startedAt: new Date().toISOString(),
+    steps: [
+      {
+        id: "step-1",
+        agent: "worker",
+        task: "Implement retry test improvement",
+        status: "running",
+      },
+      {
+        id: "step-2",
+        agent: "reviewer",
+        task: "Review retry test improvement",
+        status: "running",
+      },
+    ],
+    warnings: [],
+  };
+  setLatestRun(run);
+  setLiveStepSession({
+    runId: run.id,
+    stepId: "step-1",
+    agent: "worker",
+    cwd: tempDir("pi-chalin-live-worker-"),
+    startedAt: new Date().toISOString(),
+    getMessages: () => [
+      { role: "user", content: "Implement retry test improvement", timestamp: Date.now() },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "I am inspecting async retry tests and avoiding sleeps." },
+          { type: "toolCall", id: "call-1", name: "read", arguments: { path: "src/example.ts", offset: 1, limit: 35 } },
+        ],
+        api: "openai-responses",
+        provider: "openai",
+        model: "gpt-5.5",
+        usage: emptyTestUsage(),
+        stopReason: "toolUse",
+        timestamp: Date.now(),
+      },
+      {
+        role: "toolResult",
+        toolCallId: "call-1",
+        toolName: "read",
+        content: [{ type: "text", text: Array.from({ length: 35 }, (_item, index) => `line-${String(index + 1).padStart(2, "0")} retry fixture content`).join("\n") }],
+        isError: false,
+        timestamp: Date.now(),
+      },
+    ],
+  });
+  setLiveStepSession({
+    runId: run.id,
+    stepId: "step-2",
+    agent: "reviewer",
+    cwd: tempDir("pi-chalin-live-reviewer-"),
+    startedAt: new Date().toISOString(),
+    getMessages: () => [
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "I am checking guardrails and validation evidence." }],
+        api: "openai-responses",
+        provider: "openai",
+        model: "gpt-5.5",
+        usage: emptyTestUsage(),
+        stopReason: "stop",
+        timestamp: Date.now(),
+      },
+    ],
+  });
+
+  const selectedTitles: string[] = [];
+  const renders: string[] = [];
+  let customOptions: unknown;
+  let requestRenderCount = 0;
+  const plainTheme = {
+    fg: (_color: string, text: string) => text,
+    bg: (_color: string, text: string) => text,
+    bold: (text: string) => text,
+  };
+
+  await command.handler("", {
+    cwd: tempDir("pi-chalin-live-overlay-"),
+    hasUI: true,
+    ui: {
+      notify: () => {},
+      setStatus: () => {},
+      setWidget: () => {},
+      select: async (title: string) => {
+        selectedTitles.push(title);
+        return "Live status";
+      },
+      custom: async (factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (result: undefined) => void) => { render(width: number): string[]; handleInput?(data: string): void; dispose?(): void }, options: unknown) => {
+        customOptions = options;
+        const component = factory({ requestRender: () => { requestRenderCount += 1; } }, plainTheme, {}, () => undefined);
+        renders.push(component.render(96).join("\n"));
+        component.handleInput?.("\x0f");
+        renders.push(component.render(96).join("\n"));
+        component.handleInput?.("\x1b[B");
+        renders.push(component.render(96).join("\n"));
+        component.handleInput?.("\t");
+        renders.push(component.render(96).join("\n"));
+        component.handleInput?.("\x1b");
+        component.dispose?.();
+      },
+    },
+  });
+
+  assert.deepEqual(selectedTitles, ["pi-chalin Control"]);
+  assert.match(JSON.stringify(customOptions), /"overlay":true/);
+  assert.match(renders[0] ?? "", /pi-chalin Live Status/);
+  assert.match(renders[0] ?? "", /worker/);
+  assert.match(renders[0] ?? "", /I am inspecting async retry tests/);
+  assert.match(renders[0] ?? "", /ctrl\+o tools/);
+  assert.match(renders[0] ?? "", /\$ read|read src\/example\.ts:1-35/);
+  assert.match(renders[0] ?? "", /src\/example\.ts/);
+  assert.match(renders[0] ?? "", /line-01 retry fixture content/);
+  assert.doesNotMatch(renders[0] ?? "", /line-20 retry fixture content/);
+  assert.match(renders[0] ?? "", /more lines/);
+  assert.match(renders[1] ?? "", /line-35 retry fixture content/);
+  assert.match(renders[3] ?? "", /reviewer/);
+  assert.match(renders[3] ?? "", /guardrails and validation evidence/);
+  assert.ok(requestRenderCount > 0);
+  for (const render of renders) {
+    for (const line of render.split("\n")) assert.ok(visibleWidth(line) <= 96, `line exceeds overlay width: ${visibleWidth(line)} > 96`);
+  }
 });
 
 test("chalin result widget counts budget-capped checkpoints as progressed work", () => {

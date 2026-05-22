@@ -1,102 +1,18 @@
-import { DynamicBorder, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
-import { Container, fuzzyFilter, getKeybindings, Input, Spacer, Text, type Focusable, type TUI } from "@earendil-works/pi-tui";
+import {
+  AssistantMessageComponent,
+  getMarkdownTheme,
+  ToolExecutionComponent,
+  UserMessageComponent,
+  type ExtensionContext,
+  type Theme,
+} from "@earendil-works/pi-coding-agent";
+import { Container, Spacer, Text, type Component, type Focusable, type TUI } from "@earendil-works/pi-tui";
+import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ArtifactStore, FeatureArtifactState } from "./artifacts.ts";
-import { setAgentModelOverride, setAgentThinkingOverride, type ModelPersistenceTarget } from "./config.ts";
-import type { AgentDefinition, AgentThinkingLevel, ApprovalDecision, ChalinRuntimeState, MemoryRecord, RouteDecision, RunState } from "./schemas.ts";
+import { getLatestRun, getLiveStepSession } from "./runtime-state.ts";
+import type { AgentDefinition, ApprovalDecision, ChalinRuntimeState, MemoryRecord, RouteDecision, RunState, RunStepState } from "./schemas.ts";
+import { clearLegacyChalinControlWidget, setChalinStatus } from "./ui-status.ts";
 import { formatWebFetchAudit, type WebFetchAuditEntry } from "./webfetch.ts";
-
-const FOOTER_FRAMES = ["◆", "◇"];
-const FOOTER_ANIMATION_MS = 650;
-const MODEL_PICKER_VISIBLE_ROWS = 12;
-let footerTimer: ReturnType<typeof setInterval> | undefined;
-let footerFrame = 0;
-let footerTarget: Pick<ExtensionContext, "hasUI" | "ui"> | undefined;
-let footerState: ChalinFooterState = { kind: "idle" };
-
-const LEGACY_CONTROL_WIDGET_KEY = "pi-chalin-control";
-
-type AvailableModel = Awaited<ReturnType<ExtensionContext["modelRegistry"]["getAvailable"]>>[number];
-
-interface AgentModelOption {
-  value: string;
-  provider?: string;
-  id?: string;
-  name?: string;
-  searchText: string;
-}
-
-export function clearLegacyChalinControlWidget(ctx: Pick<ExtensionContext, "hasUI" | "ui">): void {
-  if (!ctx.hasUI) return;
-  ctx.ui.setWidget(LEGACY_CONTROL_WIDGET_KEY, undefined);
-}
-
-export type ChalinFooterState =
-  | { kind: "idle" }
-  | { kind: "off" }
-  | { kind: "on" }
-  | { kind: "running"; intent: string; agent: string; completed: number; total: number }
-  | { kind: "synthesizing" }
-  | { kind: "complete"; intent?: string }
-  | { kind: "stopped" }
-  | { kind: "failed" };
-
-export function setChalinStatus(ctx: Pick<ExtensionContext, "hasUI" | "ui">, state: ChalinFooterState | string | undefined): void {
-  if (!ctx.hasUI) return;
-  if (state === undefined) {
-    stopFooterAnimation();
-    ctx.ui.setStatus("pi-chalin", undefined);
-    return;
-  }
-  footerTarget = ctx;
-  footerState = typeof state === "string" ? parseLegacyChalinStatus(state) : state;
-  renderChalinFooterStatus();
-  if (footerState.kind === "running" || footerState.kind === "synthesizing") startFooterAnimation();
-  else stopFooterAnimation(false);
-}
-
-export function chalinFooterText(state: ChalinFooterState, frame = 0): string {
-  if (state.kind === "idle") return "chalin ◦ idle";
-  if (state.kind === "off") return "chalin × off";
-  if (state.kind === "on") return "chalin ◦ ready";
-  if (state.kind === "stopped") return "chalin ■ stopped";
-  if (state.kind === "failed") return "chalin × failed";
-  if (state.kind === "complete") return state.intent ? `chalin ✓ ${state.intent}` : "chalin ✓ complete";
-  if (state.kind === "synthesizing") return `chalin ${FOOTER_FRAMES[frame % FOOTER_FRAMES.length]} synthesizing`;
-  return `chalin ${FOOTER_FRAMES[frame % FOOTER_FRAMES.length]} ${state.intent} · ${state.agent} ${state.completed}/${state.total}`;
-}
-
-function parseLegacyChalinStatus(text: string): ChalinFooterState {
-  if (/off$/i.test(text)) return { kind: "off" };
-  if (/on$/i.test(text)) return { kind: "on" };
-  if (/idle$/i.test(text)) return { kind: "idle" };
-  if (/stopped$/i.test(text)) return { kind: "stopped" };
-  if (/failed$/i.test(text)) return { kind: "failed" };
-  if (/consolidating|synth/i.test(text)) return { kind: "synthesizing" };
-  if (/running$/i.test(text)) return { kind: "running", intent: "working", agent: text.replace(/^chalin:\s*/i, "").replace(/\s*running$/i, ""), completed: 0, total: 1 };
-  return { kind: "idle" };
-}
-
-function startFooterAnimation(): void {
-  if (footerTimer) return;
-  footerTimer = setInterval(() => {
-    footerFrame += 1;
-    renderChalinFooterStatus();
-  }, FOOTER_ANIMATION_MS);
-  footerTimer.unref?.();
-}
-
-function stopFooterAnimation(render = true): void {
-  if (footerTimer) {
-    clearInterval(footerTimer);
-    footerTimer = undefined;
-  }
-  footerFrame = 0;
-  if (render) renderChalinFooterStatus();
-}
-
-function renderChalinFooterStatus(): void {
-  footerTarget?.ui.setStatus("pi-chalin", chalinFooterText(footerState, footerFrame));
-}
 
 function routeShortName(kind: RouteDecision["kind"]): string {
   return kind.replace(/^multi-agent-/, "");
@@ -286,317 +202,6 @@ function formatArtifactSkills(feature: FeatureArtifactState): string {
   return feature.workerSkills.map((skill) => `◆ ${skill.name} · ${skill.summary}\n  ${skill.path}`).join("\n");
 }
 
-export async function openAgentManager(
-  ctx: ExtensionContext,
-  agents: AgentDefinition[],
-  sessionModelOverrides: Map<string, string>,
-  sessionThinkingOverrides: Map<string, AgentThinkingLevel>,
-  persistedModelOverrides: Record<string, string> = {},
-  persistedThinkingOverrides: Record<string, AgentThinkingLevel> = {},
-): Promise<void> {
-  const format = (agent: AgentDefinition) => {
-    const key = `${agent.scope}/${agent.name}`;
-    const model = effectiveAgentModel(agent, sessionModelOverrides, persistedModelOverrides);
-    const thinking = effectiveAgentThinking(agent, sessionThinkingOverrides, persistedThinkingOverrides);
-    return `${key} · ${agent.concern} · ${model} · thinking ${thinking}`;
-  };
-
-  if (!ctx.hasUI) {
-    ctx.ui.notify(agents.map(format).join("\n") || "No agents found", "info");
-    return;
-  }
-
-  const selected = await ctx.ui.select("pi-chalin Agents", agents.map(format));
-  if (!selected) return;
-  const agent = agents.find((candidate) => selected.startsWith(`${candidate.scope}/${candidate.name} ·`));
-  if (!agent) return;
-
-  const action = await ctx.ui.select(`${agent.scope}/${agent.name}`, ["Inspect", "Change model", "Change thinking", "Reset model", "Reset thinking", "Close"]);
-  if (action === "Change model") return openAgentModelPicker(ctx, agent, sessionModelOverrides, persistedModelOverrides);
-  if (action === "Change thinking") return openAgentThinkingPicker(ctx, agent, sessionThinkingOverrides);
-  if (action === "Reset model") {
-    const key = `${agent.scope}/${agent.name}`;
-    sessionModelOverrides.delete(key);
-    setAgentModelOverride({ cwd: ctx.cwd }, key, undefined, defaultPersistenceTarget(agent.scope) === "user" ? "user" : "project");
-    ctx.ui.notify(`${key} reset to inherit.`, "info");
-    return;
-  }
-  if (action === "Reset thinking") {
-    const key = `${agent.scope}/${agent.name}`;
-    sessionThinkingOverrides.delete(key);
-    setAgentThinkingOverride({ cwd: ctx.cwd }, key, undefined, defaultPersistenceTarget(agent.scope) === "user" ? "user" : "project");
-    ctx.ui.notify(`${key} thinking reset to inherit.`, "info");
-    return;
-  }
-  if (action === "Inspect") {
-    ctx.ui.notify(
-      [
-        `${agent.scope}/${agent.name}`,
-        agent.description,
-        `concern: ${agent.concern}`,
-        `model: ${effectiveAgentModel(agent, sessionModelOverrides, persistedModelOverrides)}`,
-        `thinking: ${effectiveAgentThinking(agent, sessionThinkingOverrides, persistedThinkingOverrides)}`,
-        `tools: ${agent.tools.join(", ") || "none"}`,
-        `memory: read=${agent.memory.read}, write=${agent.memory.write}`,
-        agent.sourcePath ? `source: ${agent.sourcePath}` : undefined,
-        "keys: ↑/↓ select · enter open · esc close",
-      ].filter((line): line is string => Boolean(line)).join("\n"),
-      agent.diagnostics.length > 0 ? "warning" : "info",
-    );
-  }
-}
-
-export async function openAgentThinkingPicker(
-  ctx: ExtensionContext,
-  agent: AgentDefinition,
-  sessionThinkingOverrides: Map<string, AgentThinkingLevel>,
-): Promise<void> {
-  const key = `${agent.scope}/${agent.name}`;
-  const options: AgentThinkingLevel[] = ["inherit", "off", "minimal", "low", "medium", "high", "xhigh"];
-  const selected = ctx.hasUI ? await ctx.ui.select(`Thinking for ${key}`, options) as AgentThinkingLevel | undefined : undefined;
-  if (!selected) return;
-
-  const target = await choosePersistenceTarget(ctx, agent.scope);
-  if (!target) return;
-  if (target === "session") {
-    if (selected === "inherit") sessionThinkingOverrides.delete(key);
-    else sessionThinkingOverrides.set(key, selected);
-  } else {
-    setAgentThinkingOverride({ cwd: ctx.cwd }, key, selected, target);
-  }
-  ctx.ui.notify(`${key} thinking set to ${selected} (${target}).`, "info");
-}
-
-export async function openAgentModelPicker(
-  ctx: ExtensionContext,
-  agent: AgentDefinition,
-  sessionModelOverrides: Map<string, string>,
-  persistedModelOverrides: Record<string, string> = {},
-): Promise<void> {
-  const key = `${agent.scope}/${agent.name}`;
-  const available = loadAvailableAgentModels(ctx);
-  const current = effectiveAgentModel(agent, sessionModelOverrides, persistedModelOverrides);
-  const options = buildAgentModelOptions(available, current);
-  const selected = ctx.hasUI ? await openAgentModelSearchPicker(ctx, `Model for ${key}`, options, current) : undefined;
-  if (!selected) return;
-  if (!options.some((option) => option.value === selected)) {
-    ctx.ui.notify(`Model '${selected}' is not available.`, "error");
-    return;
-  }
-
-  const target = await choosePersistenceTarget(ctx, agent.scope);
-  if (!target) return;
-  if (target === "session") {
-    if (selected === "inherit") sessionModelOverrides.delete(key);
-    else sessionModelOverrides.set(key, selected);
-  } else {
-    setAgentModelOverride({ cwd: ctx.cwd }, key, selected === "inherit" ? undefined : selected, target);
-  }
-  ctx.ui.notify(`${key} model set to ${selected} (${target}).`, "info");
-}
-
-function effectiveAgentModel(
-  agent: AgentDefinition,
-  sessionModelOverrides: Map<string, string>,
-  persistedModelOverrides: Record<string, string>,
-): string {
-  const key = `${agent.scope}/${agent.name}`;
-  return sessionModelOverrides.get(key)
-    ?? persistedModelOverrides[key]
-    ?? persistedModelOverrides[agent.name]
-    ?? agent.model;
-}
-
-function effectiveAgentThinking(
-  agent: AgentDefinition,
-  sessionThinkingOverrides: Map<string, AgentThinkingLevel>,
-  persistedThinkingOverrides: Record<string, AgentThinkingLevel>,
-): AgentThinkingLevel {
-  const key = `${agent.scope}/${agent.name}`;
-  return sessionThinkingOverrides.get(key)
-    ?? persistedThinkingOverrides[key]
-    ?? persistedThinkingOverrides[agent.name]
-    ?? agent.thinking
-    ?? "inherit";
-}
-
-function loadAvailableAgentModels(ctx: ExtensionContext): AvailableModel[] {
-  ctx.modelRegistry.refresh();
-  const loadError = ctx.modelRegistry.getError?.();
-  if (ctx.hasUI && loadError) ctx.ui.notify(`Warning: errors loading models.json:\n${loadError}`, "warning");
-  return ctx.modelRegistry.getAvailable();
-}
-
-function buildAgentModelOptions(models: AvailableModel[], current: string | undefined): AgentModelOption[] {
-  const normalizedCurrent = current && current !== "inherit" ? current : undefined;
-  const sortedModels = [...models].sort((a, b) => {
-    const aValue = `${a.provider}/${a.id}`;
-    const bValue = `${b.provider}/${b.id}`;
-    if (normalizedCurrent) {
-      if (aValue === normalizedCurrent && bValue !== normalizedCurrent) return -1;
-      if (bValue === normalizedCurrent && aValue !== normalizedCurrent) return 1;
-    }
-    const provider = a.provider.localeCompare(b.provider);
-    return provider || a.id.localeCompare(b.id);
-  });
-
-  return [
-    { value: "inherit", searchText: "inherit default parent agent model" },
-    ...sortedModels.map((model) => ({
-      value: `${model.provider}/${model.id}`,
-      provider: model.provider,
-      id: model.id,
-      name: model.name,
-      searchText: `${model.provider} ${model.id} ${model.provider}/${model.id} ${model.name ?? ""}`,
-    })),
-  ];
-}
-
-async function openAgentModelSearchPicker(
-  ctx: ExtensionContext,
-  title: string,
-  options: AgentModelOption[],
-  current: string | undefined,
-): Promise<string | undefined> {
-  if (options.length <= 1) {
-    ctx.ui.notify("No authenticated models are available. Use /login or configure ~/.pi/agent/models.json.", "warning");
-    return undefined;
-  }
-
-  return ctx.ui.custom<string | undefined>((tui, theme, _keybindings, done) => new AgentModelPickerComponent(tui, theme, title, options, current, done));
-}
-
-class AgentModelPickerComponent extends Container implements Focusable {
-  private searchInput = new Input();
-  private listContainer = new Container();
-  private filteredOptions: AgentModelOption[];
-  private selectedIndex = 0;
-  private _focused = false;
-
-  get focused(): boolean {
-    return this._focused;
-  }
-
-  set focused(value: boolean) {
-    this._focused = value;
-    this.searchInput.focused = value;
-  }
-
-  constructor(
-    private tui: TUI,
-    private theme: Theme,
-    title: string,
-    private options: AgentModelOption[],
-    private current: string | undefined,
-    private done: (selected: string | undefined) => void,
-  ) {
-    super();
-    this.filteredOptions = options;
-    this.selectedIndex = Math.max(0, options.findIndex((option) => option.value === (current ?? "inherit")));
-
-    this.addChild(new DynamicBorder((text) => this.theme.fg("borderAccent", text)));
-    this.addChild(new Spacer(1));
-    this.addChild(new Text(this.theme.fg("accent", this.theme.bold(title)), 1, 0));
-    this.addChild(new Spacer(1));
-    this.addChild(this.searchInput);
-    this.addChild(new Spacer(1));
-    this.addChild(this.listContainer);
-    this.addChild(new Spacer(1));
-    this.addChild(
-      new Text(
-        this.keyHint("↑/↓", "navigate")
-          + "  "
-          + this.keyHint("enter", "select")
-          + "  "
-          + this.keyHint("escape/ctrl+c", "cancel"),
-        1,
-        0,
-      ),
-    );
-    this.addChild(new Spacer(1));
-    this.addChild(new DynamicBorder((text) => this.theme.fg("borderAccent", text)));
-
-    this.updateList();
-  }
-
-  handleInput(keyData: string): void {
-    const kb = getKeybindings();
-    if (kb.matches(keyData, "tui.select.up")) {
-      if (this.filteredOptions.length > 0) {
-        this.selectedIndex = this.selectedIndex === 0 ? this.filteredOptions.length - 1 : this.selectedIndex - 1;
-        this.updateList();
-      }
-    } else if (kb.matches(keyData, "tui.select.down")) {
-      if (this.filteredOptions.length > 0) {
-        this.selectedIndex = this.selectedIndex === this.filteredOptions.length - 1 ? 0 : this.selectedIndex + 1;
-        this.updateList();
-      }
-    } else if (kb.matches(keyData, "tui.select.pageUp")) {
-      this.selectedIndex = Math.max(0, this.selectedIndex - MODEL_PICKER_VISIBLE_ROWS);
-      this.updateList();
-    } else if (kb.matches(keyData, "tui.select.pageDown")) {
-      this.selectedIndex = Math.min(Math.max(0, this.filteredOptions.length - 1), this.selectedIndex + MODEL_PICKER_VISIBLE_ROWS);
-      this.updateList();
-    } else if (kb.matches(keyData, "tui.select.confirm")) {
-      this.done(this.filteredOptions[this.selectedIndex]?.value);
-      return;
-    } else if (kb.matches(keyData, "tui.select.cancel")) {
-      this.done(undefined);
-      return;
-    } else {
-      this.searchInput.handleInput(keyData);
-      this.filterOptions(this.searchInput.getValue());
-      this.updateList();
-    }
-    this.tui.requestRender();
-  }
-
-  private filterOptions(query: string): void {
-    this.filteredOptions = query
-      ? fuzzyFilter(this.options, query, (option) => option.searchText)
-      : this.options;
-    this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.filteredOptions.length - 1));
-  }
-
-  private updateList(): void {
-    this.listContainer.clear();
-    if (this.filteredOptions.length === 0) {
-      this.listContainer.addChild(new Text(this.theme.fg("muted", "  No matching models"), 1, 0));
-      return;
-    }
-
-    const startIndex = Math.max(
-      0,
-      Math.min(this.selectedIndex - Math.floor(MODEL_PICKER_VISIBLE_ROWS / 2), this.filteredOptions.length - MODEL_PICKER_VISIBLE_ROWS),
-    );
-    const endIndex = Math.min(startIndex + MODEL_PICKER_VISIBLE_ROWS, this.filteredOptions.length);
-
-    for (let index = startIndex; index < endIndex; index += 1) {
-      const option = this.filteredOptions[index];
-      if (!option) continue;
-      const isSelected = index === this.selectedIndex;
-      const prefix = isSelected ? this.theme.fg("accent", "→ ") : "  ";
-      const text = formatAgentModelOption(option);
-      const currentMarker = option.value === (this.current ?? "inherit") ? this.theme.fg("success", " ✓") : "";
-      this.listContainer.addChild(new Text(prefix + (isSelected ? this.theme.fg("accent", text) : this.theme.fg("text", text)) + currentMarker, 1, 0));
-    }
-
-    if (startIndex > 0 || endIndex < this.filteredOptions.length) {
-      this.listContainer.addChild(new Text(this.theme.fg("muted", `  (${this.selectedIndex + 1}/${this.filteredOptions.length})`), 1, 0));
-    }
-  }
-
-  private keyHint(key: string, description: string): string {
-    return this.theme.fg("dim", key) + this.theme.fg("muted", ` ${description}`);
-  }
-}
-
-function formatAgentModelOption(option: AgentModelOption): string {
-  if (option.value === "inherit") return "inherit";
-  const name = option.name && option.name !== option.id ? ` · ${option.name}` : "";
-  return `${option.provider}/${option.id}${name}`;
-}
-
 export async function openActivityMonitor(ctx: ExtensionContext, run: RunState | undefined): Promise<void> {
   clearLegacyChalinControlWidget(ctx);
   if (!run) {
@@ -618,6 +223,10 @@ export async function openActivityMonitor(ctx: ExtensionContext, run: RunState |
 
   if (run.status === "running") {
     const selected = await ctx.ui.select("pi-chalin Control", ["Live status", "Current agent", "Guards", "Close"]);
+    if (selected === "Live status") {
+      await openLiveStatusOverlay(ctx, run);
+      return;
+    }
     if (selected === "Current agent") {
       const current = run.steps.find((step) => step.status === "running") ?? run.steps.find((step) => step.status === "pending");
       if (current) ctx.ui.notify(formatActivityStep(current), current.status === "failed" ? "error" : "info");
@@ -699,7 +308,9 @@ function formatMemoryDetail(record: MemoryRecord): string {
     `trigger: ${record.trigger}`,
     record.topicKey ? `topic: ${record.topicKey}` : undefined,
     record.evidence ? `evidence: ${record.evidence}` : undefined,
-    `seen: ${record.duplicateCount} · revisions: ${record.revisionCount}`,
+    `seen: ${record.duplicateCount} · used: ${record.useCount ?? 0} · revisions: ${record.revisionCount}`,
+    record.lastUsedAt ? `last used: ${record.lastUsedAt}` : undefined,
+    record.utilityScore !== undefined ? `utility: ${Math.round(record.utilityScore * 100)}%` : undefined,
   ].filter((line): line is string => line !== undefined).join("\n");
 }
 
@@ -717,11 +328,18 @@ function stripMemoryPrefix(content: string): string {
 function memoryStatusIcon(status: MemoryRecord["status"]): string {
   if (status === "active") return "✓";
   if (status === "rejected") return "×";
+  if (status === "quarantined") return "!";
+  if (status === "stale" || status === "superseded") return "-";
   return "○";
 }
 
 function memoryStatusRank(status: MemoryRecord["status"]): number {
-  return status === "pending" ? 0 : status === "active" ? 1 : 2;
+  if (status === "pending") return 0;
+  if (status === "quarantined") return 1;
+  if (status === "active") return 2;
+  if (status === "stale") return 3;
+  if (status === "superseded") return 4;
+  return 5;
 }
 
 function summarizeActivity(state: ChalinRuntimeState): string {
@@ -771,6 +389,429 @@ export function summarizeRuntimeGuards(run: RunState | undefined): string[] {
     `worktrees: ${worktreeState}`,
     `model fallback: ${modelFallbacks}`,
   ];
+}
+
+async function openLiveStatusOverlay(ctx: ExtensionContext, run: RunState): Promise<void> {
+  if (typeof ctx.ui.custom !== "function") {
+    ctx.ui.notify(formatActivity(run).join("\n"), "info");
+    return;
+  }
+  await ctx.ui.custom<void>(
+    (tui, theme, _keybindings, done) => new ChalinLiveStatusOverlay(tui, theme, () => getLatestRun() ?? run, ctx.cwd, () => done(undefined)),
+    {
+      overlay: true,
+      overlayOptions: {
+        anchor: "center",
+        width: "94%",
+        maxHeight: "88%",
+        margin: 1,
+      },
+    },
+  );
+}
+
+type LiveStatusTab = {
+  id: string;
+  title: string;
+  step: RunStepState;
+};
+
+class ChalinLiveStatusOverlay implements Component, Focusable {
+  focused = false;
+  private selectedId: string | undefined;
+  private scroll = 0;
+  private followTail = true;
+  private toolsExpanded = false;
+  private timer: ReturnType<typeof setInterval>;
+
+  constructor(
+    private readonly tui: TUI,
+    private readonly theme: Theme,
+    private readonly runProvider: () => RunState,
+    private readonly cwd: string,
+    private readonly done: () => void,
+  ) {
+    this.timer = setInterval(() => this.tui.requestRender(), 650);
+    this.timer.unref?.();
+  }
+
+  handleInput(data: string): void {
+    if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+      this.done();
+      return;
+    }
+    if (matchesKey(data, "tab") || matchesKey(data, "right")) {
+      this.moveTab(1);
+      return;
+    }
+    if (matchesKey(data, "left")) {
+      this.moveTab(-1);
+      return;
+    }
+    if (matchesKey(data, "up")) {
+      this.followTail = false;
+      this.scroll = Math.max(0, this.scroll - 1);
+      this.tui.requestRender();
+      return;
+    }
+    if (matchesKey(data, "down")) {
+      this.followTail = false;
+      this.scroll += 1;
+      this.tui.requestRender();
+      return;
+    }
+    if (matchesKey(data, "pageUp")) {
+      this.followTail = false;
+      this.scroll = Math.max(0, this.scroll - 8);
+      this.tui.requestRender();
+      return;
+    }
+    if (matchesKey(data, "pageDown")) {
+      this.followTail = false;
+      this.scroll += 8;
+      this.tui.requestRender();
+      return;
+    }
+    if (matchesKey(data, "home")) {
+      this.followTail = false;
+      this.scroll = 0;
+      this.tui.requestRender();
+      return;
+    }
+    if (matchesKey(data, "end")) {
+      this.followTail = true;
+      this.tui.requestRender();
+      return;
+    }
+    if (matchesKey(data, "ctrl+o")) {
+      this.toolsExpanded = !this.toolsExpanded;
+      this.tui.requestRender();
+      return;
+    }
+  }
+
+  render(width: number): string[] {
+    const run = this.runProvider();
+    const tabs = liveStatusTabs(run);
+    this.ensureSelectedTab(tabs);
+    const selected = tabs.find((tab) => tab.id === this.selectedId) ?? tabs[0];
+    const overlayWidth = Math.max(1, width);
+    const innerWidth = Math.max(1, overlayWidth - 2);
+    const bodyHeight = 24;
+    const body = selected ? liveStatusBody(run, selected.step, this.tui, this.theme, this.cwd, Math.max(1, innerWidth - 2), this.toolsExpanded) : [this.theme.fg("dim", "No active subagent step.")];
+    const maxScroll = Math.max(0, body.length - bodyHeight);
+    if (this.followTail) this.scroll = maxScroll;
+    this.scroll = Math.min(this.scroll, maxScroll);
+    if (this.scroll >= maxScroll) this.followTail = true;
+    const visibleBody = body.slice(this.scroll, this.scroll + bodyHeight);
+    const border = (text: string) => this.theme.fg("border", text);
+    const row = (content = "") => `${border("│")}${padAnsi(content, innerWidth)}${border("│")}`;
+    const scrollInfo = maxScroll > 0 ? ` · ${this.scroll + 1}-${Math.min(body.length, this.scroll + bodyHeight)}/${body.length}` : "";
+    const lines = [
+      border(`╭${"─".repeat(innerWidth)}╮`),
+      row(` ${this.theme.fg("accent", this.theme.bold("pi-chalin Live Status"))} ${this.theme.fg("dim", `run ${run.id} · ${displayActivityStatus(run.status)}${scrollInfo}`)}`),
+      row(renderLiveTabs(tabs, this.selectedId, this.theme, innerWidth - 1)),
+      row(this.theme.fg("dim", " TAB/right next tab · ctrl+o tools · up/down scroll · end live tail · esc close")),
+      row(""),
+      ...visibleBody.map((line) => row(line)),
+      row(""),
+      border(`╰${"─".repeat(innerWidth)}╯`),
+    ];
+    return clampRenderedLines(lines, overlayWidth);
+  }
+
+  invalidate(): void {}
+
+  dispose(): void {
+    clearInterval(this.timer);
+  }
+
+  private ensureSelectedTab(tabs: LiveStatusTab[]): void {
+    if (tabs.length === 0) {
+      this.selectedId = undefined;
+      return;
+    }
+    if (this.selectedId && tabs.some((tab) => tab.id === this.selectedId)) return;
+    this.selectedId = tabs.find((tab) => tab.step.status === "running")?.id
+      ?? tabs.find((tab) => tab.step.status === "pending")?.id
+      ?? tabs.at(-1)?.id;
+    this.scroll = 0;
+    this.followTail = true;
+  }
+
+  private moveTab(delta: number): void {
+    const tabs = liveStatusTabs(this.runProvider());
+    if (tabs.length === 0) return;
+    this.ensureSelectedTab(tabs);
+    const current = Math.max(0, tabs.findIndex((tab) => tab.id === this.selectedId));
+    const next = (current + delta + tabs.length) % tabs.length;
+    this.selectedId = tabs[next]?.id;
+    this.scroll = 0;
+    this.followTail = true;
+    this.tui.requestRender();
+  }
+}
+
+function liveStatusTabs(run: RunState): LiveStatusTab[] {
+  return run.steps.map((step, index) => ({
+    id: step.id || `${step.agent}-${index}`,
+    title: `${statusIcon(step.status)} ${step.agent}`,
+    step,
+  }));
+}
+
+function renderLiveTabs(tabs: LiveStatusTab[], selectedId: string | undefined, theme: Theme, width: number): string {
+  if (tabs.length === 0) return theme.fg("dim", " no subagent tabs ");
+  const parts: string[] = [];
+  for (const tab of tabs) {
+    const active = tab.id === selectedId;
+    const label = ` ${tab.title} `;
+    parts.push(active ? theme.bg("selectedBg", theme.fg("text", label)) : theme.fg("dim", label));
+  }
+  return truncateToWidth(parts.join(" "), width, "…", true);
+}
+
+function liveStatusBody(run: RunState, step: RunStepState, tui: TUI, theme: Theme, cwd: string, width: number, toolsExpanded = false): string[] {
+  const liveSession = getLiveStepSession(run.id, step.id);
+  const messages = liveSession?.getMessages() ?? [];
+  const lines: string[] = [
+    theme.fg("dim", `route: ${run.route.kind} · progress: ${run.steps.filter((item) => isUsableActivityStatus(item.status)).length}/${run.steps.length} · elapsed: ${formatElapsed(run.startedAt, run.endedAt)}`),
+    theme.fg("dim", `step: ${step.id} · ${step.agent} · ${step.status} · ${formatStepDuration(step)}${step.currentTool ? ` · tool: ${step.currentTool}` : ""}`),
+    liveSession ? theme.fg("dim", `live session: in-memory · since ${formatElapsed(liveSession.startedAt, undefined)}`) : theme.fg("dim", "live session: not attached; showing persisted step summary"),
+    "",
+  ];
+  lines.push(...(messages.length > 0
+    ? renderPiLikeMessages([...messages], tui, cwd, theme, width, toolsExpanded)
+    : renderFallbackStepSummary(step, tui, cwd, theme, width, toolsExpanded)));
+  if (step.modelResolution || step.metrics || step.error) lines.push(...renderStepDiagnostics(step, theme, width));
+  return clampRenderedLines(lines.length > 4 ? lines : [...lines, theme.fg("dim", "No subagent history available yet.")], width);
+}
+
+function renderPiLikeMessages(messages: unknown[], tui: TUI, cwd: string, theme: Theme, width: number, toolsExpanded = false): string[] {
+  try {
+    return renderPiLikeMessagesWithComponents(messages, tui, cwd, width, toolsExpanded);
+  } catch {
+    return renderPlainSessionMessages(messages, theme, width, toolsExpanded);
+  }
+}
+
+function renderPiLikeMessagesWithComponents(messages: unknown[], tui: TUI, cwd: string, width: number, toolsExpanded: boolean): string[] {
+  const container = new Container();
+  const pendingTools = new Map<string, ToolExecutionComponent>();
+  const markdownTheme = getMarkdownTheme();
+  const toolOptions = { showImages: false, imageWidthCells: Math.max(20, Math.min(80, width - 4)) };
+
+  for (const message of messages) {
+    if (!isRecord(message)) continue;
+    if (message.role === "user") {
+      const text = messageTextContent(message.content);
+      if (!text) continue;
+      if (container.children.length > 0) container.addChild(new Spacer(1));
+      container.addChild(new UserMessageComponent(text, markdownTheme));
+      continue;
+    }
+
+    if (message.role === "assistant") {
+      container.addChild(new AssistantMessageComponent(message as never, false, markdownTheme));
+      for (const call of assistantToolCalls(message)) {
+        const component = new ToolExecutionComponent(call.name, call.id, call.arguments, toolOptions, undefined, tui, cwd);
+        component.setExpanded(toolsExpanded);
+        container.addChild(component);
+        if (message.stopReason === "aborted" || message.stopReason === "error") {
+          component.updateResult({ content: [{ type: "text", text: String(message.errorMessage ?? "Operation failed") }], isError: true });
+        } else {
+          pendingTools.set(call.id, component);
+        }
+      }
+      continue;
+    }
+
+    if (message.role === "toolResult") {
+      const toolCallId = typeof message.toolCallId === "string" ? message.toolCallId : "";
+      const component = pendingTools.get(toolCallId) ?? orphanToolComponent(message, tui, cwd, toolOptions, toolsExpanded);
+      component.updateResult({
+        content: toolResultContent(message.content),
+        details: message.details,
+        isError: Boolean(message.isError),
+      });
+      if (!pendingTools.has(toolCallId)) container.addChild(component);
+      pendingTools.delete(toolCallId);
+      continue;
+    }
+
+    const text = messageTextContent(message.content ?? message.text ?? message.display);
+    if (text) {
+      container.addChild(new Spacer(1));
+      container.addChild(new Text(text, 1, 0));
+    }
+  }
+
+  const rendered = container.render(Math.max(12, width));
+  return rendered.length > 0 ? clampRenderedLines(rendered, width) : [""];
+}
+
+function renderFallbackStepSummary(step: RunStepState, tui: TUI, cwd: string, theme: Theme, width: number, toolsExpanded: boolean): string[] {
+  return renderPiLikeMessages(fallbackStepMessages(step), tui, cwd, theme, width, toolsExpanded).concat(
+    step.output?.handoff ? renderInfoBlock("Handoff", step.output.handoff, theme, width) : [],
+    step.output?.memoryCandidates.length ? renderInfoBlock("Memory candidates", step.output.memoryCandidates.map((candidate) => `- ${candidate.category}: ${candidate.content}`).join("\n"), theme, width) : [],
+    step.output?.warnings.length ? renderInfoBlock("Warnings", step.output.warnings.join("\n"), theme, width) : [],
+  );
+}
+
+function renderPlainSessionMessages(messages: unknown[], theme: Theme, width: number, toolsExpanded: boolean): string[] {
+  const lines: string[] = [];
+  for (const message of messages) {
+    if (!isRecord(message)) continue;
+    if (message.role === "assistant") {
+      const textParts = Array.isArray(message.content)
+        ? message.content.flatMap((part) => isRecord(part) && part.type === "text" && typeof part.text === "string" ? [part.text] : [])
+        : [];
+      if (textParts.length) lines.push(...renderInfoBlock("Assistant", textParts.join("\n\n"), theme, width));
+      for (const call of assistantToolCalls(message)) lines.push(...renderInfoBlock(`$ ${call.name}`, JSON.stringify(call.arguments, null, 2), theme, width));
+      continue;
+    }
+    if (message.role === "toolResult") {
+      const toolName = typeof message.toolName === "string" ? message.toolName : "toolResult";
+      const text = toolResultContent(message.content).map((part) => part.text ?? "").filter(Boolean).join("\n");
+      lines.push(...renderInfoBlock(toolName, formatPlainToolResult(text || "(empty)", theme, toolsExpanded), theme, width));
+      continue;
+    }
+    const text = messageTextContent(message.content ?? message.text);
+    if (text) lines.push(...renderInfoBlock(message.role === "user" ? "Task" : String(message.role ?? "message"), text, theme, width));
+  }
+  return lines.length ? clampRenderedLines(lines, width) : [theme.fg("dim", "No renderable messages in live session.")];
+}
+
+function formatPlainToolResult(text: string, theme: Theme, expanded: boolean): string {
+  if (expanded) return text;
+  const lines = text.split("\n");
+  const visible = lines.slice(0, 10).join("\n");
+  const remaining = lines.length - 10;
+  return remaining > 0
+    ? `${visible}\n${theme.fg("dim", `... (${remaining} more lines, ctrl+o to expand)`)}`
+    : visible;
+}
+
+function fallbackStepMessages(step: RunStepState): unknown[] {
+  const messages: unknown[] = [{ role: "user", content: step.task, timestamp: Date.now() }];
+  const text = step.output?.raw || step.output?.text || (step.status === "running" ? "Working... waiting for the child session to publish messages." : "");
+  if (text) {
+    messages.push({
+      role: "assistant",
+      content: [{ type: "text", text }],
+      api: "openai-responses",
+      provider: "openai",
+      model: step.model ?? "unknown",
+      usage: emptyUsage(),
+      stopReason: step.error ? "error" : "stop",
+      errorMessage: step.error,
+      timestamp: Date.now(),
+    });
+  }
+  return messages;
+}
+
+function renderInfoBlock(title: string, text: string, theme: Theme, width: number): string[] {
+  const container = new Container();
+  container.addChild(new Spacer(1));
+  container.addChild(new Text(theme.fg("customMessageLabel", theme.bold(title)), 1, 0));
+  container.addChild(new Text(text, 1, 0));
+  return clampRenderedLines(container.render(width), width);
+}
+
+function renderStepDiagnostics(step: RunStepState, theme: Theme, width: number): string[] {
+  const diagnostics = formatStepDiagnostics(step);
+  return diagnostics ? renderInfoBlock("Step diagnostics", theme.fg("dim", diagnostics), theme, width) : [];
+}
+
+function assistantToolCalls(message: Record<string, unknown>): Array<{ id: string; name: string; arguments: Record<string, unknown> }> {
+  if (!Array.isArray(message.content)) return [];
+  return message.content.flatMap((part, index) => {
+    if (!isRecord(part) || part.type !== "toolCall") return [];
+    const id = typeof part.id === "string" ? part.id : `tool-${index + 1}`;
+    const name = typeof part.name === "string" ? part.name : "tool";
+    const args = isRecord(part.arguments) ? part.arguments : isRecord(part.input) ? part.input : {};
+    return [{ id, name, arguments: args }];
+  });
+}
+
+function orphanToolComponent(
+  message: Record<string, unknown>,
+  tui: TUI,
+  cwd: string,
+  toolOptions: { showImages: boolean; imageWidthCells: number },
+  toolsExpanded: boolean,
+): ToolExecutionComponent {
+  const name = typeof message.toolName === "string" ? message.toolName : "tool";
+  const id = typeof message.toolCallId === "string" ? message.toolCallId : `orphan-${Date.now()}`;
+  const component = new ToolExecutionComponent(name, id, {}, toolOptions, undefined, tui, cwd);
+  component.setExpanded(toolsExpanded);
+  return component;
+}
+
+function messageTextContent(content: unknown): string {
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => {
+      if (!isRecord(part)) return "";
+      if (typeof part.text === "string") return part.text;
+      if (typeof part.content === "string") return part.content;
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+}
+
+function toolResultContent(content: unknown): Array<{ type: string; text?: string; data?: string; mimeType?: string }> {
+  if (Array.isArray(content)) {
+    return content
+      .filter(isRecord)
+      .map((part) => ({
+        type: typeof part.type === "string" ? part.type : "text",
+        text: typeof part.text === "string" ? part.text : typeof part.content === "string" ? part.content : undefined,
+        data: typeof part.data === "string" ? part.data : undefined,
+        mimeType: typeof part.mimeType === "string" ? part.mimeType : undefined,
+      }));
+  }
+  const text = typeof content === "string" ? content : content === undefined ? "" : JSON.stringify(content, null, 2);
+  return text ? [{ type: "text", text }] : [];
+}
+
+function emptyUsage() {
+  return {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+}
+
+function formatStepDiagnostics(step: RunStepState): string {
+  return [
+    step.modelResolution ? `model: ${step.modelResolution.selected}\nthinking: ${step.thinkingLevel ?? "inherit"}\n${step.modelResolution.attempts.map((attempt) => `- ${attempt.source}: ${attempt.ref ?? "inherit"} -> ${attempt.status}${attempt.reason ? ` (${attempt.reason})` : ""}`).join("\n")}` : undefined,
+    step.metrics ? `tools: ${step.metrics.toolCalls}/${step.maxToolCalls ?? "?"}\npolicy violations: ${step.metrics.policyViolations?.length ?? 0}\nbudget stops: ${step.metrics.budgetStopCount ?? 0}\nfiles read: ${step.metrics.filesRead?.join(", ") ?? "none"}` : undefined,
+    step.error ? `error: ${step.error}` : undefined,
+  ].filter(Boolean).join("\n\n");
+}
+
+function padAnsi(text: string, width: number): string {
+  const singleLine = text.replace(/\r/g, "").replace(/\n/g, " ").replace(/\t/g, "   ");
+  const truncated = truncateToWidth(singleLine, width, "…", false);
+  const visible = visibleWidth(truncated);
+  const repaired = visible <= width ? truncated : truncateToWidth(truncated, width, "", false);
+  return `${repaired}${" ".repeat(Math.max(0, width - visibleWidth(repaired)))}`;
+}
+
+function clampRenderedLines(lines: string[], width: number): string[] {
+  return lines.map((line) => padAnsi(line, width));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function summarizeGuardHealth(run: RunState | undefined): string {
@@ -831,15 +872,4 @@ function formatActivityStep(step: RunState["steps"][number] | undefined): string
     step.metrics ? `tools: ${step.metrics.toolCalls}/${step.maxToolCalls ?? "?"} · policy violations: ${step.metrics.policyViolations?.length ?? 0} · budget stops: ${step.metrics.budgetStopCount ?? 0}` : undefined,
     step.error ? `error: ${step.error}` : undefined,
   ].filter(Boolean).join("\n");
-}
-
-async function choosePersistenceTarget(ctx: ExtensionContext, scope: AgentDefinition["scope"]): Promise<ModelPersistenceTarget | undefined> {
-  const preferred = defaultPersistenceTarget(scope);
-  const options: ModelPersistenceTarget[] = [preferred, ...(["session", "project", "user"] as const).filter((item) => item !== preferred)];
-  const selected = ctx.hasUI ? await ctx.ui.select("Persist model selection", options) : preferred;
-  return selected as ModelPersistenceTarget | undefined;
-}
-
-function defaultPersistenceTarget(scope: AgentDefinition["scope"]): Exclude<ModelPersistenceTarget, "session"> {
-  return scope === "project" ? "project" : "user";
 }

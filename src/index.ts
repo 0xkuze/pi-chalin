@@ -1,8 +1,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerChalinAutoRouter } from "./autoroute.ts";
+import { hideLegacyTopLevelChildSessions } from "./child-sessions.ts";
 import { registerChalinCommands } from "./commands.ts";
 import { registerChalinTools } from "./tools.ts";
-import { setChalinStatus } from "./ui.ts";
+import { setChalinStatus } from "./ui-status.ts";
 
 const PI_CHALIN_CHILD_ENV = "PI_CHALIN_CHILD";
 const PI_CHALIN_DISABLED_ENV = "PI_CHALIN_DISABLED";
@@ -15,6 +16,14 @@ export default function registerPiChalin(pi: ExtensionAPI): void {
   registerChalinAutoRouter(pi);
 
   pi.on("session_start", (_event, ctx) => {
+    void hideLegacyTopLevelChildSessions(ctx).then((result) => {
+      if (ctx.hasUI && result.moved.length > 0) {
+        ctx.ui.notify(`pi-chalin hid ${result.moved.length} legacy child session(s) from Pi resume.`, "info");
+      }
+    }).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`pi-chalin legacy child session cleanup failed: ${message}`);
+    });
     if (!ctx.hasUI) return;
     setChalinStatus(ctx, { kind: "idle" });
   });
