@@ -124,14 +124,46 @@ export interface MemoryCandidate {
   topicKey?: string;
 }
 
+export type MemoryRecordStatus = "active" | "pending" | "rejected" | "superseded" | "stale" | "quarantined";
+
 export interface MemoryRecord extends MemoryCandidate {
-  status: "active" | "pending" | "rejected";
+  status: MemoryRecordStatus;
   reviewedAt?: string;
   importance: number;
   trigger: string;
   lastSeenAt: string;
   duplicateCount: number;
   revisionCount: number;
+  updatedAt?: string;
+  lastUsedAt?: string;
+  useCount?: number;
+  utilityScore?: number;
+  tokenCostEstimate?: number;
+  supersedesId?: string;
+  supersededBy?: string;
+}
+
+export type MemoryAuditEventType =
+  | "create"
+  | "duplicate"
+  | "revise"
+  | "approve"
+  | "reject"
+  | "delete"
+  | "retrieve"
+  | "quarantine"
+  | "stale";
+
+export interface MemoryAuditEvent {
+  id: string;
+  recordId: string;
+  type: MemoryAuditEventType;
+  actor: string;
+  at: string;
+  summary: string;
+  previousContent?: string;
+  nextContent?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface AgentOutput {

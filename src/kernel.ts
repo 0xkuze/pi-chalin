@@ -84,7 +84,7 @@ export class ChalinKernel {
   async handleRoute(route: RouteDecision, prompt: string, context: Omit<WorkerRunnerContext, "agents" | "modelOverrides"> = { cwd: this.cwd }, approvalOverride?: ApprovalDecision): Promise<ChalinHandleResult> {
     const approval = approvalOverride ?? approvalDecision(this.config, route);
     const diagnostics = [...this.catalog.diagnostics.warnings, ...this.catalog.diagnostics.errors];
-    const memories = route.needsMemory ? (await this.memory.search(prompt, 5)).map((result) => result.record) : [];
+    const memories = route.needsMemory ? (await this.memory.retrieve({ query: prompt, sourceAgent: "primary-pi", limit: 5, tokenBudget: 900 })).results.map((result) => result.record) : [];
     if (approval.action !== "allow" || !route.plan) return { route, approval, memories, diagnostics };
 
     const agents = this.resolvePlanAgents(route);

@@ -15,6 +15,7 @@ import { Type } from "typebox";
 import { ArtifactStore, type ArtifactFeatureStatus } from "./artifacts.ts";
 import type { BudgetPolicy } from "./budget.ts";
 import { buildProjectDiscoveryIndex, formatProjectDiscoveryIndex } from "./discovery.ts";
+import { createMemoryCandidate, MemoryStore } from "./memory.ts";
 import { buildProjectSnapshot, formatProjectSnapshot } from "./snapshot.ts";
 import { fetchWebUrls, formatWebBundle, searchWeb } from "./webfetch.ts";
 
@@ -70,6 +71,54 @@ const ChalinWebSearchParams = Type.Object({
   depth: Type.Optional(Type.Union([Type.Literal("snippets"), Type.Literal("content")])),
   freshness: Type.Optional(Type.Union([Type.Literal("cache-ok"), Type.Literal("prefer-fresh"), Type.Literal("must-be-fresh")])),
 });
+
+const ChalinMemorySearchParams = Type.Object({
+  query: Type.String({ description: "Concrete task, decision, file, or concept to recall. Keep it short." }),
+  limit: Type.Optional(Type.Number({ description: "Maximum memories to consider. Default 8." })),
+  tokenBudget: Type.Optional(Type.Number({ description: "Maximum returned memory context tokens. Default is per-agent and capped." })),
+  includeEvidence: Type.Optional(Type.Boolean({ description: "Include compact evidence snippets when needed for contradiction or review work." })),
+});
+
+const ChalinMemoryWriteParams = Type.Object({
+  category: Type.String({ description: "Memory category, e.g. project-fact, pattern, tooling, testing, workflow, bugfix, decision, preference, architecture, safety, security, failure." }),
+  content: Type.String({ description: "Durable human-readable memory. No logs, code dumps, command output, or task completion notes." }),
+  confidence: Type.Optional(Type.Number({ description: "Confidence from 0 to 1. Defaults to 0.8." })),
+  evidence: Type.Optional(Type.String({ description: "Compact evidence source, file path, command, or reason. No raw logs." })),
+  topicKey: Type.Optional(Type.String({ description: "Optional stable topic key when correcting or merging a known concept." })),
+});
+
+const ChalinMemoryReviseParams = Type.Object({
+  id: Type.String({ description: "Existing memory id to revise." }),
+  content: Type.String({ description: "Corrected durable memory content." }),
+  category: Type.Optional(Type.String({ description: "Corrected category if it changed." })),
+  confidence: Type.Optional(Type.Number({ description: "Confidence from 0 to 1. Defaults to the existing record confidence." })),
+  evidence: Type.Optional(Type.String({ description: "Compact evidence proving the correction." })),
+  reason: Type.Optional(Type.String({ description: "Why the old memory is stale, wrong, or less useful." })),
+});
+
+type ChalinMemorySearchParamsShape = {
+  query: string;
+  limit?: number;
+  tokenBudget?: number;
+  includeEvidence?: boolean;
+};
+
+type ChalinMemoryWriteParamsShape = {
+  category: string;
+  content: string;
+  confidence?: number;
+  evidence?: string;
+  topicKey?: string;
+};
+
+type ChalinMemoryReviseParamsShape = {
+  id: string;
+  content: string;
+  category?: string;
+  confidence?: number;
+  evidence?: string;
+  reason?: string;
+};
 
 interface BashGuardDetails {
   blocked: boolean;
@@ -288,6 +337,9 @@ export function createChildTools(policy: ChildToolPolicy): ToolDefinition[] {
     ["bash", createGuardedBashTool(policy)],
     ["chalin_web_search", createChalinWebSearchTool(policy)],
     ["chalin_artifact_write", createChalinArtifactWriteTool(policy)],
+    ["chalin_memory_search", createChalinMemorySearchTool(policy)],
+    ["chalin_memory_write", createChalinMemoryWriteTool(policy)],
+    ["chalin_memory_revise", createChalinMemoryReviseTool(policy)],
   ];
   return tools.filter(([name]) => policy.allowedTools.has(name)).map(([, tool]) => tool);
 }
@@ -407,6 +459,110 @@ export function createChalinWebSearchTool(policy: ChildToolPolicy): ToolDefiniti
   });
 }
 
+export function createChalinMemorySearchTool(policy: ChildToolPolicy): ToolDefinition {
+  return defineTool<typeof ChalinMemorySearchParams, unknown>({
+    name: "chalin_memory_search",
+    label: "Chalin Memory Search",
+    description: "Retrieve compact project/user memory autonomously when it can reduce exploration, prevent repeated mistakes, or check prior decisions. Results are token-budgeted.",
+    promptSnippet: "chalin_memory_search: recall compact durable memory without waiting for an explicit human instruction.",
+    promptGuidelines: [
+      "Use when prior decisions, preferences, workflows, or repeated project facts may matter.",
+      "Keep query short and specific; ask for evidence only when checking contradictions or reviewing risk.",
+      "Treat memory as guidance. Current repo evidence wins over stale memory.",
+    ],
+    parameters: ChalinMemorySearchParams,
+    async execute(_toolCallId, params: ChalinMemorySearchParamsShape) {
+      const input = isRecord(params) ? params : {};
+      const gate = policy.beforeTool("chalin_memory_search", input);
+      if (!gate.allowed) return blockedToolResult(gate.reason);
+      const store = new MemoryStore({ cwd: policy.cwd });
+      const bundle = await store.retrieve({
+        query: String(params.query ?? ""),
+        sourceAgent: policy.agentName,
+        limit: typeof params.limit === "number" ? params.limit : undefined,
+        tokenBudget: typeof params.tokenBudget === "number" ? params.tokenBudget : undefined,
+        includeEvidence: Boolean(params.includeEvidence),
+      });
+      const text = bundle.text || "No relevant active memory found.";
+      return policy.afterTool("chalin_memory_search", {
+        content: [{ type: "text" as const, text }],
+        details: { ...bundle, results: bundle.results.map((result) => ({ id: result.record.id, category: result.record.category, score: result.score })) },
+      }) as never;
+    },
+  });
+}
+
+export function createChalinMemoryWriteTool(policy: ChildToolPolicy): ToolDefinition {
+  return defineTool<typeof ChalinMemoryWriteParams, unknown>({
+    name: "chalin_memory_write",
+    label: "Chalin Memory Write",
+    description: "Submit a durable memory candidate autonomously through pi-chalin WriteGuard. The store decides active, pending, or rejected.",
+    promptSnippet: "chalin_memory_write: save durable, verified project knowledge; never save logs or trivial task notes.",
+    promptGuidelines: [
+      "Write only knowledge that should help future runs: decisions, durable patterns, project facts, testing/tooling rules, failures, or preferences.",
+      "Prefer one compact sentence. Include evidence when the memory corrects or replaces earlier understanding.",
+      "Do not write raw logs, commands, stdout/stderr, stack traces, code dumps, or simple completion notes.",
+    ],
+    parameters: ChalinMemoryWriteParams,
+    async execute(_toolCallId, params: ChalinMemoryWriteParamsShape) {
+      const input = isRecord(params) ? params : {};
+      const gate = policy.beforeTool("chalin_memory_write", input);
+      if (!gate.allowed) return blockedToolResult(gate.reason);
+      const validation = validateMemoryWriteParams(params);
+      if (!validation.allowed) return blockedToolResult(validation.reason);
+      const store = new MemoryStore({ cwd: policy.cwd });
+      const [record] = await store.submitCandidates([createMemoryCandidate({
+        category: params.category,
+        content: params.content,
+        sourceAgent: policy.agentName ?? "subagent",
+        confidence: typeof params.confidence === "number" ? Math.max(0, Math.min(1, params.confidence)) : 0.8,
+        evidence: params.evidence,
+        scope: "project",
+        topicKey: params.topicKey,
+      })]);
+      const text = record
+        ? `memory ${record.status}: ${record.id} · ${record.category} · ${truncateForTool(record.content, 220)}`
+        : "memory rejected: no candidate was persisted.";
+      return policy.afterTool("chalin_memory_write", { content: [{ type: "text" as const, text }], details: { record } }) as never;
+    },
+  });
+}
+
+export function createChalinMemoryReviseTool(policy: ChildToolPolicy): ToolDefinition {
+  return defineTool<typeof ChalinMemoryReviseParams, unknown>({
+    name: "chalin_memory_revise",
+    label: "Chalin Memory Revise",
+    description: "Correct an existing memory when current evidence proves it stale, wrong, or less useful. Revisions are audited.",
+    promptSnippet: "chalin_memory_revise: repair stale or wrong memory with evidence.",
+    promptGuidelines: [
+      "Use only when you have evidence that the previous memory is wrong, stale, or lower quality.",
+      "Keep corrected content compact and durable.",
+      "Explain why the correction is safer or more accurate.",
+    ],
+    parameters: ChalinMemoryReviseParams,
+    async execute(_toolCallId, params: ChalinMemoryReviseParamsShape) {
+      const input = isRecord(params) ? params : {};
+      const gate = policy.beforeTool("chalin_memory_revise", input);
+      if (!gate.allowed) return blockedToolResult(gate.reason);
+      const validation = validateMemoryRevisionParams(params);
+      if (!validation.allowed) return blockedToolResult(validation.reason);
+      const store = new MemoryStore({ cwd: policy.cwd });
+      const record = await store.revise(params.id, {
+        category: params.category,
+        content: params.content,
+        confidence: params.confidence,
+        evidence: params.evidence,
+        reason: params.reason,
+        sourceAgent: policy.agentName ?? "subagent",
+      });
+      const text = record
+        ? `memory revised: ${record.id} · ${record.status} · rev=${record.revisionCount} · ${truncateForTool(record.content, 220)}`
+        : `memory revise skipped: '${params.id}' was not found or cannot be revised.`;
+      return policy.afterTool("chalin_memory_revise", { content: [{ type: "text" as const, text }], details: { record } }) as never;
+    },
+  });
+}
+
 
 export function createChalinArtifactWriteTool(policy: ChildToolPolicy): ToolDefinition {
   return defineTool<typeof ChalinArtifactWriteParams, unknown>({
@@ -470,6 +626,28 @@ function validateArtifactParams(params: ChalinArtifactWriteParamsShape): { allow
   if (params.kind === "validation-contract" && (!params.successCriteria?.length || !params.commands?.length)) return { allowed: false, reason: "validation_contract_requires_commands_and_success_criteria" };
   if (params.kind === "worker-skill" && (!params.summary || !params.rules?.length)) return { allowed: false, reason: "worker_skill_requires_summary_and_rules" };
   return { allowed: true };
+}
+
+function validateMemoryWriteParams(params: ChalinMemoryWriteParamsShape): { allowed: true } | { allowed: false; reason: string } {
+  const text = [params.category, params.content, params.evidence, params.topicKey].filter(Boolean).join("\n");
+  if (!params.category || params.category.length > 40) return { allowed: false, reason: "memory_category_invalid" };
+  if (!params.content || params.content.length < 48 || params.content.length > 600) return { allowed: false, reason: "memory_content_must_be_48_to_600_chars" };
+  if (text.length > 1200) return { allowed: false, reason: "memory_payload_too_large" };
+  if (containsRawRuntimeNoise(text)) return { allowed: false, reason: "memory_raw_runtime_noise" };
+  return { allowed: true };
+}
+
+function validateMemoryRevisionParams(params: ChalinMemoryReviseParamsShape): { allowed: true } | { allowed: false; reason: string } {
+  const text = [params.id, params.category, params.content, params.evidence, params.reason].filter(Boolean).join("\n");
+  if (!params.id || params.id.length > 120) return { allowed: false, reason: "memory_revision_id_invalid" };
+  if (!params.content || params.content.length < 48 || params.content.length > 600) return { allowed: false, reason: "memory_revision_content_must_be_48_to_600_chars" };
+  if (text.length > 1400) return { allowed: false, reason: "memory_revision_payload_too_large" };
+  if (containsRawRuntimeNoise(text)) return { allowed: false, reason: "memory_revision_raw_runtime_noise" };
+  return { allowed: true };
+}
+
+function containsRawRuntimeNoise(text: string): boolean {
+  return /\b(stdout|stderr|traceback|stack trace|returncode|subprocess|os\.environ|sys\.exit|TimeoutExpired|print\(|cmd\s*=)\b/i.test(text);
 }
 
 function artifactToolResult(text: string, details: unknown) {
@@ -554,6 +732,12 @@ function normalizeMetricPath(target: string, cwd: string): string {
 
 function stringSize(value: unknown): number {
   return typeof value === "string" ? value.length : 0;
+}
+
+function truncateForTool(text: string, maxChars: number): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

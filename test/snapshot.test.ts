@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { afterEach, test } from "bun:test";
 import { buildProjectSnapshot, formatProjectSnapshot } from "../src/snapshot.ts";
 import { classifyBashCommand, createChildToolPolicy, createChildTools, createProjectSnapshotTool } from "../src/child-tools.ts";
+import { createMemoryCandidate, MemoryStore } from "../src/memory.ts";
 
 const tempDirs: string[] = [];
 afterEach(() => { while (tempDirs.length > 0) fs.rmSync(tempDirs.pop()!, { recursive: true, force: true }); });
@@ -114,6 +115,48 @@ test("child tools expose only policy-allowed definitions to reduce child prompt 
   const policy = createChildToolPolicy({ cwd: dir, maxToolCalls: 5, agentName: "scout", allowedTools: ["read", "chalin_project_snapshot"] });
   const names = createChildTools(policy).map((tool) => tool.name).sort();
   assert.deepEqual(names, ["chalin_project_snapshot", "read"]);
+});
+
+test("controlled child memory tools retrieve write and revise through policy", async () => {
+  const dir = tempDir("pi-chalin-child-memory-");
+  const store = new MemoryStore({ cwd: dir });
+  const [seed] = await store.submitCandidates([createMemoryCandidate({
+    category: "testing",
+    content: "Project tests use Bun and should avoid setTimeout sleeps in async retry assertions.",
+    sourceAgent: "reviewer",
+    confidence: 0.95,
+    scope: "project",
+  })]);
+  assert.ok(seed);
+
+  const policy = createChildToolPolicy({ cwd: dir, maxToolCalls: 5, agentName: "worker", allowedTools: ["chalin_memory_search", "chalin_memory_write", "chalin_memory_revise"] });
+  const tools = createChildTools(policy);
+  const search = tools.find((tool) => tool.name === "chalin_memory_search");
+  const write = tools.find((tool) => tool.name === "chalin_memory_write");
+  const revise = tools.find((tool) => tool.name === "chalin_memory_revise");
+  assert.ok(search);
+  assert.ok(write);
+  assert.ok(revise);
+
+  const found = await search.execute("mem-1", { query: "Bun async retry assertions", tokenBudget: 120 }, undefined, undefined, undefined as never);
+  assert.match(String((found.content?.[0] as { text?: string } | undefined)?.text ?? ""), /Memory context/);
+
+  const written = await write.execute("mem-2", {
+    category: "workflow",
+    content: "Agents should search memory before broad repeated repository discovery when prior decisions may reduce file reads.",
+    confidence: 0.9,
+    evidence: "child memory tool policy test",
+  }, undefined, undefined, undefined as never);
+  assert.match(String((written.content?.[0] as { text?: string } | undefined)?.text ?? ""), /memory active|memory pending/);
+
+  const revised = await revise.execute("mem-3", {
+    id: seed.id,
+    content: "Project tests use Bun and should prefer deterministic fake timers or promise hooks over setTimeout sleeps in async retry assertions.",
+    evidence: "existing memory plus test policy",
+    reason: "Make the procedural guidance more precise.",
+  }, undefined, undefined, undefined as never);
+  assert.match(String((revised.content?.[0] as { text?: string } | undefined)?.text ?? ""), /memory revised/);
+  assert.equal(policy.metrics().toolCalls, 3);
 });
 
 

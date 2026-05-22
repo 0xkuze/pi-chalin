@@ -37,6 +37,8 @@ try {
   results.push(await evaluateRecall(store, writeSamples, searchSamples));
   results.push(await evaluateDuplicateSuppression(store, writeSamples));
   results.push(await evaluateRevisionAccuracy(store, writeSamples));
+  results.push(await evaluateAutonomousRetrievalBudget(store, searchSamples));
+  results.push(await evaluateAuditedCorrection(store, writeSamples));
   results.push(await evaluateNoiseRejection(store, writeSamples));
   results.push(await evaluateReliabilityDelta(store, searchSamples));
   results.push(evaluateLatency(writeSamples, searchSamples));
@@ -147,6 +149,51 @@ async function evaluateNoiseRejection(store: MemoryStore, writeSamples: number[]
   const visibleNoise = (await store.list()).filter((record) => /stdout|Traceback|subprocess|cmd =/i.test(record.content)).length;
   const score = rejected === records.length && visibleNoise === 0 ? 1 : rejected / records.length;
   return result("noise-rejection", score, thresholds.minNoiseRejection, { rejected, total: records.length, visibleNoise });
+}
+
+async function evaluateAutonomousRetrievalBudget(store: MemoryStore, searchSamples: number[]): Promise<MemoryEvalResult> {
+  const start = performance.now();
+  const bundle = await store.retrieve({
+    query: "Bun retry assertions long-running checkpoints validation contract",
+    sourceAgent: "memory-eval-agent",
+    tokenBudget: 140,
+    limit: 8,
+  });
+  searchSamples.push(performance.now() - start);
+  const hasUsefulMemory = /Bun|checkpoint|validation/i.test(bundle.text);
+  const respectsBudget = bundle.estimatedTokens <= 140;
+  const events = bundle.results.length > 0 ? await store.events(bundle.results[0]!.record.id) : [];
+  const audited = events.some((event) => event.type === "retrieve" && event.actor === "memory-eval-agent");
+  const score = hasUsefulMemory && respectsBudget && audited ? 1 : 0;
+  return result("autonomous-retrieval-budget", score, 1, { estimatedTokens: bundle.estimatedTokens, hits: bundle.results.length, audited, text: bundle.text.slice(0, 240) });
+}
+
+async function evaluateAuditedCorrection(store: MemoryStore, writeSamples: number[]): Promise<MemoryEvalResult> {
+  const start = performance.now();
+  const [record] = await store.submitCandidates([createMemoryCandidate({
+    category: "testing",
+    content: "Project tests use Vitest and should place regression tests under src/__tests__.",
+    sourceAgent: "memory-eval-scout",
+    confidence: 0.9,
+    scope: "project",
+  })]);
+  if (!record) return result("audited-correction", 0, 1, { reason: "seed record missing" });
+  const revised = await store.revise(record.id, {
+    category: "testing",
+    content: "Project tests use Bun's test runner and should keep regression tests under test/ with isolated temporary project roots.",
+    sourceAgent: "memory-eval-reviewer",
+    confidence: 0.98,
+    evidence: "package.json and test/*.test.ts layout",
+    reason: "Repository evidence contradicts the old Vitest memory.",
+  });
+  writeSamples.push(performance.now() - start);
+  const events = await store.events(record.id);
+  const score = revised?.revisionCount === 2
+    && /Bun's test runner/i.test(revised.content)
+    && events.some((event) => event.type === "revise" && event.previousContent?.includes("Vitest"))
+    ? 1
+    : 0;
+  return result("audited-correction", score, 1, { revised: revised?.content, revisionCount: revised?.revisionCount, eventCount: events.length });
 }
 
 async function evaluateReliabilityDelta(store: MemoryStore, searchSamples: number[]): Promise<MemoryEvalResult> {

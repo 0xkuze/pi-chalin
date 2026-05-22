@@ -218,3 +218,64 @@ test("MemoryStore stores decision metadata for explainable review", async () => 
   assert.equal(record?.trigger, "workflow-learning");
   assert.ok(record?.topicKey);
 });
+
+test("MemoryStore retrieves compact token-budgeted context and audits usage", async () => {
+  const cwd = tempDir("pi-chalin-memory-");
+  const store = new MemoryStore({ cwd });
+  await store.submitCandidates([
+    createMemoryCandidate({
+      category: "testing",
+      content: "Project tests use Bun, and async retry tests should avoid setTimeout sleeps in favor of deterministic fake timers or promise hooks.",
+      sourceAgent: "reviewer",
+      confidence: 0.95,
+      scope: "project",
+    }),
+    createMemoryCandidate({
+      category: "workflow",
+      content: "Long-running pi-chalin routes should save validation contracts before reviewer synthesis so later agents can resume without re-reading the whole repository.",
+      sourceAgent: "planner",
+      confidence: 0.94,
+      scope: "project",
+    }),
+  ]);
+
+  const bundle = await store.retrieve({ query: "Bun retry tests validation contracts", sourceAgent: "worker", tokenBudget: 80, limit: 5 });
+
+  assert.match(bundle.text, /Memory context/);
+  assert.ok(bundle.estimatedTokens <= 80);
+  assert.ok(bundle.results.length >= 1);
+  const events = await store.events(bundle.results[0]!.record.id);
+  assert.ok(events.some((event) => event.type === "retrieve" && event.actor === "worker"));
+  const used = (await store.list("active")).find((record) => record.id === bundle.results[0]!.record.id);
+  assert.ok((used?.useCount ?? 0) > 0);
+});
+
+test("MemoryStore revises incorrect memories with audited provenance", async () => {
+  const cwd = tempDir("pi-chalin-memory-");
+  const store = new MemoryStore({ cwd });
+  const [record] = await store.submitCandidates([
+    createMemoryCandidate({
+      category: "testing",
+      content: "Project tests use Vitest for extension regression tests and should place specs under src/__tests__.",
+      sourceAgent: "scout",
+      confidence: 0.9,
+      scope: "project",
+    }),
+  ]);
+  assert.ok(record);
+
+  const revised = await store.revise(record.id, {
+    category: "testing",
+    content: "Project tests use Bun's test runner for extension regression tests and should keep temporary project roots isolated.",
+    sourceAgent: "reviewer",
+    confidence: 0.98,
+    evidence: "package.json test script and existing test/*.test.ts files",
+    reason: "Current repository evidence contradicts the old Vitest memory.",
+  });
+
+  assert.equal(revised?.revisionCount, 2);
+  assert.match(revised?.content ?? "", /Bun's test runner/);
+  assert.match(revised?.evidence ?? "", /package\.json/);
+  const events = await store.events(record.id);
+  assert.ok(events.some((event) => event.type === "revise" && event.previousContent?.includes("Vitest") && event.nextContent?.includes("Bun")));
+});
