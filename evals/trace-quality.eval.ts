@@ -10,7 +10,7 @@ import {
   type TraceJudgeVerdict,
   type TraceQualityReport,
   type TraceVariant,
-} from "../src/trace-quality.ts";
+} from "./trace-quality.ts";
 
 export const DEFAULT_JUDGE_MODEL = "anthropic-vibeproxy/claude-opus-4-7";
 export const DEFAULT_JUDGE_TIMEOUT_MS = 45_000;

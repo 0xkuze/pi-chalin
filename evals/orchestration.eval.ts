@@ -9,7 +9,7 @@ import {
   summarizeOrchestrationEvalCases,
   type ChalinExpectedTopology,
   type ChalinOrchestrationEvalCase,
-} from "../src/orchestration.ts";
+} from "./orchestration-cases.ts";
 
 interface UsageTotals {
   input: number;
@@ -309,7 +309,7 @@ function topologyMatches(expected: ChalinExpectedTopology, actual: string): bool
 }
 
 function hasAgent(stdout: string, agent: string): boolean {
-  const escaped = escapeRegExp(agent);
+  const escaped = RegExp.escape(agent);
   return new RegExp(`"agent":"${escaped}"|"agents":\\[[^\\]]*"${escaped}"`, "i").test(stdout);
 }
 
@@ -647,10 +647,6 @@ function snippet(text: string, max = 1400): string {
 
 function stamp(value: string): string {
   return value.replace(/[:.]/g, "-");
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function printReport(reportPath: string, results: EvalResult[]): void {

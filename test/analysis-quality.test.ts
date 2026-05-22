@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "bun:test";
-import { getAnalysisFacts, scoreAnalysisAnswer } from "../src/analysis-quality.ts";
+import { getAnalysisFacts, scoreAnalysisAnswer } from "../evals/analysis-quality.ts";
 
 test("scoreAnalysisAnswer rewards accurate deep-project coverage over length", () => {
   const shallow = [

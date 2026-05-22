@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AnalysisQualityProfile } from "../src/analysis-quality.ts";
+import type { AnalysisQualityProfile } from "./analysis-quality.ts";
 
 export type SyntheticQualityFixtureProfile = Exclude<AnalysisQualityProfile, "agent-tooling">;
 

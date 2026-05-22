@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "bun:test";
-import { analyzeTrajectory, scoreTrajectory } from "../src/trajectory.ts";
+import { analyzeTrajectory, scoreTrajectory } from "../evals/trajectory.ts";
 import type { RunState } from "../src/schemas.ts";
 
 function run(overrides: Partial<RunState> = {}): RunState {

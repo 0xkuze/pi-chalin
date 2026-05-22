@@ -1,4 +1,4 @@
-import type { RunState, RunStepMetrics } from "./schemas.ts";
+import type { RunState, RunStepMetrics } from "../src/schemas.ts";
 
 export type TrajectoryFindingId =
   | "tool_misuse"

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "bun:test";
-import { buildTraceJudgePrompt, gradePiTrace, parsePiJsonTrace, parseTraceJudgeVerdict } from "../src/trace-quality.ts";
+import { buildTraceJudgePrompt, gradePiTrace, parsePiJsonTrace, parseTraceJudgeVerdict } from "../evals/trace-quality.ts";
 import { MAX_JUDGE_TIMEOUT_MS, resolveJudgeTimeoutMs } from "../evals/trace-quality.eval.ts";
 
 function event(value: unknown): string {

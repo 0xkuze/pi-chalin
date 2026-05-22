@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import ts from "typescript";
-import type { WorkflowEvalCase } from "../evals/workflow-cases.ts";
+import type { WorkflowEvalCase } from "./workflow-cases.ts";
 
 export interface WorkflowQualityIssue {
   id: string;
@@ -487,12 +487,8 @@ function matchesFile(cwd: string, relativePathOrPattern: string): boolean {
 
 function matchingFiles(cwd: string, relativePathOrPattern: string): string[] {
   if (!relativePathOrPattern.includes("*")) return exists(cwd, relativePathOrPattern) ? [relativePathOrPattern] : [];
-  const pattern = new RegExp(`^${relativePathOrPattern.split("*").map(escapeRegExp).join(".*")}$`);
+  const pattern = new RegExp(`^${relativePathOrPattern.split("*").map((part) => RegExp.escape(part)).join(".*")}$`);
   return listFiles(cwd).filter((file) => pattern.test(file)).sort();
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function resolvePath(cwd: string, relativePath: string): string | undefined {

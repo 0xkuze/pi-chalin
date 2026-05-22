@@ -6,7 +6,7 @@ import { setDefaultTimeout, test } from "bun:test";
 import { createWorkflowFixture, listWorkflowCommunityCases, listWorkflowEvalCases, listWorkflowHoldoutCases, selectWorkflowPrompt } from "../evals/workflow-cases.ts";
 import { resolveWorkflowShardArgs } from "../evals/workflow-sharded.eval.ts";
 import { assertSdkRunBudget, buildWorkflowJudgePrompt, detectWorkflowInfrastructureFailure, detectWorkflowVerification, evaluateWorkflowRegressionGates, extractFinalText, observeTerminalAssistantAnswer, resolveCaseIds, resolveVariants, resolveWorkflowArgs, resolveWorkflowIdleTimeoutMs, resolveWorkflowInfraRetries, resolveWorkflowRunCount, resolveWorkflowTimeoutMs, shouldRetainWorkflowFixture, shouldRunWorkflowJudge, shouldStoreFullWorkflowOutput, summarizeComparison, summarizeWorkflowFailures, workflowRegressionGatesEnabled, workflowReportFilename, writeWorkflowReport, DEFAULT_WORKFLOW_IDLE_TIMEOUT_MS, MAX_WORKFLOW_RUNS, MAX_WORKFLOW_TIMEOUT_MS } from "../evals/workflow-quality.eval.ts";
-import { scoreWorkflowWorkspace } from "../src/workflow-quality.ts";
+import { scoreWorkflowWorkspace } from "../evals/workflow-quality-lib.ts";
 
 setDefaultTimeout(60_000);
 

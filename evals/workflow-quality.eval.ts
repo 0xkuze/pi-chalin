@@ -5,8 +5,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createWorkflowFixture, getWorkflowEvalCase, listWorkflowCommunityCases, listWorkflowEvalCases, listWorkflowHoldoutCases, type WorkflowEvalCase } from "./workflow-cases.ts";
-import { scoreWorkflowWorkspace, type WorkflowQualityReport } from "../src/workflow-quality.ts";
-import { gradePiTrace, parsePiJsonTrace, type TraceQualityReport, type TraceVariant } from "../src/trace-quality.ts";
+import { scoreWorkflowWorkspace, type WorkflowQualityReport } from "./workflow-quality-lib.ts";
+import { gradePiTrace, parsePiJsonTrace, type TraceQualityReport, type TraceVariant } from "./trace-quality.ts";
 import { DEFAULT_JUDGE_MODEL, resolveJudgeTimeoutMs } from "./trace-quality.eval.ts";
 
 export type WorkflowVariant = "simple" | "chalin";

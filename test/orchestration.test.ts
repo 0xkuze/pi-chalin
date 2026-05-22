@@ -3,10 +3,10 @@ import { test } from "bun:test";
 import { AgentCatalog } from "../src/agents.ts";
 import {
   ORCHESTRATION_EVAL_CASES,
-  buildChalinOrchestratorSystemPrompt,
   summarizeOrchestrationEvalCases,
-} from "../src/orchestration.ts";
-import { directExecutionRecommendation, ensureMutationRouteHasWorker } from "../src/tools.ts";
+} from "../evals/orchestration-cases.ts";
+import { buildChalinOrchestratorSystemPrompt } from "../src/orchestration.ts";
+import { directExecutionRecommendation, ensureMutationRouteHasWorker } from "../src/route-guards.ts";
 import type { RouteDecision } from "../src/schemas.ts";
 
 const expectedTopologyMap = new Map([

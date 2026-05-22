@@ -2,7 +2,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { analyzeTrajectory, scoreTrajectory, type TrajectoryReport } from "../src/trajectory.ts";
+import { analyzeTrajectory, scoreTrajectory, type TrajectoryReport } from "./trajectory.ts";
 import type { RunState, TokenUsageSummary } from "../src/schemas.ts";
 
 interface TrajectoryEvalResult {
