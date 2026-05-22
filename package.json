@@ -3,14 +3,21 @@
   "version": "0.1.0",
   "description": "Pi Coding Agent extension for routed, memory-aware subagent workflows",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/0xkuze/pi-chalin.git"
+  },
+  "bugs": {
+    "url": "https://github.com/0xkuze/pi-chalin/issues"
+  },
+  "homepage": "https://github.com/0xkuze/pi-chalin#readme",
   "packageManager": "bun@1.3.14",
   "type": "module",
   "main": "src/index.ts",
+  "sideEffects": false,
   "files": [
-    "assets/**/*.png",
     "src/**/*.ts",
     "agents/**/*.md",
-    "evals/**/*.ts",
     "README.md"
   ],
   "scripts": {
@@ -38,9 +45,12 @@
   "keywords": [
     "pi-package",
     "pi",
+    "pi-extension",
     "pi-coding-agent",
     "subagents",
-    "agentic"
+    "agentic",
+    "memory",
+    "orchestration"
   ],
   "pi": {
     "extensions": [

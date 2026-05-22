@@ -1,12 +1,8 @@
 <p align="center">
-  <img src="assets/pi-chalin-banner.png" alt="pi-chalin banner" width="100%" />
-</p>
-
-<p align="center">
   <a href="package.json"><img alt="version" src="https://img.shields.io/badge/version-0.1.0-111111?style=for-the-badge"></a>
   <a href="package.json"><img alt="license" src="https://img.shields.io/badge/license-MIT-0f766e?style=for-the-badge"></a>
   <a href="package.json"><img alt="bun" src="https://img.shields.io/badge/bun-%3E%3D1.3.14-111111?style=for-the-badge&logo=bun&logoColor=white"></a>
-  <a href="package.json"><img alt="typescript" src="https://img.shields.io/badge/typescript-5.7-3178c6?style=for-the-badge&logo=typescript&logoColor=white"></a>
+  <a href="package.json"><img alt="typescript" src="https://img.shields.io/badge/typescript-6.0-3178c6?style=for-the-badge&logo=typescript&logoColor=white"></a>
   <a href="package.json"><img alt="status" src="https://img.shields.io/badge/status-MVP-2563eb?style=for-the-badge"></a>
 </p>
 
@@ -68,8 +64,10 @@ The README is the canonical project overview in this repository. Historical desi
 ### Install
 
 ```bash
-bun install
+bun add pi-chalin
 ```
+
+For local development in this repository, run `bun install`.
 
 ### Verify
 
@@ -117,10 +115,13 @@ The extension registers tools that the primary Pi agent can call when a prompt n
 | `chalin_route` | Run a selected workflow with concrete agents, topology, risk, memory, and artifact needs. |
 | `chalin_interview` | Ask blocking clarification questions before planning or running agents. |
 | `chalin_web_search` | Search or fetch web context through the audited web layer. |
+| `chalin_memory_search` | Retrieve compact durable memory during direct or routed work. |
+| `chalin_memory_write` | Save durable project or user knowledge through WriteGuard. |
+| `chalin_memory_revise` | Correct stale or inaccurate memory with evidence. |
 | `chalin_artifact_resume` | Load resumable task context from stored artifacts. |
 | `chalin_resume` | Resume the latest paused or stale chalin run. |
 
-Child agents also receive guarded internal tools, such as `chalin_project_discovery`, `chalin_project_snapshot`, `chalin_artifact_write`, and `chalin_web_search`, according to their capabilities and budget.
+Child agents also receive guarded internal tools, such as `chalin_project_discovery`, `chalin_project_snapshot`, `chalin_artifact_write`, `chalin_memory_search`, `chalin_memory_write`, `chalin_memory_revise`, and `chalin_web_search`, according to their capabilities and budget.
 
 ## Architecture
 
@@ -134,6 +135,8 @@ Package
   test/                   Bun test coverage
   evals/                  quality and behavior evaluators
 ```
+
+The npm package ships only runtime extension source, built-in agents, and this README. Tests, evaluators, and local assets stay in the repository to keep installation small.
 
 Core modules:
 
