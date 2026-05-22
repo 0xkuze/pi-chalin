@@ -141,7 +141,7 @@ function runShardAttempt(shard: WorkflowMatrixShard, options: ShardRunOptions, a
     workflowEvalPath,
     "--mode=sdk",
     `--case=${shard.caseIds.join(",")}`,
-    `--variant=${options.variants.join("+") === "simple+mesh" ? "both" : options.variants.join(",")}`,
+    `--variant=${options.variants.join("+") === "simple+chalin" ? "both" : options.variants.join(",")}`,
     `--runs=${options.runs}`,
     `--timeoutMs=${options.timeoutMs}`,
     `--matrixPath=${matrixPath}`,

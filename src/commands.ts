@@ -12,13 +12,13 @@ import {
   openActivityMonitor,
   openWebFetchAuditPanel,
   openSmartPanel,
-  setMeshStatus,
+  setChalinStatus,
 } from "./ui.ts";
 import { listWebFetchAudit } from "./webfetch.ts";
 
-export function registerMeshCommands(pi: ExtensionAPI): void {
-  pi.registerCommand("mesh", {
-    description: "Open pi-chalin Smart Panel or toggle autonomous routing with: /mesh on|off",
+export function registerChalinCommands(pi: ExtensionAPI): void {
+  pi.registerCommand("chalin", {
+    description: "Open pi-chalin Smart Panel or toggle autonomous routing with: /chalin on|off",
     getArgumentCompletions: (prefix) => {
       const values = ["on", "off", "agents", "memory", "artifacts", "activity", "web", "status"];
       const filtered = values.filter((value) => value.startsWith(prefix.trim()));
@@ -31,7 +31,7 @@ export function registerMeshCommands(pi: ExtensionAPI): void {
       if (command === "on" || command === "off") {
         const enabled = command === "on";
         const loaded = writeProjectConfig({ cwd: ctx.cwd }, { enabled });
-        setMeshStatus(ctx, { kind: enabled ? "on" : "off" });
+        setChalinStatus(ctx, { kind: enabled ? "on" : "off" });
         ctx.ui.notify(`pi-chalin autonomous routing ${enabled ? "enabled" : "disabled"} for this project.`, "info");
         if (loaded.diagnostics.length > 0) ctx.ui.notify(loaded.diagnostics.join("\n"), "warning");
         return;
@@ -105,7 +105,7 @@ export function registerMeshCommands(pi: ExtensionAPI): void {
       }
 
       if (command && command !== "panel") {
-        ctx.ui.notify(`Unknown /mesh argument '${command}'. Use /mesh, /mesh activity, /mesh artifacts, /mesh web, /mesh on, or /mesh off. Normal prompts are routed automatically when enabled.`, "warning");
+        ctx.ui.notify(`Unknown /chalin argument '${command}'. Use /chalin, /chalin activity, /chalin artifacts, /chalin web, /chalin on, or /chalin off. Normal prompts are routed automatically when enabled.`, "warning");
         return;
       }
 

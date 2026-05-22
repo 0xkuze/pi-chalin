@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { resolveMeshPaths, type MeshPathsOptions } from "./paths.ts";
+import { resolveChalinPaths, type ChalinPathsOptions } from "./paths.ts";
 import {
   type AgentCatalogDiagnostics,
   type AgentCapability,
@@ -20,7 +20,7 @@ interface ParsedFrontmatter {
   body: string;
 }
 
-export interface AgentCatalogLoadOptions extends MeshPathsOptions {}
+export interface AgentCatalogLoadOptions extends ChalinPathsOptions {}
 
 export interface AgentResolution {
   agent?: AgentDefinition;
@@ -40,7 +40,7 @@ export class AgentCatalog {
   }
 
   static load(options: AgentCatalogLoadOptions): AgentCatalog {
-    const paths = resolveMeshPaths(options);
+    const paths = resolveChalinPaths(options);
     const diagnostics: AgentCatalogDiagnostics = { warnings: [], errors: [] };
     const byScope: Record<AgentScope, Map<string, AgentDefinition>> = {
       "built-in": new Map(),

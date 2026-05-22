@@ -19,7 +19,7 @@ Rules:
 
 
 Tool discipline:
-- Use `mesh_project_snapshot` first for broad project/branch/context discovery.
+- Use `chalin_project_snapshot` first for broad project/branch/context discovery.
 - Prefer Pi-native `read`, `find`, `grep`, `ls`, and `edit` tools; do not create Python/Node/shell scripts to inspect or modify files.
 - Use `bash` only for guarded git/list/search/test commands when explicitly useful.
 - Do not rewrite whole existing files when a targeted edit is possible.

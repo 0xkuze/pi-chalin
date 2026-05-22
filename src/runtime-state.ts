@@ -1,16 +1,16 @@
 import type { RouteDecision, RunState } from "./schemas.ts";
 
 let lastRun: RunState | undefined;
-let routeInvocations: MeshRouteInvocation[] = [];
+let routeInvocations: ChalinRouteInvocation[] = [];
 let directCompletion: DirectCompletionState = freshDirectCompletionState();
 
-export type MeshRouteOutcome = "dry-run" | "ask" | "block" | "failed" | "paused" | "complete";
+export type ChalinRouteOutcome = "dry-run" | "ask" | "block" | "failed" | "paused" | "complete";
 
-interface MeshRouteInvocation {
+interface ChalinRouteInvocation {
   id: number;
   dryRun: boolean;
   route?: Pick<RouteDecision, "kind" | "agents" | "risk">;
-  outcome?: MeshRouteOutcome;
+  outcome?: ChalinRouteOutcome;
 }
 
 interface DirectCompletionState {
@@ -38,7 +38,7 @@ export function getActiveRun(): RunState | undefined {
   return lastRun?.status === "running" ? lastRun : undefined;
 }
 
-export function beginMeshTurn(options: { prompt?: string } = {}): void {
+export function beginChalinTurn(options: { prompt?: string } = {}): void {
   routeInvocations = [];
   directCompletion = freshDirectCompletionState();
   directCompletion.prompt = options.prompt ?? "";
@@ -93,16 +93,16 @@ export function recordDirectToolCompletion(options: { toolName: string; isError?
   return { shouldProgressNudge, shouldReadyToVerifyNudge, shouldFailureNudge, shouldMissingTestNudge, shouldCompletionNudge, verificationCommand: directCompletion.verificationCommand };
 }
 
-export function beginMeshRouteInvocation(options: { dryRun: boolean; route: RouteDecision }): { allowed: boolean; reason?: string; invocationId?: number } {
+export function beginChalinRouteInvocation(options: { dryRun: boolean; route: RouteDecision }): { allowed: boolean; reason?: string; invocationId?: number } {
   const committed = routeInvocations.find((call) => call.outcome === "complete" || call.outcome === "paused");
   if (!options.dryRun && committed) {
     return {
       allowed: false,
-      reason: "mesh_route already executed for this user prompt. Synthesize the existing result instead of launching another mesh workflow. A second call is allowed only after dryRun, ask, block, or failed outcomes.",
+      reason: "chalin_route already executed for this user prompt. Synthesize the existing result instead of launching another chalin workflow. A second call is allowed only after dryRun, ask, block, or failed outcomes.",
     };
   }
 
-  const invocation: MeshRouteInvocation = {
+  const invocation: ChalinRouteInvocation = {
     id: routeInvocations.length + 1,
     dryRun: options.dryRun,
     route: { kind: options.route.kind, agents: options.route.agents, risk: options.route.risk },
@@ -111,13 +111,13 @@ export function beginMeshRouteInvocation(options: { dryRun: boolean; route: Rout
   return { allowed: true, invocationId: invocation.id };
 }
 
-export function finishMeshRouteInvocation(invocationId: number | undefined, outcome: MeshRouteOutcome): void {
+export function finishChalinRouteInvocation(invocationId: number | undefined, outcome: ChalinRouteOutcome): void {
   if (invocationId === undefined) return;
   const invocation = routeInvocations.find((call) => call.id === invocationId);
   if (invocation) invocation.outcome = outcome;
 }
 
-export function getMeshRouteInvocations(): readonly MeshRouteInvocation[] {
+export function getChalinRouteInvocations(): readonly ChalinRouteInvocation[] {
   return routeInvocations;
 }
 

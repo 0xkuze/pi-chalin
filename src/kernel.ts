@@ -1,13 +1,13 @@
 import { AgentCatalog } from "./agents.ts";
 import { ArtifactStore } from "./artifacts.ts";
-import { approvalDecision, type MeshConfig } from "./config.ts";
+import { approvalDecision, type ChalinConfig } from "./config.ts";
 import { MemoryStore } from "./memory.ts";
 import { MockWorkerRunner, SdkWorkerRunner, type WorkerRunner, type WorkerRunnerContext } from "./runner.ts";
 import type { AgentDefinition, AgentStage, AgentStep, AgentThinkingLevel, ApprovalDecision, MemoryRecord, RouteDecision, RoutePlan, RunState } from "./schemas.ts";
 
-export interface MeshKernelOptions {
+export interface ChalinKernelOptions {
   cwd?: string;
-  config?: MeshConfig;
+  config?: ChalinConfig;
   catalog?: AgentCatalog;
   memory?: MemoryStore;
   artifacts?: ArtifactStore;
@@ -17,7 +17,7 @@ export interface MeshKernelOptions {
   thinkingOverrides?: Record<string, AgentThinkingLevel>;
 }
 
-export interface MeshHandleResult {
+export interface ChalinHandleResult {
   route: RouteDecision;
   approval: ApprovalDecision;
   run?: RunState;
@@ -25,9 +25,9 @@ export interface MeshHandleResult {
   diagnostics: string[];
 }
 
-export class MeshKernel {
+export class ChalinKernel {
   private readonly cwd: string;
-  private readonly config: MeshConfig;
+  private readonly config: ChalinConfig;
   private readonly catalog: AgentCatalog;
   private readonly memory: MemoryStore;
   private readonly artifacts: ArtifactStore;
@@ -36,7 +36,7 @@ export class MeshKernel {
   private readonly modelOverrides: Record<string, string>;
   private readonly thinkingOverrides: Record<string, AgentThinkingLevel>;
 
-  constructor(options?: MeshKernelOptions) {
+  constructor(options?: ChalinKernelOptions) {
     this.cwd = options?.cwd ?? process.cwd();
     this.config = options?.config ?? {
       enabled: true,
@@ -55,7 +55,7 @@ export class MeshKernel {
 
   /**
    * pi-chalin is LLM-routed: the primary Pi agent decides whether to call the
-   * mesh_route tool and provides the topology/steps. This method remains as a
+   * chalin_route tool and provides the topology/steps. This method remains as a
    * safe legacy preview path, but it intentionally does not infer workflows from
    * hard-coded prompt keywords.
    */
@@ -69,7 +69,7 @@ export class MeshKernel {
       ambiguity: "low",
       needsMemory: false,
       needsArtifacts: false,
-      reason: "pi-chalin uses LLM-first routing: the primary Pi agent decides when to call mesh_route and which agents/topology to use.",
+      reason: "pi-chalin uses LLM-first routing: the primary Pi agent decides when to call chalin_route and which agents/topology to use.",
     };
   }
 
@@ -77,11 +77,11 @@ export class MeshKernel {
     return this.classify(prompt);
   }
 
-  async handlePrompt(prompt: string, context: Omit<WorkerRunnerContext, "agents" | "modelOverrides"> = { cwd: this.cwd }): Promise<MeshHandleResult> {
+  async handlePrompt(prompt: string, context: Omit<WorkerRunnerContext, "agents" | "modelOverrides"> = { cwd: this.cwd }): Promise<ChalinHandleResult> {
     return this.handleRoute(this.classify(prompt), prompt, context);
   }
 
-  async handleRoute(route: RouteDecision, prompt: string, context: Omit<WorkerRunnerContext, "agents" | "modelOverrides"> = { cwd: this.cwd }, approvalOverride?: ApprovalDecision): Promise<MeshHandleResult> {
+  async handleRoute(route: RouteDecision, prompt: string, context: Omit<WorkerRunnerContext, "agents" | "modelOverrides"> = { cwd: this.cwd }, approvalOverride?: ApprovalDecision): Promise<ChalinHandleResult> {
     const approval = approvalOverride ?? approvalDecision(this.config, route);
     const diagnostics = [...this.catalog.diagnostics.warnings, ...this.catalog.diagnostics.errors];
     const memories = route.needsMemory ? (await this.memory.search(prompt, 5)).map((result) => result.record) : [];
@@ -112,7 +112,7 @@ export class MeshKernel {
     return { route, approval, run, memories, diagnostics };
   }
 
-  async resumeRun(run: RunState, context: Omit<WorkerRunnerContext, "agents" | "modelOverrides" | "thinkingOverrides"> = { cwd: this.cwd }): Promise<MeshHandleResult> {
+  async resumeRun(run: RunState, context: Omit<WorkerRunnerContext, "agents" | "modelOverrides" | "thinkingOverrides"> = { cwd: this.cwd }): Promise<ChalinHandleResult> {
     const approval = approvalDecision(this.config, run.route);
     const diagnostics = [...this.catalog.diagnostics.warnings, ...this.catalog.diagnostics.errors];
     if (approval.action !== "allow" || !run.route.plan) return { route: run.route, approval, memories: [], diagnostics, run };
@@ -185,7 +185,7 @@ export function routeFromPlan(input: {
   }
   if (input.topology === "dag") {
     const stages = sanitizeStages(input.stages ?? []);
-    if (stages.length === 0) return askUser("mesh_route dag topology requires at least one stage with agent tasks.");
+    if (stages.length === 0) return askUser("chalin_route dag topology requires at least one stage with agent tasks.");
     const agents = stages.flatMap((stage) => stage.tasks.map((step) => step.agent));
     const allSteps = stages.flatMap((stage) => stage.tasks);
     return {
@@ -199,7 +199,7 @@ export function routeFromPlan(input: {
       plan: { kind: "dag", stages },
     };
   }
-  if (steps.length === 0) return askUser("mesh_route requires at least one agent step unless topology is memory-only.");
+  if (steps.length === 0) return askUser("chalin_route requires at least one agent step unless topology is memory-only.");
 
   const agents = steps.map((step) => step.agent);
   const plan = planFromTopology(input.topology, steps);
@@ -210,7 +210,7 @@ export function routeFromPlan(input: {
     ambiguity: "low",
     needsMemory: Boolean(input.needsMemory),
     needsArtifacts: input.needsArtifacts ?? steps.some((step) => ["scout", "planner", "worker", "reviewer", "context-builder"].includes(step.agent)),
-    reason: input.reason?.trim() || "Primary Pi agent selected this mesh workflow dynamically.",
+    reason: input.reason?.trim() || "Primary Pi agent selected this chalin workflow dynamically.",
     plan,
   };
 }

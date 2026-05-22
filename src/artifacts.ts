@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { resolveMeshPaths, type MeshPathsOptions } from "./paths.ts";
+import { resolveChalinPaths, type ChalinPathsOptions } from "./paths.ts";
 import type { RunState } from "./schemas.ts";
 
 export type ArtifactFeatureStatus = "active" | "complete" | "failed" | "paused";
@@ -94,8 +94,8 @@ export interface RunArtifactSummary {
 export class ArtifactStore {
   private readonly root: string;
 
-  constructor(options: MeshPathsOptions) {
-    this.root = path.join(resolveMeshPaths(options).projectRoot, ".pi-chalin", "artifacts");
+  constructor(options: ChalinPathsOptions) {
+    this.root = path.join(resolveChalinPaths(options).projectRoot, ".pi-chalin", "artifacts");
   }
 
   async initFeature(input: { featureId: string; goal: string; chain?: string[]; currentStep?: string }): Promise<FeatureArtifactState> {

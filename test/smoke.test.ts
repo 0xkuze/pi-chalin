@@ -4,10 +4,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, test } from "bun:test";
 import registerPiChalin from "../src/index.ts";
-import { shouldUseCompactDirectOrchestrationPrompt, shouldUseCompactMeshCriticalPrompt } from "../src/autoroute.ts";
+import { shouldUseCompactDirectOrchestrationPrompt, shouldUseCompactChalinCriticalPrompt } from "../src/autoroute.ts";
 import { resetRuntimeState, setLatestRun } from "../src/runtime-state.ts";
-import { meshFooterText, openMemoryReview, openSmartPanel, summarizeRuntimeGuards } from "../src/ui.ts";
-import { finalAnswerMaterial, formatMeshRoutePlanWidget, formatMeshRunWidget } from "../src/tools.ts";
+import { chalinFooterText, openMemoryReview, openSmartPanel, summarizeRuntimeGuards } from "../src/ui.ts";
+import { finalAnswerMaterial, formatChalinRoutePlanWidget, formatChalinRunWidget } from "../src/tools.ts";
 import { createRunState } from "../src/runner.ts";
 import type { MemoryRecord, RunState } from "../src/schemas.ts";
 
@@ -68,11 +68,11 @@ test("pi-chalin extension registers Phase 0 command and tool", () => {
   const fake = createFakePi();
   registerPiChalin(fake.api as never);
 
-  assert.equal(fake.commands.has("mesh"), true);
-  assert.equal(fake.tools.has("mesh_route"), true);
-  assert.equal(fake.tools.has("mesh_resume"), true);
-  assert.equal(fake.tools.has("mesh_interview"), true);
-  assert.equal(fake.tools.has("mesh_web_search"), true);
+  assert.equal(fake.commands.has("chalin"), true);
+  assert.equal(fake.tools.has("chalin_route"), true);
+  assert.equal(fake.tools.has("chalin_resume"), true);
+  assert.equal(fake.tools.has("chalin_interview"), true);
+  assert.equal(fake.tools.has("chalin_web_search"), true);
   assert.equal(fake.handlers.has("session_start"), true);
   assert.equal(fake.handlers.has("input"), true);
 });
@@ -107,14 +107,14 @@ test("pi-chalin disabled env skips registration", () => {
 });
 
 
-test("pi-chalin keeps the native prompt and teaches the primary Pi agent to decide mesh usage", async () => {
+test("pi-chalin keeps the native prompt and teaches the primary Pi agent to decide chalin usage", async () => {
   const fake = createFakePi();
   registerPiChalin(fake.api as never);
   const inputHandler = fake.handlers.get("input")?.[0] as (event: unknown, ctx: unknown) => Promise<{ action: string }>;
   const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<{ systemPrompt?: string; message?: { customType?: string; display?: boolean } } | undefined>;
   assert.equal(typeof inputHandler, "function");
   assert.equal(typeof beforeAgentStart, "function");
-  assert.equal(fake.handlers.has("context"), false, "mesh should not register a hidden context auto-router");
+  assert.equal(fake.handlers.has("context"), false, "chalin should not register a hidden context auto-router");
 
   const ctx = {
     cwd: tempDir("pi-chalin-auto-"),
@@ -136,7 +136,7 @@ test("pi-chalin keeps the native prompt and teaches the primary Pi agent to deci
   const inputResult = await inputHandler({ type: "input", text: "review this project", source: "interactive" }, ctx);
   assert.equal(inputResult.action, "continue", "input hook must not consume the prompt, otherwise Pi hides the native user message");
 
-  assert.equal(fake.messages.length, 0, "mesh should not create a separate follow-up turn");
+  assert.equal(fake.messages.length, 0, "chalin should not create a separate follow-up turn");
 
   const promptResult = await beforeAgentStart({
     type: "before_agent_start",
@@ -145,10 +145,10 @@ test("pi-chalin keeps the native prompt and teaches the primary Pi agent to deci
     systemPromptOptions: {},
   }, ctx);
   assert.match(promptResult?.systemPrompt ?? "", /primary Pi agent/i);
-  assert.match(promptResult?.systemPrompt ?? "", /mesh_resume/i);
-  assert.match(promptResult?.systemPrompt ?? "", /mesh_interview/i);
-  assert.match(promptResult?.systemPrompt ?? "", /mesh_route/i);
-  assert.match(promptResult?.systemPrompt ?? "", /MUST call `mesh_route` first/i);
+  assert.match(promptResult?.systemPrompt ?? "", /chalin_resume/i);
+  assert.match(promptResult?.systemPrompt ?? "", /chalin_interview/i);
+  assert.match(promptResult?.systemPrompt ?? "", /chalin_route/i);
+  assert.match(promptResult?.systemPrompt ?? "", /MUST call `chalin_route` first/i);
   assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /named-file bugfixes/i);
   assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /named-file refactors/i);
   assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /Do not route or dry-run unless/i);
@@ -203,7 +203,7 @@ test("pi-chalin uses compact orchestration context for bounded scaffold prompts"
 
 
 test("pi-chalin uses compact critical routing context for surgical long-file work", async () => {
-  assert.equal(shouldUseCompactMeshCriticalPrompt("en un archivo largo cambia solo la validacion puntual de auth y evita reescribir el archivo completo"), true);
+  assert.equal(shouldUseCompactChalinCriticalPrompt("en un archivo largo cambia solo la validacion puntual de auth y evita reescribir el archivo completo"), true);
   assert.equal(shouldUseCompactDirectOrchestrationPrompt("en un archivo largo cambia solo la validacion puntual de auth y evita reescribir el archivo completo"), false);
 
   const fake = createFakePi();
@@ -218,7 +218,7 @@ test("pi-chalin uses compact critical routing context for surgical long-file wor
   }, ctx);
   assert.equal(promptResult?.message?.customType, "pi-chalin-critical-compact-orchestration");
   assert.match(promptResult?.systemPrompt ?? "", /critical compact/i);
-  assert.match(promptResult?.message?.content ?? "", /First action must be `mesh_route`/i);
+  assert.match(promptResult?.message?.content ?? "", /First action must be `chalin_route`/i);
   assert.doesNotMatch(promptResult?.systemPrompt ?? "", /Available pi-chalin agents\n/i);
 });
 
@@ -333,10 +333,10 @@ test("direct bounded edits do not complete when requested tests were not changed
   assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-completion-nudge").length, 1);
 });
 
-test("mesh_interview asks TUI questions and persists artifact answers", async () => {
+test("chalin_interview asks TUI questions and persists artifact answers", async () => {
   const fake = createFakePi();
   registerPiChalin(fake.api as never);
-  const tool = fake.tools.get("mesh_interview") as unknown as { execute: (...args: never[]) => Promise<{ content: Array<{ type: string; text: string }>; details: { interview?: { featureId: string; answers: Array<{ answer: string; custom: boolean; recommended: boolean }> } } }> };
+  const tool = fake.tools.get("chalin_interview") as unknown as { execute: (...args: never[]) => Promise<{ content: Array<{ type: string; text: string }>; details: { interview?: { featureId: string; answers: Array<{ answer: string; custom: boolean; recommended: boolean }> } } }> };
   const cwd = tempDir("pi-chalin-interview-");
   const titles: string[] = [];
   const optionsSeen: string[][] = [];
@@ -385,10 +385,10 @@ test("mesh_interview asks TUI questions and persists artifact answers", async ()
   assert.match(JSON.stringify(state), /Do not touch billing yet/);
 });
 
-test("mesh_route executes the workflow chosen by the primary Pi agent", async () => {
+test("chalin_route executes the workflow chosen by the primary Pi agent", async () => {
   const fake = createFakePi();
   registerPiChalin(fake.api as never);
-  const tool = fake.tools.get("mesh_route") as unknown as { execute: (...args: never[]) => Promise<{ content: Array<{ type: string; text: string }>; details: unknown }> };
+  const tool = fake.tools.get("chalin_route") as unknown as { execute: (...args: never[]) => Promise<{ content: Array<{ type: string; text: string }>; details: unknown }> };
   assert.equal(typeof tool.execute, "function");
 
   const statuses: string[] = [];
@@ -420,9 +420,9 @@ test("mesh_route executes the workflow chosen by the primary Pi agent", async ()
   assert.match(text, /status: complete/);
   assert.match(text, /Final answer material:/);
   assert.match(text, /Supporting findings:/);
-  assert.ok(statuses.some((status) => status.startsWith("mesh ")));
+  assert.ok(statuses.some((status) => status.startsWith("chalin ")));
   assert.ok(statuses.some((status) => status.includes("review")));
-  assert.ok(widgets.every((args) => args[1] === undefined), "mesh_route may clear the legacy widget but must not create a duplicate persistent widget");
+  assert.ok(widgets.every((args) => args[1] === undefined), "chalin_route may clear the legacy widget but must not create a duplicate persistent widget");
 });
 
 test("finalAnswerMaterial preserves multi-agent analysis evidence instead of only last handoff", () => {
@@ -459,20 +459,20 @@ test("finalAnswerMaterial preserves multi-agent analysis evidence instead of onl
   assert.doesNotMatch(material ?? "", /truncated reviewer/);
 });
 
-test("mesh_route completion nudges the parent agent to synthesize", async () => {
+test("chalin_route completion nudges the parent agent to synthesize", async () => {
   const fake = createFakePi();
   registerPiChalin(fake.api as never);
   const handler = fake.handlers.get("tool_execution_end")?.[0] as (event: unknown, ctx: unknown) => void;
   assert.equal(typeof handler, "function");
 
-  handler({ type: "tool_execution_end", toolName: "mesh_route", isError: false, result: {} }, {});
+  handler({ type: "tool_execution_end", toolName: "chalin_route", isError: false, result: {} }, {});
 
   assert.equal(fake.messages.length, 1);
   assert.deepEqual(fake.messages[0]?.options, { triggerTurn: false, deliverAs: "steer" });
   assert.match(String((fake.messages[0]?.message as { content?: unknown }).content), /Answer the user's original prompt now/);
 });
 
-test("mesh_route approval blocks do not trigger synthesis shutdown", async () => {
+test("chalin_route approval blocks do not trigger synthesis shutdown", async () => {
   const fake = createFakePi();
   registerPiChalin(fake.api as never);
   const handler = fake.handlers.get("tool_execution_end")?.[0] as (event: unknown, ctx: unknown) => void;
@@ -481,7 +481,7 @@ test("mesh_route approval blocks do not trigger synthesis shutdown", async () =>
   handler(
     {
       type: "tool_execution_end",
-      toolName: "mesh_route",
+      toolName: "chalin_route",
       isError: false,
       result: { details: { approval: { action: "ask", reason: "Route risk medium needs approval." } } },
     },
@@ -495,7 +495,7 @@ test("mesh_route approval blocks do not trigger synthesis shutdown", async () =>
   assert.match(String((fake.messages[0]?.message as { content?: unknown }).content), /did not execute work/i);
 });
 
-test("mesh_route completion exits non-interactive print mode after the tool result", async () => {
+test("chalin_route completion exits non-interactive print mode after the tool result", async () => {
   const previousDelay = process.env.PI_CHALIN_NONINTERACTIVE_SHUTDOWN_DELAY_MS;
   process.env.PI_CHALIN_NONINTERACTIVE_SHUTDOWN_DELAY_MS = "0";
   try {
@@ -505,7 +505,7 @@ test("mesh_route completion exits non-interactive print mode after the tool resu
     let shutdownCalled = false;
 
     handler(
-      { type: "tool_execution_end", toolName: "mesh_route", isError: false, result: {} },
+      { type: "tool_execution_end", toolName: "chalin_route", isError: false, result: {} },
       { hasUI: false, shutdown: () => { shutdownCalled = true; } },
     );
 
@@ -519,11 +519,11 @@ test("mesh_route completion exits non-interactive print mode after the tool resu
 
 
 
-test("mesh_route rejects a second committed workflow in the same prompt", async () => {
+test("chalin_route rejects a second committed workflow in the same prompt", async () => {
   const fake = createFakePi();
   registerPiChalin(fake.api as never);
   const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<{ systemPrompt?: string } | undefined>;
-  const tool = fake.tools.get("mesh_route") as unknown as { execute: (...args: never[]) => Promise<{ content: Array<{ type: string; text: string }>; details: unknown }> };
+  const tool = fake.tools.get("chalin_route") as unknown as { execute: (...args: never[]) => Promise<{ content: Array<{ type: string; text: string }>; details: unknown }> };
   const ctx = {
     cwd: tempDir("pi-chalin-double-route-"),
     hasUI: true,
@@ -550,10 +550,10 @@ test("mesh_route rejects a second committed workflow in the same prompt", async 
   assert.match(second.content.map((part) => part.text).join("\n"), /already executed for this user prompt/);
 });
 
-test("mesh_resume continues the latest persisted paused run instead of returning partial findings", async () => {
+test("chalin_resume continues the latest persisted paused run instead of returning partial findings", async () => {
   const fake = createFakePi();
   registerPiChalin(fake.api as never);
-  const tool = fake.tools.get("mesh_resume") as unknown as { execute: (...args: never[]) => Promise<{ content: Array<{ type: string; text: string }>; details: { run?: RunState } }> };
+  const tool = fake.tools.get("chalin_resume") as unknown as { execute: (...args: never[]) => Promise<{ content: Array<{ type: string; text: string }>; details: { run?: RunState } }> };
   const cwd = tempDir("pi-chalin-resume-tool-");
   const route: RunState["route"] = {
     kind: "multi-agent-chain",
@@ -598,13 +598,13 @@ test("mesh_resume continues the latest persisted paused run instead of returning
 });
 
 
-test("mesh footer text is compact and animated", () => {
-  assert.equal(meshFooterText({ kind: "idle" }), "mesh ◦ idle");
-  assert.equal(meshFooterText({ kind: "off" }), "mesh × off");
-  assert.equal(meshFooterText({ kind: "running", intent: "branch summary", agent: "scout", completed: 0, total: 2 }, 0), "mesh ◆ branch summary · scout 0/2");
-  assert.equal(meshFooterText({ kind: "running", intent: "branch summary", agent: "scout", completed: 0, total: 2 }, 1), "mesh ◇ branch summary · scout 0/2");
-  assert.equal(meshFooterText({ kind: "synthesizing" }, 1), "mesh ◇ synthesizing");
-  assert.equal(meshFooterText({ kind: "complete", intent: "review project" }), "mesh ✓ review project");
+test("chalin footer text is compact and animated", () => {
+  assert.equal(chalinFooterText({ kind: "idle" }), "chalin ◦ idle");
+  assert.equal(chalinFooterText({ kind: "off" }), "chalin × off");
+  assert.equal(chalinFooterText({ kind: "running", intent: "branch summary", agent: "scout", completed: 0, total: 2 }, 0), "chalin ◆ branch summary · scout 0/2");
+  assert.equal(chalinFooterText({ kind: "running", intent: "branch summary", agent: "scout", completed: 0, total: 2 }, 1), "chalin ◇ branch summary · scout 0/2");
+  assert.equal(chalinFooterText({ kind: "synthesizing" }, 1), "chalin ◇ synthesizing");
+  assert.equal(chalinFooterText({ kind: "complete", intent: "review project" }), "chalin ✓ review project");
 });
 
 test("pi-chalin input hook lets normal prompts continue", async () => {
@@ -612,20 +612,20 @@ test("pi-chalin input hook lets normal prompts continue", async () => {
   registerPiChalin(fake.api as never);
   const handler = fake.handlers.get("input")?.[0] as (event: unknown, ctx: unknown) => Promise<{ action: string }>;
   const result = await handler(
-    { type: "input", text: "hello mesh", source: "interactive" },
+    { type: "input", text: "hello chalin", source: "interactive" },
     { cwd: tempDir("pi-chalin-auto-"), hasUI: false, ui: { notify: () => {}, setStatus: () => {} }, modelRegistry: { getAvailable: () => [] } },
   );
   assert.equal(result.action, "continue");
 });
 
-test("/mesh shows active run status while subagents are running", async () => {
+test("/chalin shows active run status while subagents are running", async () => {
   const fake = createFakePi();
   registerPiChalin(fake.api as never);
-  const command = fake.commands.get("mesh") as { handler: (args: string, ctx: unknown) => Promise<void>; getArgumentCompletions?: (prefix: string) => Array<{ value: string; label: string }> | null };
+  const command = fake.commands.get("chalin") as { handler: (args: string, ctx: unknown) => Promise<void>; getArgumentCompletions?: (prefix: string) => Array<{ value: string; label: string }> | null };
   assert.equal(typeof command.handler, "function");
 
   const run: RunState = {
-    id: "mesh-live",
+    id: "chalin-live",
     route: {
       kind: "multi-agent-chain",
       agents: ["scout", "reviewer"],
@@ -642,7 +642,7 @@ test("/mesh shows active run status while subagents are running", async () => {
       { id: "step-1", agent: "scout", task: "Map project", status: "complete" },
       { id: "step-2", agent: "reviewer", task: "Review project", status: "running" },
     ],
-    logsPath: "/tmp/mesh-live.json",
+    logsPath: "/tmp/chalin-live.json",
     warnings: [],
   };
   setLatestRun(run);
@@ -665,16 +665,16 @@ test("/mesh shows active run status while subagents are running", async () => {
     },
   });
 
-  assert.deepEqual(notifications, [], "active /mesh should open controls without printing into the transcript");
+  assert.deepEqual(notifications, [], "active /chalin should open controls without printing into the transcript");
   assert.deepEqual(selectedTitles, ["pi-chalin Control"]);
-  assert.ok(widgets.every((entry) => entry.content === undefined), "/mesh may clear the legacy widget but must not create a second persistent widget; the tool-result tree is the single live surface");
-  assert.match(statuses.join("\n"), /mesh .*chain.*reviewer 1\/2/);
-  assert.doesNotMatch(notifications.join("\n"), /Abort \(placeholder\)|run: mesh-live|step-2 running reviewer/);
+  assert.ok(widgets.every((entry) => entry.content === undefined), "/chalin may clear the legacy widget but must not create a second persistent widget; the tool-result tree is the single live surface");
+  assert.match(statuses.join("\n"), /chalin .*chain.*reviewer 1\/2/);
+  assert.doesNotMatch(notifications.join("\n"), /Abort \(placeholder\)|run: chalin-live|step-2 running reviewer/);
 });
 
-test("mesh result widget counts budget-capped checkpoints as progressed work", () => {
+test("chalin result widget counts budget-capped checkpoints as progressed work", () => {
   const run: RunState = {
-    id: "mesh-budget-panel",
+    id: "chalin-budget-panel",
     route: { kind: "multi-agent-dag", agents: ["scout", "context-builder"], risk: "low", ambiguity: "low", needsMemory: false, needsArtifacts: true, reason: "test" },
     status: "running",
     startedAt: new Date().toISOString(),
@@ -685,14 +685,14 @@ test("mesh result widget counts budget-capped checkpoints as progressed work", (
     ],
   };
 
-  const preview = formatMeshRunWidget(run);
+  const preview = formatChalinRunWidget(run);
 
   assert.match(preview, /1\/2/);
   assert.match(preview, /✓ scout/);
   assert.match(preview, /Project mapped enough to continue/);
 });
 
-test("/mesh Smart Panel does not auto-open memory when pending memories exist", async () => {
+test("/chalin Smart Panel does not auto-open memory when pending memories exist", async () => {
   const selectedTitles: string[] = [];
   const selectedOptions: string[][] = [];
   let memoryOpened = false;
@@ -767,10 +767,10 @@ test("Memory Review uses compact list items and a detail drill-down", async () =
 });
 
 
-test("/mesh completions expose Activity instead of technical Runs", () => {
+test("/chalin completions expose Activity instead of technical Runs", () => {
   const fake = createFakePi();
   registerPiChalin(fake.api as never);
-  const command = fake.commands.get("mesh") as { getArgumentCompletions?: (prefix: string) => Array<{ value: string; label: string }> | null };
+  const command = fake.commands.get("chalin") as { getArgumentCompletions?: (prefix: string) => Array<{ value: string; label: string }> | null };
   const completions = command.getArgumentCompletions?.("") ?? [];
 
   assert.ok(completions.some((item) => item.value === "activity"));
@@ -780,7 +780,7 @@ test("/mesh completions expose Activity instead of technical Runs", () => {
 
 test("summarizeRuntimeGuards surfaces policy, budget, worktree, and model fallback state", () => {
   const lines = summarizeRuntimeGuards({
-    id: "mesh-test",
+    id: "chalin-test",
     route: { kind: "multi-agent-parallel", agents: ["worker"], risk: "medium", ambiguity: "low", needsMemory: false, needsArtifacts: true, reason: "test" },
     status: "complete",
     startedAt: new Date().toISOString(),
@@ -821,8 +821,8 @@ test("summarizeRuntimeGuards surfaces policy, budget, worktree, and model fallba
 });
 
 
-test("mesh_route renders a compact agent tree widget instead of a plain tool label", () => {
-  const planned = formatMeshRoutePlanWidget({
+test("chalin_route renders a compact agent tree widget instead of a plain tool label", () => {
+  const planned = formatChalinRoutePlanWidget({
     task: "revisa este proyecto en profundidad",
     topology: "chain",
     steps: [
@@ -834,10 +834,10 @@ test("mesh_route renders a compact agent tree widget instead of a plain tool lab
   assert.match(planned, /pi-chalin · chain/);
   assert.match(planned, /├ ○ scout/);
   assert.match(planned, /└ ○ context-builder/);
-  assert.doesNotMatch(planned, /^mesh_route$/m);
+  assert.doesNotMatch(planned, /^chalin_route$/m);
 
-  const running = formatMeshRunWidget({
-    id: "mesh-test",
+  const running = formatChalinRunWidget({
+    id: "chalin-test",
     route: { kind: "multi-agent-chain", agents: ["scout", "context-builder"], risk: "low", ambiguity: "low", needsMemory: false, needsArtifacts: true, reason: "test" },
     status: "running",
     startedAt: new Date().toISOString(),
@@ -854,9 +854,9 @@ test("mesh_route renders a compact agent tree widget instead of a plain tool lab
   assert.match(running, /tools: 0 · guards: checking/);
 });
 
-test("mesh_route marks budget-capped handoff steps as checkpointed, not pending", () => {
-  const running = formatMeshRunWidget({
-    id: "mesh-budget-live",
+test("chalin_route marks budget-capped handoff steps as checkpointed, not pending", () => {
+  const running = formatChalinRunWidget({
+    id: "chalin-budget-live",
     route: { kind: "multi-agent-dag", agents: ["scout", "context-builder"], risk: "low", ambiguity: "low", needsMemory: false, needsArtifacts: true, reason: "test" },
     status: "running",
     startedAt: new Date().toISOString(),
@@ -881,9 +881,9 @@ test("mesh_route marks budget-capped handoff steps as checkpointed, not pending"
   assert.doesNotMatch(running, /├ ○ scout/);
 });
 
-test("mesh_route failed DAG highlights the failed step and marks downstream pending work as skipped", () => {
-  const failed = formatMeshRunWidget({
-    id: "mesh-failed-dag",
+test("chalin_route failed DAG highlights the failed step and marks downstream pending work as skipped", () => {
+  const failed = formatChalinRunWidget({
+    id: "chalin-failed-dag",
     route: { kind: "multi-agent-dag", agents: ["scout", "context-builder", "context-builder"], risk: "low", ambiguity: "low", needsMemory: false, needsArtifacts: true, reason: "test" },
     status: "failed",
     startedAt: new Date().toISOString(),
@@ -912,7 +912,7 @@ test("mesh_route failed DAG highlights the failed step and marks downstream pend
 
 test("summarizeRuntimeGuards labels budget-only caps without scary attention", () => {
   const lines = summarizeRuntimeGuards({
-    id: "mesh-budget",
+    id: "chalin-budget",
     route: { kind: "multi-agent-dag", agents: ["scout"], risk: "low", ambiguity: "low", needsMemory: false, needsArtifacts: true, reason: "test" },
     status: "complete",
     startedAt: new Date().toISOString(),

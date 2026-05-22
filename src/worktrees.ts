@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { MeshPathsOptions } from "./paths.ts";
+import type { ChalinPathsOptions } from "./paths.ts";
 import type { AgentDefinition, AgentStep } from "./schemas.ts";
 
 export interface WorktreeIsolationPlan {
@@ -21,7 +21,7 @@ export function needsWorktreeIsolation(steps: AgentStep[], agents: Map<string, A
   return steps.filter((step) => isWriterAgent(agents.get(step.agent))).length > 1;
 }
 
-export function prepareWorktreeIsolation(options: MeshPathsOptions & { runId: string; steps: AgentStep[]; agents: Map<string, AgentDefinition> }): WorktreeIsolationPlan {
+export function prepareWorktreeIsolation(options: ChalinPathsOptions & { runId: string; steps: AgentStep[]; agents: Map<string, AgentDefinition> }): WorktreeIsolationPlan {
   if (!needsWorktreeIsolation(options.steps, options.agents)) {
     return { enabled: false, reason: "No parallel writer contention detected.", worktrees: [], warnings: [] };
   }

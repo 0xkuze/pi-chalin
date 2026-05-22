@@ -1,13 +1,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { resolveMeshPaths, type MeshPathsOptions } from "./paths.ts";
+import { resolveChalinPaths, type ChalinPathsOptions } from "./paths.ts";
 import { isAgentThinkingLevel, riskRank, type AgentScope, type AgentThinkingLevel, type ApprovalDecision, type RouteDecision, type RouteRisk } from "./schemas.ts";
 
 export type AutonomyLevel = "low" | "balanced" | "high";
 export type ApprovalRiskThreshold = RouteRisk;
 export type ModelPersistenceTarget = "session" | "project" | "user";
 
-export interface MeshConfig {
+export interface ChalinConfig {
   enabled: boolean;
   autonomy: AutonomyLevel;
   safety: {
@@ -24,13 +24,13 @@ export interface MeshConfig {
   };
 }
 
-export interface LoadedMeshConfig {
-  config: MeshConfig;
+export interface LoadedChalinConfig {
+  config: ChalinConfig;
   diagnostics: string[];
-  paths: ReturnType<typeof resolveMeshPaths>;
+  paths: ReturnType<typeof resolveChalinPaths>;
 }
 
-export const DEFAULT_CONFIG: MeshConfig = {
+export const DEFAULT_CONFIG: ChalinConfig = {
   enabled: true,
   autonomy: "balanced",
   safety: {
@@ -81,7 +81,7 @@ function readJsonObject(filePath: string, diagnostics: string[]): Record<string,
   }
 }
 
-function coerceConfig(input: MeshConfig, diagnostics: string[]): MeshConfig {
+function coerceConfig(input: ChalinConfig, diagnostics: string[]): ChalinConfig {
   const config = deepMerge(DEFAULT_CONFIG, input);
 
   if (!["low", "balanced", "high"].includes(config.autonomy)) {
@@ -121,8 +121,8 @@ function coerceConfig(input: MeshConfig, diagnostics: string[]): MeshConfig {
   return config;
 }
 
-export function loadEffectiveConfig(options: MeshPathsOptions): LoadedMeshConfig {
-  const paths = resolveMeshPaths(options);
+export function loadEffectiveConfig(options: ChalinPathsOptions): LoadedChalinConfig {
+  const paths = resolveChalinPaths(options);
   const diagnostics: string[] = [];
   const projectConfig = readJsonObject(paths.projectConfigPath, diagnostics);
   const userConfig = readJsonObject(paths.userConfigPath, diagnostics);
@@ -130,7 +130,7 @@ export function loadEffectiveConfig(options: MeshPathsOptions): LoadedMeshConfig
   return { config: coerceConfig(merged, diagnostics), diagnostics, paths };
 }
 
-export function writeProjectConfig(options: MeshPathsOptions, configPatch: Partial<MeshConfig>): LoadedMeshConfig {
+export function writeProjectConfig(options: ChalinPathsOptions, configPatch: Partial<ChalinConfig>): LoadedChalinConfig {
   const loaded = loadEffectiveConfig(options);
   const current = readJsonObject(loaded.paths.projectConfigPath, []);
   const next = deepMerge(current, configPatch);
@@ -139,7 +139,7 @@ export function writeProjectConfig(options: MeshPathsOptions, configPatch: Parti
   return loadEffectiveConfig(options);
 }
 
-export function writeUserConfig(options: MeshPathsOptions, configPatch: Partial<MeshConfig>): LoadedMeshConfig {
+export function writeUserConfig(options: ChalinPathsOptions, configPatch: Partial<ChalinConfig>): LoadedChalinConfig {
   const loaded = loadEffectiveConfig(options);
   const current = readJsonObject(loaded.paths.userConfigPath, []);
   const next = deepMerge(current, configPatch);
@@ -149,34 +149,34 @@ export function writeUserConfig(options: MeshPathsOptions, configPatch: Partial<
 }
 
 export function setAgentModelOverride(
-  options: MeshPathsOptions,
+  options: ChalinPathsOptions,
   agentRef: string,
   model: string | undefined,
   target: Exclude<ModelPersistenceTarget, "session">,
-): LoadedMeshConfig {
+): LoadedChalinConfig {
   const loaded = loadEffectiveConfig(options);
   const overrides = { ...loaded.config.agents.modelOverrides };
   if (model) overrides[agentRef] = model;
   else delete overrides[agentRef];
-  const patch: Partial<MeshConfig> = { agents: { ...loaded.config.agents, modelOverrides: overrides } };
+  const patch: Partial<ChalinConfig> = { agents: { ...loaded.config.agents, modelOverrides: overrides } };
   return target === "project" ? writeProjectConfig(options, patch) : writeUserConfig(options, patch);
 }
 
 export function setAgentThinkingOverride(
-  options: MeshPathsOptions,
+  options: ChalinPathsOptions,
   agentRef: string,
   thinking: AgentThinkingLevel | undefined,
   target: Exclude<ModelPersistenceTarget, "session">,
-): LoadedMeshConfig {
+): LoadedChalinConfig {
   const loaded = loadEffectiveConfig(options);
   const overrides = { ...loaded.config.agents.thinkingOverrides };
   if (thinking && thinking !== "inherit") overrides[agentRef] = thinking;
   else delete overrides[agentRef];
-  const patch: Partial<MeshConfig> = { agents: { ...loaded.config.agents, thinkingOverrides: overrides } };
+  const patch: Partial<ChalinConfig> = { agents: { ...loaded.config.agents, thinkingOverrides: overrides } };
   return target === "project" ? writeProjectConfig(options, patch) : writeUserConfig(options, patch);
 }
 
-export function approvalDecision(config: MeshConfig, route: RouteDecision): ApprovalDecision {
+export function approvalDecision(config: ChalinConfig, route: RouteDecision): ApprovalDecision {
   if (route.kind === "bypass" || route.kind === "memory-only") return { action: "allow", reason: "No subagent execution required." };
   if (route.risk === "critical" && config.safety.blockCritical) {
     return { action: "block", reason: "Critical routes are blocked by default safety policy." };

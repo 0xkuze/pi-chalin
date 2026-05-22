@@ -478,8 +478,8 @@ test("workflow eval CLI helpers keep live runs bounded", () => {
   assert.equal(resolveWorkflowInfraRetries(undefined), 1);
   assert.equal(resolveWorkflowInfraRetries("99"), 2);
   assert.equal(resolveWorkflowInfraRetries("0"), 0);
-  assert.deepEqual(resolveVariants(undefined), ["simple", "mesh"]);
-  assert.deepEqual(resolveVariants("mesh"), ["mesh"]);
+  assert.deepEqual(resolveVariants(undefined), ["simple", "chalin"]);
+  assert.deepEqual(resolveVariants("chalin"), ["chalin"]);
   assert.ok(resolveCaseIds("all").length >= 6);
   assert.deepEqual(resolveCaseIds("holdout"), listWorkflowHoldoutCases().map((item) => item.id));
   assert.deepEqual(resolveCaseIds("community"), listWorkflowCommunityCases().map((item) => item.id));
@@ -518,21 +518,21 @@ test("workflow presets expand long package scripts without environment variables
 test("workflow SDK budget guard rejects accidental long matrices", () => {
   assert.throws(() => assertSdkRunBudget({
     caseIds: resolveCaseIds("all-with-holdout"),
-    variants: ["simple", "mesh"],
+    variants: ["simple", "chalin"],
     runs: 3,
     timeoutMs: 30_000,
     args: {},
   }), /Refusing long SDK matrix by default/);
   assert.doesNotThrow(() => assertSdkRunBudget({
     caseIds: ["large-feature-rate-limit"],
-    variants: ["mesh"],
+    variants: ["chalin"],
     runs: 3,
     timeoutMs: 30_000,
     args: {},
   }));
   assert.doesNotThrow(() => assertSdkRunBudget({
     caseIds: resolveCaseIds("all-with-holdout"),
-    variants: ["simple", "mesh"],
+    variants: ["simple", "chalin"],
     runs: 3,
     timeoutMs: 30_000,
     args: { allowLong: "1" },
@@ -544,11 +544,11 @@ test("workflow report filenames include case variant run and unique token", () =
     startedAt: "2026-05-20T22:47:43.785Z",
     mode: "sdk",
     cases: ["holdout-scaffold-config-loader"],
-    variants: ["mesh"],
+    variants: ["chalin"],
     runs: 3,
     token: "pid-1234",
   });
-  assert.equal(filename, "workflow-quality-2026-05-20T22-47-43-785Z-sdk-holdout-scaffold-config-loader-mesh-r3-pid-1234.json");
+  assert.equal(filename, "workflow-quality-2026-05-20T22-47-43-785Z-sdk-holdout-scaffold-config-loader-chalin-r3-pid-1234.json");
 });
 
 test("workflow report writer uses exclusive creation and retries on collision", () => {
@@ -557,7 +557,7 @@ test("workflow report writer uses exclusive creation and retries on collision", 
     startedAt: "2026-05-20T22:47:43.785Z",
     mode: "sdk",
     cases: ["add-unit-test-edge-case"],
-    variants: ["mesh"] as const,
+    variants: ["chalin"] as const,
     runs: 3,
   };
   const first = writeWorkflowReport(reportDir, report, { tokenFactory: () => "same-token", content: "first\n" });
@@ -572,11 +572,11 @@ test("workflow report writer uses exclusive creation and retries on collision", 
   fs.rmSync(reportDir, { recursive: true, force: true });
 });
 
-test("workflow regression gates catch direct-eligible mesh route regressions", () => {
+test("workflow regression gates catch direct-eligible chalin route regressions", () => {
   assert.equal(workflowRegressionGatesEnabled({ gates: "1" }), true);
   assert.equal(workflowRegressionGatesEnabled({}), false);
   const output = {
-    variant: "mesh",
+    variant: "chalin",
     runIndex: 1,
     workspace: { caseId: "refactor-pricing", pass: true, score: 100 },
     trace: { pass: true, score: 100, warnings: [], critical: [] },
@@ -585,8 +585,8 @@ test("workflow regression gates catch direct-eligible mesh route regressions", (
       finalAnswerMissing: false,
       objectiveStopReason: undefined,
       duplicateToolCalls: 0,
-      meshRouteCalls: 1,
-      meshRouteNonExecutable: 1,
+      chalinRouteCalls: 1,
+      chalinRouteNonExecutable: 1,
     },
     judge: undefined,
   } as never;
@@ -594,10 +594,10 @@ test("workflow regression gates catch direct-eligible mesh route regressions", (
     caseId: "refactor-pricing",
     pass: true,
     reason: "ok",
-    variants: { mesh: { passRate: 1, avgWorkspaceScore: 100, avgTraceScore: 100, p95DurationMs: 1_000 } },
+    variants: { chalin: { passRate: 1, avgWorkspaceScore: 100, avgTraceScore: 100, p95DurationMs: 1_000 } },
   }] as never);
   assert.equal(gates.pass, false);
-  assert.ok(gates.failures.some((item) => /direct-eligible case called mesh_route/.test(item)));
+  assert.ok(gates.failures.some((item) => /direct-eligible case called chalin_route/.test(item)));
 });
 
 test("workflow regression gates treat simple baseline failures as warnings", () => {
@@ -611,25 +611,25 @@ test("workflow regression gates treat simple baseline failures as warnings", () 
       finalAnswerMissing: true,
       objectiveStopReason: undefined,
       duplicateToolCalls: 0,
-      meshRouteCalls: 0,
-      meshRouteNonExecutable: 0,
+      chalinRouteCalls: 0,
+      chalinRouteNonExecutable: 0,
     },
     judge: undefined,
   } as never;
   const gates = evaluateWorkflowRegressionGates([baselineFailure], [{
     caseId: "large-feature-rate-limit",
     pass: true,
-    reason: "mesh beats flaky baseline",
-    variants: { simple: { passRate: 0, avgWorkspaceScore: 63, avgTraceScore: 0, p95DurationMs: 30_000 }, mesh: { passRate: 1, avgWorkspaceScore: 94, avgTraceScore: 100, p95DurationMs: 20_000 } },
+    reason: "chalin beats flaky baseline",
+    variants: { simple: { passRate: 0, avgWorkspaceScore: 63, avgTraceScore: 0, p95DurationMs: 30_000 }, chalin: { passRate: 1, avgWorkspaceScore: 94, avgTraceScore: 100, p95DurationMs: 20_000 } },
   }] as never);
   assert.equal(gates.pass, true);
   assert.equal(gates.failures.length, 0);
   assert.ok(gates.warnings.some((item) => /simple large-feature-rate-limit#1: output did not pass/.test(item)));
 });
 
-test("workflow regression gates fail mesh runs that never execute verification", () => {
+test("workflow regression gates fail chalin runs that never execute verification", () => {
   const missingVerification = {
-    variant: "mesh",
+    variant: "chalin",
     runIndex: 1,
     workspace: { caseId: "holdout-scaffold-config-loader", pass: true, score: 100 },
     trace: { pass: true, score: 100, warnings: [], critical: [] },
@@ -638,8 +638,8 @@ test("workflow regression gates fail mesh runs that never execute verification",
       finalAnswerMissing: false,
       verificationPassed: false,
       duplicateToolCalls: 0,
-      meshRouteCalls: 0,
-      meshRouteNonExecutable: 0,
+      chalinRouteCalls: 0,
+      chalinRouteNonExecutable: 0,
     },
     judge: undefined,
   } as never;
@@ -647,29 +647,29 @@ test("workflow regression gates fail mesh runs that never execute verification",
     caseId: "holdout-scaffold-config-loader",
     pass: true,
     reason: "workspace-only pass is insufficient",
-    variants: { mesh: { passRate: 1, avgWorkspaceScore: 100, avgTraceScore: 100, p95DurationMs: 10_000 } },
+    variants: { chalin: { passRate: 1, avgWorkspaceScore: 100, avgTraceScore: 100, p95DurationMs: 10_000 } },
   }] as never);
   assert.equal(gates.pass, false);
   assert.ok(gates.failures.some((item) => /did not execute a passing verification command/.test(item)));
 });
 
-test("workflow comparison allows small quality and p95 variance when mesh still passes strongly", () => {
+test("workflow comparison allows small quality and p95 variance when chalin still passes strongly", () => {
   const gates = evaluateWorkflowRegressionGates([], [{
     caseId: "holdout-bugfix-date-parser",
     pass: true,
-    reason: "mesh within tolerance",
+    reason: "chalin within tolerance",
     variants: {
       simple: { passRate: 1, avgWorkspaceScore: 100, avgTraceScore: 100, p95DurationMs: 14_601 },
-      mesh: { passRate: 1, avgWorkspaceScore: 97, avgTraceScore: 100, p95DurationMs: 25_355 },
+      chalin: { passRate: 1, avgWorkspaceScore: 97, avgTraceScore: 100, p95DurationMs: 25_355 },
     },
   }] as never);
   assert.equal(gates.pass, true);
 });
 
-test("workflow regression gates warn on recovered-infra p95 when all mesh runs pass", () => {
+test("workflow regression gates warn on recovered-infra p95 when all chalin runs pass", () => {
   const outputs = [
     {
-      variant: "mesh",
+      variant: "chalin",
       runIndex: 1,
       workspace: { caseId: "community-react-debounce-hook", pass: true, score: 100 },
       trace: { pass: true, score: 100, warnings: [], critical: [] },
@@ -679,8 +679,8 @@ test("workflow regression gates warn on recovered-infra p95 when all mesh runs p
         finalAnswerMissing: false,
         verificationPassed: true,
         duplicateToolCalls: 0,
-        meshRouteCalls: 0,
-        meshRouteNonExecutable: 0,
+        chalinRouteCalls: 0,
+        chalinRouteNonExecutable: 0,
       },
       judge: undefined,
     },
@@ -689,14 +689,14 @@ test("workflow regression gates warn on recovered-infra p95 when all mesh runs p
     caseId: "community-react-debounce-hook",
     pass: true,
     reason: "all quality checks passed",
-    variants: { mesh: { passRate: 1, avgWorkspaceScore: 100, avgTraceScore: 100, p95DurationMs: 64_000 } },
+    variants: { chalin: { passRate: 1, avgWorkspaceScore: 100, avgTraceScore: 100, p95DurationMs: 64_000 } },
   }] as never);
   assert.equal(gates.pass, true);
   assert.ok(gates.warnings.some((item) => /p95 .* recovered infrastructure retry/.test(item)));
 });
 
 test("workflow comparison does not fail p95 solely from a recovered infrastructure retry", () => {
-  const output = (variant: "simple" | "mesh", runIndex: number, durationMs: number, recovered = false) => ({
+  const output = (variant: "simple" | "chalin", runIndex: number, durationMs: number, recovered = false) => ({
     variant,
     runIndex,
     durationMs,
@@ -708,8 +708,8 @@ test("workflow comparison does not fail p95 solely from a recovered infrastructu
       finalAnswerMissing: false,
       verificationPassed: true,
       duplicateToolCalls: 0,
-      meshRouteCalls: 0,
-      meshRouteNonExecutable: 0,
+      chalinRouteCalls: 0,
+      chalinRouteNonExecutable: 0,
       toolEvents: 1,
       readCalls: 0,
       writeCalls: 0,
@@ -723,13 +723,13 @@ test("workflow comparison does not fail p95 solely from a recovered infrastructu
     output("simple", 1, 8_000),
     output("simple", 2, 9_000),
     output("simple", 3, 12_000),
-    output("mesh", 1, 8_500),
-    output("mesh", 2, 9_500),
-    output("mesh", 3, 40_000, true),
+    output("chalin", 1, 8_500),
+    output("chalin", 2, 9_500),
+    output("chalin", 3, 40_000, true),
   ] as never);
 
   assert.equal(grouped[0]?.pass, true);
-  assert.match(grouped[0]?.reason ?? "", /meshP95RecoveredInfra=true/);
+  assert.match(grouped[0]?.reason ?? "", /chalinP95RecoveredInfra=true/);
 });
 
 test("workflow fixture retention keeps failed SDK workspaces for root-cause analysis", () => {
@@ -757,7 +757,7 @@ test("workflow fixture retention keeps failed SDK workspaces for root-cause anal
 
 test("workflow failure UX summarizes what happened and the next step", () => {
   const failures = summarizeWorkflowFailures([{
-    variant: "mesh",
+    variant: "chalin",
     runIndex: 2,
     retainedFixturePath: "/tmp/pi-chalin-fixture",
     workspace: { caseId: "holdout-scaffold-config-loader", pass: true, score: 100 },
@@ -886,7 +886,7 @@ test("workflow judge auto mode only triggers for ambiguous deterministic passes"
   const workspace = scoreWorkflowWorkspace(fixture.cwd, fixture.case, { finalText: "src/filterTasks.ts test/filterTasks.test.ts" });
   const output = { workspace, trace: { pass: true, score: 100, warnings: [] }, diagnostics: { jsonEvents: 0, toolEvents: 0, toolCallsByName: {}, duplicateToolCalls: 0, readCalls: 0, writeCalls: 0, editCalls: 0, retries: 0, tokenTotal: 0 } } as unknown as Parameters<typeof shouldRunWorkflowJudge>[0];
   assert.equal(shouldRunWorkflowJudge(output), workspace.metrics.validation.status === "skipped");
-  const prompt = buildWorkflowJudgePrompt({ variant: "mesh", finalText: "done", workspace, trace: output.trace, diagnostics: output.diagnostics } as unknown as never, fixture.case);
+  const prompt = buildWorkflowJudgePrompt({ variant: "chalin", finalText: "done", workspace, trace: output.trace, diagnostics: output.diagnostics } as unknown as never, fixture.case);
   assert.match(prompt, /SOLO JSON/);
   fs.rmSync(fixture.cwd, { recursive: true, force: true });
 });
@@ -905,12 +905,12 @@ test("workflow matrix aggregate uses latest row per case and reports variant eff
     {
       caseId: "case-a",
       pass: false,
-      stats: { mesh: { runs: 1, passCount: 0, passRate: 0, avgWorkspaceScore: 60, p95DurationMs: 40_000, totalTokens: 10, estimatedCostUsd: 0.1, infrastructureFailures: 1 } },
+      stats: { chalin: { runs: 1, passCount: 0, passRate: 0, avgWorkspaceScore: 60, p95DurationMs: 40_000, totalTokens: 10, estimatedCostUsd: 0.1, infrastructureFailures: 1 } },
     },
     {
       caseId: "case-a",
       pass: true,
-      stats: { mesh: { runs: 3, passCount: 3, passRate: 1, avgWorkspaceScore: 100, p95DurationMs: 20_000, totalTokens: 90, estimatedCostUsd: 0.9, infrastructureFailures: 0 } },
+      stats: { chalin: { runs: 3, passCount: 3, passRate: 1, avgWorkspaceScore: 100, p95DurationMs: 20_000, totalTokens: 90, estimatedCostUsd: 0.9, infrastructureFailures: 0 } },
       regressionGates: { pass: true, warnings: ["recovered infra"] },
     },
     {
@@ -922,9 +922,9 @@ test("workflow matrix aggregate uses latest row per case and reports variant eff
 
   assert.equal(aggregate.pass, true);
   assert.equal(aggregate.cases, 2);
-  assert.equal(aggregate.variants.mesh?.runs, 3);
-  assert.equal(aggregate.variants.mesh?.passRate, 1);
-  assert.equal(aggregate.variants.mesh?.p95DurationMs, 20_000);
+  assert.equal(aggregate.variants.chalin?.runs, 3);
+  assert.equal(aggregate.variants.chalin?.passRate, 1);
+  assert.equal(aggregate.variants.chalin?.p95DurationMs, 20_000);
   assert.equal(aggregate.variants.simple?.passRate, 0.667);
   assert.deepEqual(aggregate.warnings, ["case-a: recovered infra"]);
 });
@@ -935,13 +935,13 @@ test("workflow matrix aggregate does not spread shard-level gate failure across 
     {
       caseId: "case-a",
       pass: true,
-      stats: { mesh: { runs: 3, passCount: 3, passRate: 1, avgWorkspaceScore: 100, p95DurationMs: 10_000, totalTokens: 10, estimatedCostUsd: 0.1 } },
+      stats: { chalin: { runs: 3, passCount: 3, passRate: 1, avgWorkspaceScore: 100, p95DurationMs: 10_000, totalTokens: 10, estimatedCostUsd: 0.1 } },
       regressionGates: { pass: false, failures: ["case-b failed in same shard"] },
     },
     {
       caseId: "case-b",
       pass: false,
-      stats: { mesh: { runs: 3, passCount: 2, passRate: 0.667, avgWorkspaceScore: 80, p95DurationMs: 20_000, totalTokens: 20, estimatedCostUsd: 0.2 } },
+      stats: { chalin: { runs: 3, passCount: 2, passRate: 0.667, avgWorkspaceScore: 80, p95DurationMs: 20_000, totalTokens: 20, estimatedCostUsd: 0.2 } },
       regressionGates: { pass: false, failures: ["case-b failed"] },
     },
   ]);

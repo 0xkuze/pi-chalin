@@ -1,4 +1,4 @@
-export type TraceVariant = "simple" | "mesh";
+export type TraceVariant = "simple" | "chalin";
 export type TraceIssueSeverity = "critical" | "warning" | "suggestion";
 
 export interface TraceToolEvent {
@@ -18,8 +18,8 @@ export interface ParsedPiTrace {
   toolEvents: TraceToolEvent[];
   assistantText: string;
   assistantTextChars: number;
-  meshRouteResults: string[];
-  meshRouteArgs: string[];
+  chalinRouteResults: string[];
+  chalinRouteArgs: string[];
   lastEventType?: string;
 }
 
@@ -36,18 +36,18 @@ export interface TraceQualityReport {
   promptKind: "deep-project-analysis" | "generic";
   pass: boolean;
   score: number;
-  effectiveAnswerSource: "mesh_route" | "assistant" | "provided-final" | "stdout" | "none";
+  effectiveAnswerSource: "chalin_route" | "assistant" | "provided-final" | "stdout" | "none";
   effectiveAnswerChars: number;
   metrics: {
     jsonEvents: number;
     nonJsonLines: number;
     toolEvents: number;
-    meshRouteStarts: number;
-    meshRouteEnds: number;
-    meshRouteApprovalBlocked: number;
-    meshRouteNonExecutable: number;
-    meshRouteResultChars: number;
-    exploratoryParentToolsAfterMesh: number;
+    chalinRouteStarts: number;
+    chalinRouteEnds: number;
+    chalinRouteApprovalBlocked: number;
+    chalinRouteNonExecutable: number;
+    chalinRouteResultChars: number;
+    exploratoryParentToolsAfterChalin: number;
     durationMs?: number;
   };
   critical: TraceIssue[];
@@ -65,7 +65,7 @@ export interface GradePiTraceOptions {
   durationMs?: number;
   maxDurationMs?: number;
   minAnswerChars?: number;
-  requireMeshRoute?: boolean;
+  requireChalinRoute?: boolean;
 }
 
 const EXPLORATORY_PARENT_TOOLS = new Set(["read", "bash", "grep", "find", "ls", "glob"]);
@@ -74,8 +74,8 @@ const DEFAULT_MIN_DEEP_ANSWER_CHARS = 700;
 export function parsePiJsonTrace(stdout: string): ParsedPiTrace {
   const eventTypes: Record<string, number> = {};
   const toolEvents: TraceToolEvent[] = [];
-  const meshRouteResults: string[] = [];
-  const meshRouteArgs: string[] = [];
+  const chalinRouteResults: string[] = [];
+  const chalinRouteArgs: string[] = [];
   const assistantTexts: string[] = [];
   let currentAssistantText = "";
   let jsonEvents = 0;
@@ -116,9 +116,9 @@ export function parsePiJsonTrace(stdout: string): ParsedPiTrace {
 
     for (const toolEvent of extractToolEvents(parsed, toolEvents.length)) {
       toolEvents.push(toolEvent);
-      if (toolEvent.name === "mesh_route") {
-        if (toolEvent.argsText.trim()) meshRouteArgs.push(toolEvent.argsText.trim());
-        if (toolEvent.resultText.trim()) meshRouteResults.push(toolEvent.resultText.trim());
+      if (toolEvent.name === "chalin_route") {
+        if (toolEvent.argsText.trim()) chalinRouteArgs.push(toolEvent.argsText.trim());
+        if (toolEvent.resultText.trim()) chalinRouteResults.push(toolEvent.resultText.trim());
       }
     }
   }
@@ -131,20 +131,20 @@ export function parsePiJsonTrace(stdout: string): ParsedPiTrace {
     toolEvents,
     assistantText,
     assistantTextChars: Math.max(assistantTextChars, assistantText.length),
-    meshRouteResults,
-    meshRouteArgs,
+    chalinRouteResults,
+    chalinRouteArgs,
     lastEventType,
   };
 }
 
 export function gradePiTrace(stdout: string, options: GradePiTraceOptions = {}): TraceQualityReport {
-  const variant = options.variant ?? "mesh";
+  const variant = options.variant ?? "chalin";
   const promptKind = options.promptKind ?? "deep-project-analysis";
   const trace = parsePiJsonTrace(stdout);
-  const lastMeshResult = trace.meshRouteResults.at(-1)?.trim() ?? "";
+  const lastChalinResult = trace.chalinRouteResults.at(-1)?.trim() ?? "";
   const providedFinal = options.finalText?.trim() ?? "";
   const assistant = trace.assistantText.trim();
-  const effective = chooseEffectiveAnswer({ variant, lastMeshResult, lastMeshResultBlocked: isNonExecutableMeshResult(lastMeshResult), providedFinal, assistant, stdout });
+  const effective = chooseEffectiveAnswer({ variant, lastChalinResult, lastChalinResultBlocked: isNonExecutableChalinResult(lastChalinResult), providedFinal, assistant, stdout });
   const issues: TraceIssue[] = [];
 
   const add = (issue: TraceIssue) => issues.push(issue);
@@ -162,41 +162,41 @@ export function gradePiTrace(stdout: string, options: GradePiTraceOptions = {}):
     add({ id: "duration-budget-exceeded", severity: "warning", message: "La corrida excedió el presupuesto de duración definido para evals rápidas.", evidence: `${options.durationMs}ms > ${options.maxDurationMs}ms`, penalty: 12 });
   }
 
-  const meshStarts = trace.toolEvents.filter((item) => item.name === "mesh_route" && item.phase === "start").length;
-  const meshEnds = trace.toolEvents.filter((item) => item.name === "mesh_route" && item.phase === "end").length;
-  const meshApprovalBlocked = countApprovalBlockedMeshRoutes(trace.toolEvents);
-  const meshNonExecutable = countNonExecutableMeshRoutes(trace.toolEvents);
-  const meshResultChars = lastMeshResult.length;
+  const chalinStarts = trace.toolEvents.filter((item) => item.name === "chalin_route" && item.phase === "start").length;
+  const chalinEnds = trace.toolEvents.filter((item) => item.name === "chalin_route" && item.phase === "end").length;
+  const chalinApprovalBlocked = countApprovalBlockedChalinRoutes(trace.toolEvents);
+  const chalinNonExecutable = countNonExecutableChalinRoutes(trace.toolEvents);
+  const chalinResultChars = lastChalinResult.length;
 
-  const requireMeshRoute = options.requireMeshRoute ?? (variant === "mesh" && promptKind === "deep-project-analysis");
+  const requireChalinRoute = options.requireChalinRoute ?? (variant === "chalin" && promptKind === "deep-project-analysis");
 
-  if (variant === "mesh") {
-    if (requireMeshRoute && meshEnds === 0) {
-      add({ id: "missing-mesh-route-result", severity: "critical", message: "La variante mesh no produjo resultado de `mesh_route`.", penalty: 40 });
+  if (variant === "chalin") {
+    if (requireChalinRoute && chalinEnds === 0) {
+      add({ id: "missing-chalin-route-result", severity: "critical", message: "La variante chalin no produjo resultado de `chalin_route`.", penalty: 40 });
     }
-    if (meshEnds > 1) {
-      add({ id: "repeated-mesh-route", severity: "warning", message: "El parent llamó `mesh_route` más de una vez; puede indicar loop/orquestación ineficiente.", evidence: `${meshEnds} completions`, penalty: 12 });
+    if (chalinEnds > 1) {
+      add({ id: "repeated-chalin-route", severity: "warning", message: "El parent llamó `chalin_route` más de una vez; puede indicar loop/orquestación ineficiente.", evidence: `${chalinEnds} completions`, penalty: 12 });
     }
-    if (meshStarts > 1 && meshEnds <= 1) {
-      add({ id: "restarted-mesh-route", severity: "warning", message: "Hay múltiples inicios de `mesh_route`; revisar retries o eventos duplicados.", evidence: `${meshStarts} starts`, penalty: 8 });
+    if (chalinStarts > 1 && chalinEnds <= 1) {
+      add({ id: "restarted-chalin-route", severity: "warning", message: "Hay múltiples inicios de `chalin_route`; revisar retries o eventos duplicados.", evidence: `${chalinStarts} starts`, penalty: 8 });
     }
   }
 
-  const exploratoryAfterMesh = countExploratoryParentToolsAfterExecutableMesh(trace.toolEvents);
-  if (variant === "mesh" && exploratoryAfterMesh > 0) {
-    add({ id: "parent-tools-after-mesh", severity: "warning", message: "El parent siguió explorando con tools directas después de terminar `mesh_route`; suele romper el contrato de delegación.", evidence: `${exploratoryAfterMesh} exploratory tool events`, penalty: 10 });
+  const exploratoryAfterChalin = countExploratoryParentToolsAfterExecutableChalin(trace.toolEvents);
+  if (variant === "chalin" && exploratoryAfterChalin > 0) {
+    add({ id: "parent-tools-after-chalin", severity: "warning", message: "El parent siguió explorando con tools directas después de terminar `chalin_route`; suele romper el contrato de delegación.", evidence: `${exploratoryAfterChalin} exploratory tool events`, penalty: 10 });
   }
-  if (variant === "mesh" && meshApprovalBlocked > 0) {
-    add({ id: "mesh-route-approval-blocked", severity: "suggestion", message: "`mesh_route` quedó bloqueado por approval; si el parent recupera con tools directas, no debe contarse como exploración post-mesh.", evidence: `${meshApprovalBlocked} blocked route result(s)`, penalty: 0 });
+  if (variant === "chalin" && chalinApprovalBlocked > 0) {
+    add({ id: "chalin-route-approval-blocked", severity: "suggestion", message: "`chalin_route` quedó bloqueado por approval; si el parent recupera con tools directas, no debe contarse como exploración post-chalin.", evidence: `${chalinApprovalBlocked} blocked route result(s)`, penalty: 0 });
   }
-  if (variant === "mesh" && meshNonExecutable > meshApprovalBlocked) {
-    add({ id: "mesh-route-direct-recommended", severity: "suggestion", message: "`mesh_route` recomendó ejecución directa; si el parent recupera con tools nativas, no debe contarse como handoff mesh ejecutado.", evidence: `${meshNonExecutable - meshApprovalBlocked} direct recommendation(s)`, penalty: 0 });
+  if (variant === "chalin" && chalinNonExecutable > chalinApprovalBlocked) {
+    add({ id: "chalin-route-direct-recommended", severity: "suggestion", message: "`chalin_route` recomendó ejecución directa; si el parent recupera con tools nativas, no debe contarse como handoff chalin ejecutado.", evidence: `${chalinNonExecutable - chalinApprovalBlocked} direct recommendation(s)`, penalty: 0 });
   }
 
   const answerText = effective.text;
   const minAnswerChars = options.minAnswerChars ?? (promptKind === "deep-project-analysis" ? DEFAULT_MIN_DEEP_ANSWER_CHARS : 120);
   if (!answerText.trim()) {
-    add({ id: "missing-answer", severity: "critical", message: "No hay texto final evaluable ni material de `mesh_route`.", penalty: 45 });
+    add({ id: "missing-answer", severity: "critical", message: "No hay texto final evaluable ni material de `chalin_route`.", penalty: 45 });
   } else if (answerText.length < minAnswerChars && !hasConciseImplementationEvidence(answerText, promptKind)) {
     add({ id: "thin-answer", severity: "warning", message: "La respuesta/material final es demasiado corto para una revisión profunda.", evidence: `${answerText.length} chars`, penalty: 14 });
   }
@@ -204,7 +204,7 @@ export function gradePiTrace(stdout: string, options: GradePiTraceOptions = {}):
   if (promptKind === "deep-project-analysis") {
     const discoveryEvidence = hasDiscoveryEvidence(trace, answerText);
     if (!discoveryEvidence) {
-      add({ id: "missing-discovery-first-evidence", severity: "warning", message: "No hay señal de `mesh_project_discovery` ni de discovery-first en la traza/material.", penalty: 12 });
+      add({ id: "missing-discovery-first-evidence", severity: "warning", message: "No hay señal de `chalin_project_discovery` ni de discovery-first en la traza/material.", penalty: 12 });
     }
     if (!hasPathEvidence(answerText)) {
       add({ id: "missing-file-evidence", severity: "critical", message: "Una revisión profunda sin paths/archivos concretos no es auditable.", penalty: 25 });
@@ -214,8 +214,8 @@ export function gradePiTrace(stdout: string, options: GradePiTraceOptions = {}):
     }
   }
 
-  if (variant === "mesh" && providedFinal && lastMeshResult && providedFinal.length < Math.min(400, lastMeshResult.length / 2)) {
-    add({ id: "partial-parent-final", severity: "suggestion", message: "El texto final del parent parece parcial; para scoring se usó el material completo de `mesh_route`.", evidence: `final=${providedFinal.length}, mesh_result=${lastMeshResult.length}`, penalty: 0 });
+  if (variant === "chalin" && providedFinal && lastChalinResult && providedFinal.length < Math.min(400, lastChalinResult.length / 2)) {
+    add({ id: "partial-parent-final", severity: "suggestion", message: "El texto final del parent parece parcial; para scoring se usó el material completo de `chalin_route`.", evidence: `final=${providedFinal.length}, chalin_result=${lastChalinResult.length}`, penalty: 0 });
   }
 
   const penalty = issues.reduce((sum, issue) => sum + issue.penalty, 0);
@@ -234,12 +234,12 @@ export function gradePiTrace(stdout: string, options: GradePiTraceOptions = {}):
       jsonEvents: trace.jsonEvents,
       nonJsonLines: trace.nonJsonLines,
       toolEvents: trace.toolEvents.length,
-      meshRouteStarts: meshStarts,
-      meshRouteEnds: meshEnds,
-      meshRouteApprovalBlocked: meshApprovalBlocked,
-      meshRouteNonExecutable: meshNonExecutable,
-      meshRouteResultChars: meshResultChars,
-      exploratoryParentToolsAfterMesh: exploratoryAfterMesh,
+      chalinRouteStarts: chalinStarts,
+      chalinRouteEnds: chalinEnds,
+      chalinRouteApprovalBlocked: chalinApprovalBlocked,
+      chalinRouteNonExecutable: chalinNonExecutable,
+      chalinRouteResultChars: chalinResultChars,
+      exploratoryParentToolsAfterChalin: exploratoryAfterChalin,
       durationMs: options.durationMs,
     },
     critical,
@@ -278,8 +278,8 @@ export function parseTraceJudgeVerdict(text: string): TraceJudgeVerdict {
   return { pass, score, verdict, critical, warnings };
 }
 
-function chooseEffectiveAnswer(input: { variant: TraceVariant; lastMeshResult: string; lastMeshResultBlocked: boolean; providedFinal: string; assistant: string; stdout: string }): { source: TraceQualityReport["effectiveAnswerSource"]; text: string } {
-  if (input.variant === "mesh" && input.lastMeshResult && !input.lastMeshResultBlocked) return { source: "mesh_route", text: input.lastMeshResult };
+function chooseEffectiveAnswer(input: { variant: TraceVariant; lastChalinResult: string; lastChalinResultBlocked: boolean; providedFinal: string; assistant: string; stdout: string }): { source: TraceQualityReport["effectiveAnswerSource"]; text: string } {
+  if (input.variant === "chalin" && input.lastChalinResult && !input.lastChalinResultBlocked) return { source: "chalin_route", text: input.lastChalinResult };
   if (input.providedFinal) return { source: "provided-final", text: input.providedFinal };
   if (input.assistant) return { source: "assistant", text: input.assistant };
   const trimmedStdout = input.stdout.trim();
@@ -295,7 +295,7 @@ function extractToolEvents(parsed: unknown, indexBase: number): TraceToolEvent[]
   const phase = phaseFromType(type);
   const events: TraceToolEvent[] = [];
 
-  if (directToolName && (phase !== "unknown" || directToolName === "mesh_route" || Boolean(result))) {
+  if (directToolName && (phase !== "unknown" || directToolName === "chalin_route" || Boolean(result))) {
     events.push({
       name: directToolName,
       phase,
@@ -334,25 +334,25 @@ function phaseFromType(type: string | undefined): TraceToolEvent["phase"] {
   return "unknown";
 }
 
-function countExploratoryParentToolsAfterExecutableMesh(toolEvents: TraceToolEvent[]): number {
-  const lastMeshEndIndex = toolEvents.findLastIndex((item) => item.name === "mesh_route" && item.phase === "end" && !isNonExecutableMeshResult(item.resultText));
-  if (lastMeshEndIndex < 0) return 0;
-  return toolEvents.slice(lastMeshEndIndex + 1).filter((item) => EXPLORATORY_PARENT_TOOLS.has(item.name) && item.phase !== "end").length;
+function countExploratoryParentToolsAfterExecutableChalin(toolEvents: TraceToolEvent[]): number {
+  const lastChalinEndIndex = toolEvents.findLastIndex((item) => item.name === "chalin_route" && item.phase === "end" && !isNonExecutableChalinResult(item.resultText));
+  if (lastChalinEndIndex < 0) return 0;
+  return toolEvents.slice(lastChalinEndIndex + 1).filter((item) => EXPLORATORY_PARENT_TOOLS.has(item.name) && item.phase !== "end").length;
 }
 
-function countApprovalBlockedMeshRoutes(toolEvents: TraceToolEvent[]): number {
-  return toolEvents.filter((item) => item.name === "mesh_route" && item.phase === "end" && isApprovalBlockedMeshResult(item.resultText)).length;
+function countApprovalBlockedChalinRoutes(toolEvents: TraceToolEvent[]): number {
+  return toolEvents.filter((item) => item.name === "chalin_route" && item.phase === "end" && isApprovalBlockedChalinResult(item.resultText)).length;
 }
 
-function countNonExecutableMeshRoutes(toolEvents: TraceToolEvent[]): number {
-  return toolEvents.filter((item) => item.name === "mesh_route" && item.phase === "end" && isNonExecutableMeshResult(item.resultText)).length;
+function countNonExecutableChalinRoutes(toolEvents: TraceToolEvent[]): number {
+  return toolEvents.filter((item) => item.name === "chalin_route" && item.phase === "end" && isNonExecutableChalinResult(item.resultText)).length;
 }
 
-function isNonExecutableMeshResult(text: string): boolean {
-  return isApprovalBlockedMeshResult(text) || /\bstatus:\s*direct-recommended\b|direct execution recommended|pi-chalin direct execution recommended/i.test(text);
+function isNonExecutableChalinResult(text: string): boolean {
+  return isApprovalBlockedChalinResult(text) || /\bstatus:\s*direct-recommended\b|direct execution recommended|pi-chalin direct execution recommended/i.test(text);
 }
 
-function isApprovalBlockedMeshResult(text: string): boolean {
+function isApprovalBlockedChalinResult(text: string): boolean {
   return /\bApproval:\s*(ask|block)\b/i.test(text)
     || /\bstatus:\s*(ask|block)\b/i.test(text)
     || /did not execute because approval is required/i.test(text);
@@ -361,11 +361,11 @@ function isApprovalBlockedMeshResult(text: string): boolean {
 function hasDiscoveryEvidence(trace: ParsedPiTrace, answerText: string): boolean {
   const haystack = [
     answerText,
-    trace.meshRouteArgs.join("\n"),
-    trace.meshRouteResults.join("\n"),
+    trace.chalinRouteArgs.join("\n"),
+    trace.chalinRouteResults.join("\n"),
     trace.toolEvents.map((item) => `${item.name} ${item.argsText} ${item.resultText}`).join("\n"),
   ].join("\n");
-  return /mesh_project_discovery|Project Discovery Index|Cached Project Discovery Index|discovery[- ]first|índice de descubrimiento/i.test(haystack);
+  return /chalin_project_discovery|Project Discovery Index|Cached Project Discovery Index|discovery[- ]first|índice de descubrimiento/i.test(haystack);
 }
 
 function hasPathEvidence(text: string): boolean {

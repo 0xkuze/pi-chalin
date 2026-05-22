@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
-import { resolveMeshPaths, type MeshPathsOptions } from "./paths.ts";
+import { resolveChalinPaths, type ChalinPathsOptions } from "./paths.ts";
 
 export interface ProjectSnapshot {
   version: 1;
@@ -67,7 +67,7 @@ const HIGH_SIGNAL_ROOT_FILES = [
 const ENTRYPOINT_DIRS = ["cmd", "src", "app", "pages", "components", "internal", "pkg", "lib", "server", "api"];
 const TEST_DIRS = ["test", "tests", "__tests__", "spec", "e2e"];
 
-export function buildProjectSnapshot(options: MeshPathsOptions & { maxAgeMs?: number }): ProjectSnapshot {
+export function buildProjectSnapshot(options: ChalinPathsOptions & { maxAgeMs?: number }): ProjectSnapshot {
   const cwd = path.resolve(options.cwd ?? process.cwd());
   const cachePath = projectSnapshotCachePath({ cwd });
   const cacheKey = computeCacheKey(cwd);
@@ -96,8 +96,8 @@ export function formatProjectSnapshot(snapshot: ProjectSnapshot): string {
   ].filter((line): line is string => Boolean(line)).join("\n");
 }
 
-export function projectSnapshotCachePath(options: MeshPathsOptions): string {
-  return path.join(resolveMeshPaths(options).projectRoot, ".pi-chalin", "cache", "project-snapshot.json");
+export function projectSnapshotCachePath(options: ChalinPathsOptions): string {
+  return path.join(resolveChalinPaths(options).projectRoot, ".pi-chalin", "cache", "project-snapshot.json");
 }
 
 function createProjectSnapshot(cwd: string, cacheKey: string): ProjectSnapshot {

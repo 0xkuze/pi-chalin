@@ -6,7 +6,7 @@ import { afterEach, test } from "bun:test";
 import { ArtifactStore } from "../src/artifacts.ts";
 
 import { openArtifactPanel } from "../src/ui.ts";
-import { MeshKernel, routeFromPlan } from "../src/kernel.ts";
+import { ChalinKernel, routeFromPlan } from "../src/kernel.ts";
 
 const tempDirs: string[] = [];
 afterEach(() => { while (tempDirs.length > 0) fs.rmSync(tempDirs.pop()!, { recursive: true, force: true }); });
@@ -66,7 +66,7 @@ test("ArtifactStore persists resumable feature state with checkpoints and valida
   assert.ok(fs.existsSync(path.join(cwd, ".pi-chalin", "artifacts", "features", "memory-and-artifacts", "skills", "memory-worker", "SKILL.md")));
 });
 
-test("MeshKernel records run artifacts for long or artifact-aware workflows", async () => {
+test("ChalinKernel records run artifacts for long or artifact-aware workflows", async () => {
   const cwd = tempDir("pi-chalin-artifacts-kernel-");
   const route = routeFromPlan({
     topology: "chain",
@@ -77,7 +77,7 @@ test("MeshKernel records run artifacts for long or artifact-aware workflows", as
     needsArtifacts: true,
   });
 
-  const result = await new MeshKernel({ cwd }).handleRoute(route, "review this project", { cwd });
+  const result = await new ChalinKernel({ cwd }).handleRoute(route, "review this project", { cwd });
   assert.equal(result.run?.status, "complete");
 
   const store = new ArtifactStore({ cwd });

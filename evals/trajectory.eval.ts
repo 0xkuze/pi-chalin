@@ -93,7 +93,7 @@ function badRun(): RunState {
 
 function budgetCheckpointRun(): RunState {
   return baseRun("budget-capped", [
-    step("context-builder", "budget-capped", { mesh_project_snapshot: 1, read: 8 }, {
+    step("context-builder", "budget-capped", { chalin_project_snapshot: 1, read: 8 }, {
       text: "## Findings\n- src/kernel.ts owns route execution.\n## Handoff\nPartial but useful handoff. Continue with reviewer.",
       filesRead: ["src/kernel.ts", "src/runner.ts"],
       budgetStopCount: 1,

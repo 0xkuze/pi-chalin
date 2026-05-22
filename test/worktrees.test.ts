@@ -29,7 +29,7 @@ test("worktree isolation creates isolated branches and merges clean patches", ()
   git(cwd, ["add", "."]);
   git(cwd, ["commit", "-m", "init"]);
   const agents = new Map([["worker-a", agent("worker-a", ["edit-files"])], ["worker-b", agent("worker-b", ["write-new-files"])]]) as Map<string, AgentDefinition>;
-  const plan = prepareWorktreeIsolation({ cwd, runId: "mesh-test", steps: [{ agent: "worker-a", task: "a" }, { agent: "worker-b", task: "b" }], agents });
+  const plan = prepareWorktreeIsolation({ cwd, runId: "chalin-test", steps: [{ agent: "worker-a", task: "a" }, { agent: "worker-b", task: "b" }], agents });
   assert.equal(plan.enabled, true, plan.warnings.join("\n"));
   assert.equal(plan.worktrees.length, 2);
   fs.appendFileSync(path.join(plan.worktrees[0]!.path, "a.txt"), "two\n");
@@ -51,7 +51,7 @@ test("worktree isolation allows dirty primary worktrees but detects overlapping 
   fs.writeFileSync(path.join(cwd, "a.txt"), "local dirty change\n");
 
   const agents = new Map([["worker-a", agent("worker-a", ["edit-files"])], ["worker-b", agent("worker-b", ["write-new-files"])]]) as Map<string, AgentDefinition>;
-  const plan = prepareWorktreeIsolation({ cwd, runId: "mesh-dirty", steps: [{ agent: "worker-a", task: "a" }, { agent: "worker-b", task: "b" }], agents });
+  const plan = prepareWorktreeIsolation({ cwd, runId: "chalin-dirty", steps: [{ agent: "worker-a", task: "a" }, { agent: "worker-b", task: "b" }], agents });
 
   assert.equal(plan.enabled, true, plan.warnings.join("\n"));
   assert.match(plan.warnings.join("\n"), /dirty primary worktree/i);
@@ -77,7 +77,7 @@ test("worktree merge includes new untracked files from isolated writers", () => 
   git(cwd, ["commit", "-m", "init"]);
 
   const agents = new Map([["worker-a", agent("worker-a", ["write-new-files"])], ["worker-b", agent("worker-b", ["edit-files"])]]) as Map<string, AgentDefinition>;
-  const plan = prepareWorktreeIsolation({ cwd, runId: "mesh-new-file", steps: [{ agent: "worker-a", task: "add test" }, { agent: "worker-b", task: "edit" }], agents });
+  const plan = prepareWorktreeIsolation({ cwd, runId: "chalin-new-file", steps: [{ agent: "worker-a", task: "add test" }, { agent: "worker-b", task: "edit" }], agents });
   assert.equal(plan.enabled, true, plan.warnings.join("\n"));
   fs.mkdirSync(path.join(plan.worktrees[0]!.path, "tests"), { recursive: true });
   fs.writeFileSync(path.join(plan.worktrees[0]!.path, "tests", "new.test.js"), "export const ok = true;\n");

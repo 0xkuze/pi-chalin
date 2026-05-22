@@ -68,7 +68,7 @@ test("child write tool is blocked for existing files", async () => {
 
 test("child tool policy blocks tools outside capabilities", () => {
   const dir = tempDir("pi-chalin-allowed-tools-");
-  const policy = createChildToolPolicy({ cwd: dir, maxToolCalls: 5, agentName: "planner", allowedTools: ["mesh_project_snapshot", "read"] });
+  const policy = createChildToolPolicy({ cwd: dir, maxToolCalls: 5, agentName: "planner", allowedTools: ["chalin_project_snapshot", "read"] });
 
   const gate = policy.beforeTool("bash", { command: "git status --short" });
 
@@ -79,8 +79,8 @@ test("child tool policy blocks tools outside capabilities", () => {
 
 test("controlled child artifact tool writes checkpoints and validation contracts", async () => {
   const dir = tempDir("pi-chalin-child-artifact-");
-  const policy = createChildToolPolicy({ cwd: dir, maxToolCalls: 5, agentName: "worker", allowedTools: ["mesh_artifact_write"] });
-  const tool = createChildTools(policy).find((candidate) => candidate.name === "mesh_artifact_write");
+  const policy = createChildToolPolicy({ cwd: dir, maxToolCalls: 5, agentName: "worker", allowedTools: ["chalin_artifact_write"] });
+  const tool = createChildTools(policy).find((candidate) => candidate.name === "chalin_artifact_write");
   assert.ok(tool);
 
   const checkpoint = await tool.execute("tool-1", {
@@ -111,9 +111,9 @@ test("controlled child artifact tool writes checkpoints and validation contracts
 
 test("child tools expose only policy-allowed definitions to reduce child prompt bloat", () => {
   const dir = tempDir("pi-chalin-child-tools-prune-");
-  const policy = createChildToolPolicy({ cwd: dir, maxToolCalls: 5, agentName: "scout", allowedTools: ["read", "mesh_project_snapshot"] });
+  const policy = createChildToolPolicy({ cwd: dir, maxToolCalls: 5, agentName: "scout", allowedTools: ["read", "chalin_project_snapshot"] });
   const names = createChildTools(policy).map((tool) => tool.name).sort();
-  assert.deepEqual(names, ["mesh_project_snapshot", "read"]);
+  assert.deepEqual(names, ["chalin_project_snapshot", "read"]);
 });
 
 

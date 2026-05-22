@@ -3,7 +3,7 @@ import * as path from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentCapability, AgentDefinition, AgentThinkingLevel, ModelResolutionAttempt, ModelResolutionLog, RouteKind, ToolBudgetProfile } from "./schemas.ts";
 import { evaluateBudgetUsage, estimateBudgetPreflight, policyForStep, recordBudgetCheckpoint, summarizeToolUtility } from "./budget.ts";
-import { resolveMeshPaths, type MeshPathsOptions } from "./paths.ts";
+import { resolveChalinPaths, type ChalinPathsOptions } from "./paths.ts";
 import { createMemoryCandidate } from "./memory.ts";
 import type { AgentOutput, AgentStep, MemoryCandidate, RouteDecision, RoutePlan, RunState, RunStepMetrics, RunStepState, TokenUsageSummary } from "./schemas.ts";
 import { createChildToolPolicy, createChildTools, type ChildToolActivity, type ChildToolPolicy } from "./child-tools.ts";
@@ -17,7 +17,7 @@ interface SdkPromptOptions {
   synthesisGapReadLimit?: number;
 }
 
-export interface WorkerRunnerContext extends MeshPathsOptions {
+export interface WorkerRunnerContext extends ChalinPathsOptions {
   agents: Map<string, AgentDefinition>;
   modelOverrides?: Record<string, string>;
   thinkingOverrides?: Record<string, AgentThinkingLevel>;
@@ -555,14 +555,14 @@ function budgetPolicyForSdkStep(policy: ReturnType<typeof policyForStep>, agent:
 }
 
 export function createRunState(route: RouteDecision, cwd: string): RunState {
-  const id = `mesh-${Date.now().toString(36)}`;
+  const id = `chalin-${Date.now().toString(36)}`;
   return {
     id,
     route,
     status: "running",
     startedAt: new Date().toISOString(),
     steps: route.plan ? planSteps(route.plan) : [],
-    logsPath: path.join(resolveMeshPaths({ cwd }).projectRoot, ".pi-chalin", "runs", `${id}.json`),
+    logsPath: path.join(resolveChalinPaths({ cwd }).projectRoot, ".pi-chalin", "runs", `${id}.json`),
     warnings: [],
     budgetPreflight: estimateBudgetPreflight({
       task: route.reason,
@@ -596,8 +596,8 @@ function aggregateCompletedHandoffBefore(steps: RunStepState[], endIndex: number
     .map((step) => ({ agent: step.agent, text: step.output?.handoff ?? step.output?.text ?? "" })));
 }
 
-export function loadResumableRunState(options: MeshPathsOptions & { runId?: string }): RunState | undefined {
-  const runsDir = path.join(resolveMeshPaths(options).projectRoot, ".pi-chalin", "runs");
+export function loadResumableRunState(options: ChalinPathsOptions & { runId?: string }): RunState | undefined {
+  const runsDir = path.join(resolveChalinPaths(options).projectRoot, ".pi-chalin", "runs");
   if (!fs.existsSync(runsDir)) return undefined;
   const files = fs.readdirSync(runsDir)
     .filter((name) => name.endsWith(".json"))
@@ -997,8 +997,8 @@ export function buildSdkPrompt(agent: AgentDefinition | undefined, task: string,
     "",
     "## pi-chalin child tool policy",
     "- Use Pi-native tools directly: read/find/grep/ls for inspection, edit for minimal line-level changes.",
-    "- Use mesh_project_discovery first for broad project understanding. It is a raw file index, not semantic truth; read evidence files before making claims.",
-    "- Use mesh_project_snapshot only as legacy compact stack/git context or for branch-summary reconnaissance; never treat it as proof of architecture.",
+    "- Use chalin_project_discovery first for broad project understanding. It is a raw file index, not semantic truth; read evidence files before making claims.",
+    "- Use chalin_project_snapshot only as legacy compact stack/git context or for branch-summary reconnaissance; never treat it as proof of architecture.",
     "- Bash is guarded and only for safe inspection or explicit validation commands: git status/log/diff/show/rev-parse, pwd, ls, find, grep/rg, cat for one explicit small file, and known test/typecheck commands.",
     "- Never create temporary Python/Node/shell scripts to read, inspect, summarize, or modify project files.",
     "- Never modify files through bash. No redirection, tee, sed -i, rm/cp/mv/mkdir/touch/chmod, or generated scripts.",
@@ -1024,7 +1024,7 @@ export function buildSdkPrompt(agent: AgentDefinition | undefined, task: string,
     deepProjectAnalysis
       ? "- Output budget for deep analysis: `## Findings` max 10 evidence-backed bullets, `## Handoff` max 14 bullets or 2600 characters, `## Memory Candidates` max 3 bullets. Accuracy beats brevity; do not pad."
       : "- Output budget: `## Findings` max 5 bullets, `## Handoff` max 8 bullets or 1200 characters, `## Memory Candidates` max 3 bullets.",
-    "- For long-running work, use mesh_artifact_write only at meaningful boundaries: feature-state at start, checkpoint after a completed handoff, validation-contract before reviewer/worker handoff, worker-skill for reusable feature-specific rules.",
+    "- For long-running work, use chalin_artifact_write only at meaningful boundaries: feature-state at start, checkpoint after a completed handoff, validation-contract before reviewer/worker handoff, worker-skill for reusable feature-specific rules.",
     "- Do not paste raw command output or long code snippets. Cite file paths and line-level evidence when useful.",
     deepProjectAnalysis ? deepProjectAnalysisContract() : undefined,
     handoffGapMode ? handoffGapReadContract(options, agent) : undefined,
@@ -1042,7 +1042,7 @@ export function buildSdkPrompt(agent: AgentDefinition | undefined, task: string,
     task,
     "",
     "## Cached Project Discovery Index",
-    previous ? "Discovery index omitted because Previous Handoff is available. Call mesh_project_discovery only if the handoff lacks required repo facts." : discoveryIndex,
+    previous ? "Discovery index omitted because Previous Handoff is available. Call chalin_project_discovery only if the handoff lacks required repo facts." : discoveryIndex,
     "",
     "Return a concise result with these sections when useful:",
     "## Findings",
@@ -1120,11 +1120,11 @@ function taskNeedsBash(task: string, agent: AgentDefinition): boolean {
 }
 
 export function childToolNames(agent: AgentDefinition | undefined, task = "", needsArtifacts = false, hasPrevious = false): string[] {
-  if (hasPrevious && shouldUseHandoffOnlyMode(task, agent)) return taskNeedsArtifactWrite(task) && needsArtifacts ? ["mesh_artifact_write"] : [];
-  if (isSnapshotOnlyRecon(task, agent)) return ["mesh_project_discovery", "mesh_project_snapshot"];
+  if (hasPrevious && shouldUseHandoffOnlyMode(task, agent)) return taskNeedsArtifactWrite(task) && needsArtifacts ? ["chalin_artifact_write"] : [];
+  if (isSnapshotOnlyRecon(task, agent)) return ["chalin_project_discovery", "chalin_project_snapshot"];
   if (!agent?.capabilities.length) {
     const fallback = new Set(agent?.tools.length ? agent.tools : ["read", "grep", "find", "ls"]);
-    fallback.add("mesh_project_discovery");
+    fallback.add("chalin_project_discovery");
     return [...fallback];
   }
   const names = new Set<string>();
@@ -1139,9 +1139,9 @@ export function childToolNames(agent: AgentDefinition | undefined, task = "", ne
   if (hasAnyCapability(agent, ["run-safe-bash", "validate"]) && taskNeedsBash(task, agent)) names.add("bash");
   if (hasAnyCapability(agent, ["edit-files"])) names.add("edit");
   if (hasAnyCapability(agent, ["write-new-files"])) names.add("write");
-  if (hasAnyCapability(agent, ["external-context"]) && taskNeedsExternalContext(task, agent)) names.add("mesh_web_search");
-  if (needsArtifacts && taskNeedsArtifactWrite(task) && hasAnyCapability(agent, ["memory-write", "coordinate", "validate", "edit-files"])) names.add("mesh_artifact_write");
-  names.add("mesh_project_discovery");
+  if (hasAnyCapability(agent, ["external-context"]) && taskNeedsExternalContext(task, agent)) names.add("chalin_web_search");
+  if (needsArtifacts && taskNeedsArtifactWrite(task) && hasAnyCapability(agent, ["memory-write", "coordinate", "validate", "edit-files"])) names.add("chalin_artifact_write");
+  names.add("chalin_project_discovery");
   return [...names];
 }
 
@@ -1504,7 +1504,7 @@ function extractFindingLines(text: string): string[] {
 
 function firstSignalToolCall(metrics: RunStepMetrics): number {
   const readCalls = metrics.toolCallsByName.read ?? 0;
-  const snapshotCalls = metrics.toolCallsByName.mesh_project_snapshot ?? 0;
+  const snapshotCalls = metrics.toolCallsByName.chalin_project_snapshot ?? 0;
   if ((metrics.filesRead?.length ?? 0) > 0 || snapshotCalls > 0) return Math.max(1, Math.min(metrics.toolCalls, snapshotCalls || readCalls || 1));
   return metrics.toolCalls;
 }

@@ -43,7 +43,7 @@ export interface InterviewResult {
 const CUSTOM_OPTION = "Custom answer…";
 const SKIP_OPTION = "Skip / not sure";
 
-export async function runMeshInterview(
+export async function runChalinInterview(
   ctx: ExtensionContext,
   store: ArtifactStore,
   input: InterviewRequestInput,
@@ -111,7 +111,7 @@ export function formatInterviewResult(result: InterviewResult): string {
     `reason: ${compact(result.reason, 140)}`,
     result.answers.length ? "answers:" : "answers: none",
     ...result.answers.map((answer, index) => `${index + 1}. ${compact(answer.question, 90)} → ${compact(answer.answer, 120)}${answer.custom ? " (custom)" : answer.recommended ? " (recommended)" : ""}`),
-    result.status === "answered" ? "next: continue planning or call mesh_route with these answers as context." : "next: ask the user directly before running subagents.",
+    result.status === "answered" ? "next: continue planning or call chalin_route with these answers as context." : "next: ask the user directly before running subagents.",
   ];
   return lines.join("\n");
 }

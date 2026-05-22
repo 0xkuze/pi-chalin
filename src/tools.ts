@@ -5,12 +5,12 @@ import { mergedSessionModelOverrides, mergedSessionThinkingOverrides } from "./a
 import { AgentCatalog } from "./agents.ts";
 import { ArtifactStore } from "./artifacts.ts";
 import { loadEffectiveConfig } from "./config.ts";
-import { MeshKernel, routeFromPlan } from "./kernel.ts";
+import { ChalinKernel, routeFromPlan } from "./kernel.ts";
 import { MemoryStore } from "./memory.ts";
-import { formatInterviewResult, runMeshInterview, type InterviewRequestInput } from "./interview.ts";
+import { formatInterviewResult, runChalinInterview, type InterviewRequestInput } from "./interview.ts";
 import { loadResumableRunState } from "./runner.ts";
-import { beginMeshRouteInvocation, finishMeshRouteInvocation, setLatestRun, type MeshRouteOutcome } from "./runtime-state.ts";
-import { clearLegacyMeshControlWidget, openSafetyApproval, setMeshStatus } from "./ui.ts";
+import { beginChalinRouteInvocation, finishChalinRouteInvocation, setLatestRun, type ChalinRouteOutcome } from "./runtime-state.ts";
+import { clearLegacyChalinControlWidget, openSafetyApproval, setChalinStatus } from "./ui.ts";
 import { fetchWebUrls, formatWebBundle, searchWeb } from "./webfetch.ts";
 import type { AgentStep, RouteDecision, RunState, RunStatus } from "./schemas.ts";
 
@@ -46,7 +46,7 @@ const InterviewQuestionParams = Type.Object({
   allowCustom: Type.Optional(Type.Boolean({ description: "Allow a free-form custom answer. Defaults to true." })),
 });
 
-const MeshInterviewParams = Type.Object({
+const ChalinInterviewParams = Type.Object({
   featureId: Type.Optional(Type.String({ description: "Artifact id to persist interview answers under. Defaults from task." })),
   task: Type.String({ description: "Original user request or feature being clarified." }),
   reason: Type.String({ description: "Why clarification is required before planning or running agents." }),
@@ -54,7 +54,7 @@ const MeshInterviewParams = Type.Object({
   batchSize: Type.Optional(Type.Number({ description: "Maximum questions to ask in this batch. Default 5, hard max 5." })),
 });
 
-const MeshRouteParams = Type.Object({
+const ChalinRouteParams = Type.Object({
   task: Type.String({ description: "The user's request being handled." }),
   topology: Type.Union([
     Type.Literal("single"),
@@ -68,11 +68,11 @@ const MeshRouteParams = Type.Object({
   risk: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"), Type.Literal("critical")], { description: "Risk estimated by the primary Pi agent." })),
   needsMemory: Type.Optional(Type.Boolean({ description: "Whether pi-chalin should retrieve relevant project/user memory before running." })),
   needsArtifacts: Type.Optional(Type.Boolean({ description: "Whether the workflow is expected to inspect or create artifacts/files." })),
-  reason: Type.Optional(Type.String({ description: "Short rationale for using mesh instead of answering directly." })),
+  reason: Type.Optional(Type.String({ description: "Short rationale for using chalin instead of answering directly." })),
   dryRun: Type.Optional(Type.Boolean({ description: "If true, validate and preview the chosen route without running subagents." })),
 });
 
-type MeshRouteToolParams = {
+type ChalinRouteToolParams = {
   task: string;
   topology: "single" | "chain" | "parallel" | "dag" | "memory-only";
   steps?: Array<{ id?: string; agent: string; task: string; budget?: "tight" | "normal" | "deep" | "extended" }>;
@@ -84,7 +84,7 @@ type MeshRouteToolParams = {
   dryRun?: boolean;
 };
 
-type MeshRouteWidgetStep = {
+type ChalinRouteWidgetStep = {
   id?: string;
   agent: string;
   task?: string;
@@ -95,12 +95,12 @@ type MeshRouteWidgetStep = {
   handoff?: string;
 };
 
-type MeshRouteWidgetDetails = {
+type ChalinRouteWidgetDetails = {
   route?: RouteDecision;
   run?: {
     id: string;
     status: RunStatus;
-    steps: MeshRouteWidgetStep[];
+    steps: ChalinRouteWidgetStep[];
     metrics?: RunState["metrics"];
     warnings?: string[];
   };
@@ -112,7 +112,7 @@ const WebFreshnessParam = Type.Optional(Type.Union([
   Type.Literal("must-be-fresh"),
 ], { description: "Freshness policy. cache-ok uses local cache; prefer-fresh refreshes when possible; must-be-fresh bypasses cache." }));
 
-const MeshWebSearchParams = Type.Object({
+const ChalinWebSearchParams = Type.Object({
   query: Type.Optional(Type.String({ description: "Web search query." })),
   url: Type.Optional(Type.String({ description: "Single URL to fetch as clean web context." })),
   urls: Type.Optional(Type.Array(Type.String(), { description: "URLs to fetch as clean web context." })),
@@ -122,23 +122,23 @@ const MeshWebSearchParams = Type.Object({
 });
 
 
-const MeshArtifactResumeParams = Type.Object({
+const ChalinArtifactResumeParams = Type.Object({
   featureId: Type.String({ description: "Feature/task artifact id to resume, e.g. memory-and-artifacts." }),
 });
 
-const MeshResumeParams = Type.Object({
+const ChalinResumeParams = Type.Object({
   runId: Type.Optional(Type.String({ description: "Optional pi-chalin run id. If omitted, resumes the latest paused/stale run." })),
 });
 
-type MeshArtifactResumeToolParams = {
+type ChalinArtifactResumeToolParams = {
   featureId: string;
 };
 
-type MeshResumeToolParams = {
+type ChalinResumeToolParams = {
   runId?: string;
 };
 
-type MeshWebSearchToolParams = {
+type ChalinWebSearchToolParams = {
   query?: string;
   url?: string;
   urls?: string[];
@@ -147,49 +147,49 @@ type MeshWebSearchToolParams = {
   freshness?: "cache-ok" | "prefer-fresh" | "must-be-fresh";
 };
 
-export function registerMeshTools(pi: ExtensionAPI): void {
+export function registerChalinTools(pi: ExtensionAPI): void {
   pi.registerTool({
-    name: "mesh_interview",
-    label: "Mesh Interview",
+    name: "chalin_interview",
+    label: "Chalin Interview",
     description: "Ask blocking clarification questions in the TUI and persist answers as pi-chalin artifacts before planning or running subagents.",
-    promptSnippet: "mesh_interview: when the request is ambiguous or missing critical information, ask concise multiple-choice questions before mesh_route.",
+    promptSnippet: "chalin_interview: when the request is ambiguous or missing critical information, ask concise multiple-choice questions before chalin_route.",
     promptGuidelines: [
-      "Use mesh_interview before mesh_route when the user's request has unknown terms, missing scope, uncovered constraints, destructive/risky choices, or multiple valid directions with meaningful tradeoffs.",
+      "Use chalin_interview before chalin_route when the user's request has unknown terms, missing scope, uncovered constraints, destructive/risky choices, or multiple valid directions with meaningful tradeoffs.",
       "Ask only what blocks correct planning. Prefer one to five questions per batch. Each question must have two to five concise options and exactly one recommended option when possible.",
       "Always allow a custom answer unless the answer space must be constrained for safety.",
-      "After mesh_interview returns, use the persisted answers as artifact context and continue with planning or mesh_route only when you are confident enough.",
+      "After chalin_interview returns, use the persisted answers as artifact context and continue with planning or chalin_route only when you are confident enough.",
     ],
-    parameters: MeshInterviewParams,
+    parameters: ChalinInterviewParams,
     async execute(_toolCallId, params: InterviewRequestInput, _signal, _onUpdate, ctx) {
       const store = new ArtifactStore({ cwd: ctx.cwd });
-      const result = await runMeshInterview(ctx, store, params);
+      const result = await runChalinInterview(ctx, store, params);
       return textResult(formatInterviewResult(result), { interview: result });
     },
   });
 
   pi.registerTool({
-    name: "mesh_route",
-    label: "Mesh Route",
+    name: "chalin_route",
+    label: "Chalin Route",
     description: [
       "Run a pi-chalin workflow chosen by the primary Pi agent.",
-      "The caller decides whether mesh is needed, which agents to use, and whether the workflow is single, chained, parallel, DAG/staged, or memory-only.",
+      "The caller decides whether chalin is needed, which agents to use, and whether the workflow is single, chained, parallel, DAG/staged, or memory-only.",
       "Do not use for bounded explicit-file refactors/bugfixes; native tools are faster and pi-chalin will recommend direct execution for those.",
     ].join(" "),
-    promptSnippet: "mesh_route: delegate broad/risky/deep workflows to pi-chalin subagents; do not use for bounded explicit-file edits.",
+    promptSnippet: "chalin_route: delegate broad/risky/deep workflows to pi-chalin subagents; do not use for bounded explicit-file edits.",
     promptGuidelines: [
-      "Use mesh_route only when subagents materially improve quality, confidence, context isolation, or review; do not use it for simple direct answers.",
-      "Do not call mesh_route for explicit-file refactor/fix/add-test tasks with one to three named files unless the prompt says broad, risky, long-file, security/auth, migration, or no-rewrite.",
-      "Do not call mesh_route for bounded read-only mini-project reviews that explicitly forbid file modification; inspect directly and answer with path evidence.",
-      "When using mesh_route, choose the minimal agent topology yourself and provide concrete tasks with success criteria.",
+      "Use chalin_route only when subagents materially improve quality, confidence, context isolation, or review; do not use it for simple direct answers.",
+      "Do not call chalin_route for explicit-file refactor/fix/add-test tasks with one to three named files unless the prompt says broad, risky, long-file, security/auth, migration, or no-rewrite.",
+      "Do not call chalin_route for bounded read-only mini-project reviews that explicitly forbid file modification; inspect directly and answer with path evidence.",
+      "When using chalin_route, choose the minimal agent topology yourself and provide concrete tasks with success criteria.",
       "Use dag topology for staged fan-out/fan-in: for example scout first, multiple folder/module agents in parallel, then reviewer/context-builder synthesis.",
-      "After mesh_route returns, immediately answer the user from its Final answer material; do not call more tools unless it explicitly says a critical gap remains.",
+      "After chalin_route returns, immediately answer the user from its Final answer material; do not call more tools unless it explicitly says a critical gap remains.",
     ],
-    parameters: MeshRouteParams,
-    async execute(_toolCallId, params: MeshRouteToolParams, signal, onUpdate, ctx) {
+    parameters: ChalinRouteParams,
+    async execute(_toolCallId, params: ChalinRouteToolParams, signal, onUpdate, ctx) {
       const loaded = loadEffectiveConfig({ cwd: ctx.cwd });
       const catalog = AgentCatalog.load({ cwd: ctx.cwd });
       const memory = new MemoryStore({ cwd: ctx.cwd });
-      const kernel = new MeshKernel({
+      const kernel = new ChalinKernel({
         cwd: ctx.cwd,
         config: loaded.config,
         catalog,
@@ -205,7 +205,7 @@ export function registerMeshTools(pi: ExtensionAPI): void {
       const unknownAgents = route.agents.filter((agent) => !catalog.resolve(agent).agent);
 
       if (!loaded.config.enabled) {
-        return textResult("pi-chalin is disabled for this project. Answer directly or ask the user to run /mesh on.", { route, diagnostics: loaded.diagnostics });
+        return textResult("pi-chalin is disabled for this project. Answer directly or ask the user to run /chalin on.", { route, diagnostics: loaded.diagnostics });
       }
       if (unknownAgents.length > 0) {
         return textResult(`Unknown pi-chalin agent(s): ${unknownAgents.join(", ")}\nAvailable agents: ${agents.map((agent) => agent.name).join(", ")}`, { route, diagnostics: catalog.diagnostics });
@@ -215,29 +215,29 @@ export function registerMeshTools(pi: ExtensionAPI): void {
       }
       const directRecommendation = directExecutionRecommendation(params.task, route);
       if (directRecommendation) {
-        const guard = beginMeshRouteInvocation({ dryRun: false, route });
+        const guard = beginChalinRouteInvocation({ dryRun: false, route });
         if (!guard.allowed) {
-          return textResult(guard.reason ?? "mesh_route already executed for this prompt.", { route, guard });
+          return textResult(guard.reason ?? "chalin_route already executed for this prompt.", { route, guard });
         }
-        finishMeshRouteInvocation(guard.invocationId, "dry-run");
-        setMeshStatus(ctx, { kind: "idle" });
+        finishChalinRouteInvocation(guard.invocationId, "dry-run");
+        setChalinStatus(ctx, { kind: "idle" });
         return textResult(formatDirectRecommendation(route, directRecommendation), {
           route,
           routeGuard: { action: "direct-recommended", reason: directRecommendation },
         });
       }
-      const guard = beginMeshRouteInvocation({ dryRun: Boolean(params.dryRun), route });
+      const guard = beginChalinRouteInvocation({ dryRun: Boolean(params.dryRun), route });
       if (!guard.allowed) {
-        return textResult(guard.reason ?? "mesh_route already executed for this prompt.", { route, guard });
+        return textResult(guard.reason ?? "chalin_route already executed for this prompt.", { route, guard });
       }
       if (params.dryRun) {
-        finishMeshRouteInvocation(guard.invocationId, "dry-run");
+        finishChalinRouteInvocation(guard.invocationId, "dry-run");
         return textResult(formatRoute(route, undefined, { availableAgents: agents.map((agent) => agent.name) }), { route, diagnostics: [...loaded.diagnostics, catalog.diagnostics] });
       }
 
-      clearLegacyMeshControlWidget(ctx);
+      clearLegacyChalinControlWidget(ctx);
       onUpdate?.({
-        content: [{ type: "text", text: formatMeshRoutePlanWidget(params) }],
+        content: [{ type: "text", text: formatChalinRoutePlanWidget(params) }],
         details: { route, run: plannedWidgetRun(route) },
       });
 
@@ -246,14 +246,14 @@ export function registerMeshTools(pi: ExtensionAPI): void {
         ? { action: "allow" as const, reason: "Approved once through pi-chalin Safety Approval." }
         : undefined;
       if (preApproval.action === "block" || (preApproval.action === "ask" && !approvalOverride)) {
-        finishMeshRouteInvocation(guard.invocationId, preApproval.action);
-        setMeshStatus(ctx, preApproval.action === "block" ? { kind: "failed" } : { kind: "stopped" });
+        finishChalinRouteInvocation(guard.invocationId, preApproval.action);
+        setChalinStatus(ctx, preApproval.action === "block" ? { kind: "failed" } : { kind: "stopped" });
         return textResult(formatRoute(route, { route, approval: preApproval, memories: [], diagnostics: [] }), { route, approval: preApproval });
       }
 
       const abortSignal = signal ?? new AbortController().signal;
-      setMeshStatus(ctx, route.plan ? { kind: "running", intent: routeIntent(route), agent: route.agents[0] ?? route.kind, completed: 0, total: Math.max(route.agents.length, 1) } : { kind: "synthesizing" });
-      let result: Awaited<ReturnType<MeshKernel["handleRoute"]>>;
+      setChalinStatus(ctx, route.plan ? { kind: "running", intent: routeIntent(route), agent: route.agents[0] ?? route.kind, completed: 0, total: Math.max(route.agents.length, 1) } : { kind: "synthesizing" });
+      let result: Awaited<ReturnType<ChalinKernel["handleRoute"]>>;
       try {
         result = await kernel.handleRoute(route, params.task, {
           cwd: ctx.cwd,
@@ -261,28 +261,28 @@ export function registerMeshTools(pi: ExtensionAPI): void {
           signal: abortSignal,
           onUpdate: (run) => {
             setLatestRun(run);
-            setMeshStatus(ctx, footerStateForRun(run));
+            setChalinStatus(ctx, footerStateForRun(run));
             onUpdate?.({
-              content: [{ type: "text", text: formatMeshRunWidget(run) }],
-              details: meshRouteUpdateDetails(run),
+              content: [{ type: "text", text: formatChalinRunWidget(run) }],
+              details: chalinRouteUpdateDetails(run),
             });
           },
         }, approvalOverride);
       } catch (error) {
-        finishMeshRouteInvocation(guard.invocationId, "failed");
-        setMeshStatus(ctx, abortSignal.aborted ? { kind: "stopped" } : { kind: "failed" });
+        finishChalinRouteInvocation(guard.invocationId, "failed");
+        setChalinStatus(ctx, abortSignal.aborted ? { kind: "stopped" } : { kind: "failed" });
         throw error;
       }
       if (result.run) setLatestRun(result.run);
       if (result.approval.action !== "allow") {
-        finishMeshRouteInvocation(guard.invocationId, outcomeForResult(result));
-        setMeshStatus(ctx, result.approval.action === "block" ? { kind: "failed" } : { kind: "stopped" });
+        finishChalinRouteInvocation(guard.invocationId, outcomeForResult(result));
+        setChalinStatus(ctx, result.approval.action === "block" ? { kind: "failed" } : { kind: "stopped" });
         return finalToolResult(ctx, formatRoute(route, result), compactRouteDetails(route, result, [...loaded.diagnostics, catalog.diagnostics]));
       }
-      if (result.run?.status === "paused" || abortSignal.aborted) setMeshStatus(ctx, { kind: "stopped" });
-      else if (result.run?.status === "failed") setMeshStatus(ctx, { kind: "failed" });
-      else setMeshStatus(ctx, { kind: "complete", intent: routeIntent(route) });
-      finishMeshRouteInvocation(guard.invocationId, outcomeForResult(result));
+      if (result.run?.status === "paused" || abortSignal.aborted) setChalinStatus(ctx, { kind: "stopped" });
+      else if (result.run?.status === "failed") setChalinStatus(ctx, { kind: "failed" });
+      else setChalinStatus(ctx, { kind: "complete", intent: routeIntent(route) });
+      finishChalinRouteInvocation(guard.invocationId, outcomeForResult(result));
 
       return finalToolResult(ctx, formatRoute(route, result), compactRouteDetails(route, result, [...loaded.diagnostics, catalog.diagnostics]));
     },
@@ -296,31 +296,31 @@ export function registerMeshTools(pi: ExtensionAPI): void {
       return new Text("", 0, 0);
     },
     renderResult(result, _options, theme) {
-      const details = result.details as MeshRouteWidgetDetails | undefined;
-      const rendered = details?.run ? formatMeshRunWidgetFromDetails(details) : result.content.find((part) => part.type === "text")?.text ?? "";
-      return new Text(colorizeMeshWidget(rendered, theme), 0, 0);
+      const details = result.details as ChalinRouteWidgetDetails | undefined;
+      const rendered = details?.run ? formatChalinRunWidgetFromDetails(details) : result.content.find((part) => part.type === "text")?.text ?? "";
+      return new Text(colorizeChalinWidget(rendered, theme), 0, 0);
     },
   });
 
 
   pi.registerTool({
-    name: "mesh_resume",
-    label: "Mesh Resume",
+    name: "chalin_resume",
+    label: "Chalin Resume",
     description: "Resume the latest paused or stale pi-chalin subagent run, preserving completed steps and continuing pending DAG/chain work.",
-    promptSnippet: "mesh_resume: resume an interrupted pi-chalin run when the user says continue/resume after ESC, abort, terminal close, or a paused run.",
+    promptSnippet: "chalin_resume: resume an interrupted pi-chalin run when the user says continue/resume after ESC, abort, terminal close, or a paused run.",
     promptGuidelines: [
-      "Use this before answering from partial findings when the user asks to continue a paused/interrupted mesh run.",
-      "Do not create a new mesh_route for a paused run; resume the persisted run instead.",
-      "After mesh_resume returns, answer the user from the resumed Final answer material.",
+      "Use this before answering from partial findings when the user asks to continue a paused/interrupted chalin run.",
+      "Do not create a new chalin_route for a paused run; resume the persisted run instead.",
+      "After chalin_resume returns, answer the user from the resumed Final answer material.",
     ],
-    parameters: MeshResumeParams,
-    async execute(_toolCallId, params: MeshResumeToolParams, signal, onUpdate, ctx) {
+    parameters: ChalinResumeParams,
+    async execute(_toolCallId, params: ChalinResumeToolParams, signal, onUpdate, ctx) {
       const loaded = loadEffectiveConfig({ cwd: ctx.cwd });
       const run = loadResumableRunState({ cwd: ctx.cwd, runId: params.runId });
       if (!run) return textResult(params.runId ? `No resumable pi-chalin run found for '${params.runId}'.` : "No paused or stale pi-chalin run found to resume.", { runId: params.runId });
       const catalog = AgentCatalog.load({ cwd: ctx.cwd });
       const memory = new MemoryStore({ cwd: ctx.cwd });
-      const kernel = new MeshKernel({
+      const kernel = new ChalinKernel({
         cwd: ctx.cwd,
         config: loaded.config,
         catalog,
@@ -328,12 +328,12 @@ export function registerMeshTools(pi: ExtensionAPI): void {
         modelOverrides: mergedSessionModelOverrides(loaded.config.agents.modelOverrides),
         thinkingOverrides: mergedSessionThinkingOverrides(loaded.config.agents.thinkingOverrides),
       });
-      clearLegacyMeshControlWidget(ctx);
+      clearLegacyChalinControlWidget(ctx);
       const abortSignal = signal ?? new AbortController().signal;
-      setMeshStatus(ctx, {
+      setChalinStatus(ctx, {
         kind: "running",
         intent: routeIntent(run.route),
-        agent: run.steps.find((step) => !isUsableStepStatus(step.status))?.agent ?? run.route.agents[0] ?? "mesh",
+        agent: run.steps.find((step) => !isUsableStepStatus(step.status))?.agent ?? run.route.agents[0] ?? "chalin",
         completed: run.steps.filter((step) => isUsableStepStatus(step.status)).length,
         total: Math.max(run.steps.length, 1),
       });
@@ -343,17 +343,17 @@ export function registerMeshTools(pi: ExtensionAPI): void {
         signal: abortSignal,
         onUpdate: (updated) => {
           setLatestRun(updated);
-          setMeshStatus(ctx, footerStateForRun(updated));
+          setChalinStatus(ctx, footerStateForRun(updated));
           onUpdate?.({
-            content: [{ type: "text", text: formatMeshRunWidget(updated) }],
-            details: meshRouteUpdateDetails(updated),
+            content: [{ type: "text", text: formatChalinRunWidget(updated) }],
+            details: chalinRouteUpdateDetails(updated),
           });
         },
       });
       if (result.run) setLatestRun(result.run);
-      if (result.run?.status === "paused" || abortSignal.aborted) setMeshStatus(ctx, { kind: "stopped" });
-      else if (result.run?.status === "failed") setMeshStatus(ctx, { kind: "failed" });
-      else setMeshStatus(ctx, { kind: "complete", intent: routeIntent(result.route) });
+      if (result.run?.status === "paused" || abortSignal.aborted) setChalinStatus(ctx, { kind: "stopped" });
+      else if (result.run?.status === "failed") setChalinStatus(ctx, { kind: "failed" });
+      else setChalinStatus(ctx, { kind: "complete", intent: routeIntent(result.route) });
       return finalToolResult(ctx, formatRoute(result.route, result), compactRouteDetails(result.route, result, [...loaded.diagnostics, catalog.diagnostics]));
     },
     renderCall(args, theme) {
@@ -362,24 +362,24 @@ export function registerMeshTools(pi: ExtensionAPI): void {
       return new Text("", 0, 0);
     },
     renderResult(result, _options, theme) {
-      const details = result.details as MeshRouteWidgetDetails | undefined;
-      const rendered = details?.run ? formatMeshRunWidgetFromDetails(details) : result.content.find((part) => part.type === "text")?.text ?? "";
-      return new Text(colorizeMeshWidget(rendered, theme), 0, 0);
+      const details = result.details as ChalinRouteWidgetDetails | undefined;
+      const rendered = details?.run ? formatChalinRunWidgetFromDetails(details) : result.content.find((part) => part.type === "text")?.text ?? "";
+      return new Text(colorizeChalinWidget(rendered, theme), 0, 0);
     },
   });
 
 
   pi.registerTool({
-    name: "mesh_artifact_resume",
-    label: "Mesh Artifact Resume",
+    name: "chalin_artifact_resume",
+    label: "Chalin Artifact Resume",
     description: "Load compact resumable pi-chalin artifact context for a long-running feature/task.",
-    promptSnippet: "mesh_artifact_resume: load prior checkpoints, validation contracts, and worker skills for a long-running mesh task.",
+    promptSnippet: "chalin_artifact_resume: load prior checkpoints, validation contracts, and worker skills for a long-running chalin task.",
     promptGuidelines: [
       "Use this before continuing a long-running or previously interrupted pi-chalin task.",
       "Use the returned checkpoints and validation contracts as the source of truth for continuation.",
     ],
-    parameters: MeshArtifactResumeParams,
-    async execute(_toolCallId, params: MeshArtifactResumeToolParams, _signal, _onUpdate, ctx) {
+    parameters: ChalinArtifactResumeParams,
+    async execute(_toolCallId, params: ChalinArtifactResumeToolParams, _signal, _onUpdate, ctx) {
       const artifacts = new ArtifactStore({ cwd: ctx.cwd });
       const text = await artifacts.resumeContext(params.featureId);
       return textResult(text, { featureId: params.featureId });
@@ -387,20 +387,20 @@ export function registerMeshTools(pi: ExtensionAPI): void {
   });
 
   pi.registerTool({
-    name: "mesh_web_search",
-    label: "Mesh Web Search",
+    name: "chalin_web_search",
+    label: "Chalin Web Search",
     description: "Search or fetch web context through Exa MCP. Use only when current external information, documentation, or a URL is required; returns compact sources, not a raw dump.",
-    promptSnippet: "mesh_web_search: search/fetch current web context through Exa MCP with compact citations.",
+    promptSnippet: "chalin_web_search: search/fetch current web context through Exa MCP with compact citations.",
     promptGuidelines: [
-      "Use mesh_web_search for current docs, recent facts, URLs, or external verification; do not use it for local repo facts.",
+      "Use chalin_web_search for current docs, recent facts, URLs, or external verification; do not use it for local repo facts.",
       "Prefer maxSources 3-5 and snippets unless the user explicitly needs deeper content.",
       "Cite source URLs from the tool result in your answer.",
     ],
-    parameters: MeshWebSearchParams,
-    async execute(_toolCallId, params: MeshWebSearchToolParams, signal, onUpdate, ctx) {
+    parameters: ChalinWebSearchParams,
+    async execute(_toolCallId, params: ChalinWebSearchToolParams, signal, onUpdate, ctx) {
       const urls = [...(params.urls ?? []), ...(params.url ? [params.url] : [])].filter(Boolean);
       const label = urls.length > 0 ? `fetching ${urls.length} URL${urls.length === 1 ? "" : "s"}` : `searching ${params.query ?? "web"}`;
-      onUpdate?.({ content: [{ type: "text", text: `mesh web · ${label} via Exa MCP…` }], details: { status: "running", provider: "exa-mcp" } });
+      onUpdate?.({ content: [{ type: "text", text: `chalin web · ${label} via Exa MCP…` }], details: { status: "running", provider: "exa-mcp" } });
       const bundle = urls.length > 0
         ? await fetchWebUrls({ cwd: ctx.cwd, urls, freshness: params.freshness, signal })
         : await searchWeb({ cwd: ctx.cwd, query: params.query ?? "", maxSources: params.maxSources, depth: params.depth, freshness: params.freshness, signal });
@@ -418,7 +418,7 @@ function finalToolResult(ctx: { hasUI: boolean; abort(): void; shutdown(): void 
   return textResult(text, details);
 }
 
-export function formatMeshRoutePlanWidget(params: MeshRouteToolParams): string {
+export function formatChalinRoutePlanWidget(params: ChalinRouteToolParams): string {
   const steps = plannedWidgetSteps(params);
   const title = routeTitle(params.topology, params.task);
   const agents = steps.map((step) => step.agent).filter(Boolean);
@@ -430,11 +430,11 @@ export function formatMeshRoutePlanWidget(params: MeshRouteToolParams): string {
   ].filter((line): line is string => Boolean(line)).join("\n");
 }
 
-export function formatMeshRunWidget(run: RunState): string {
-  return formatMeshRunWidgetFromDetails(meshRouteUpdateDetails(run));
+export function formatChalinRunWidget(run: RunState): string {
+  return formatChalinRunWidgetFromDetails(chalinRouteUpdateDetails(run));
 }
 
-function formatMeshRunWidgetFromDetails(details: MeshRouteWidgetDetails): string {
+function formatChalinRunWidgetFromDetails(details: ChalinRouteWidgetDetails): string {
   const run = details.run;
   if (!run) return "pi-chalin · no run";
   const route = details.route;
@@ -453,7 +453,7 @@ function formatMeshRunWidgetFromDetails(details: MeshRouteWidgetDetails): string
   ].filter((line): line is string => Boolean(line)).join("\n");
 }
 
-function activeWidgetStep(runStatus: RunStatus, steps: MeshRouteWidgetStep[]): MeshRouteWidgetStep | undefined {
+function activeWidgetStep(runStatus: RunStatus, steps: ChalinRouteWidgetStep[]): ChalinRouteWidgetStep | undefined {
   if (runStatus === "failed") return steps.find((step) => step.status === "failed");
   if (runStatus === "running" || runStatus === "pending") {
     return steps.find((step) => step.status === "running") ?? steps.find((step) => step.status === "pending");
@@ -461,7 +461,7 @@ function activeWidgetStep(runStatus: RunStatus, steps: MeshRouteWidgetStep[]): M
   return undefined;
 }
 
-function plannedWidgetRun(route: RouteDecision): MeshRouteWidgetDetails["run"] {
+function plannedWidgetRun(route: RouteDecision): ChalinRouteWidgetDetails["run"] {
   return {
     id: "planned",
     status: "pending",
@@ -470,7 +470,7 @@ function plannedWidgetRun(route: RouteDecision): MeshRouteWidgetDetails["run"] {
   };
 }
 
-function meshRouteUpdateDetails(run: RunState): MeshRouteWidgetDetails {
+function chalinRouteUpdateDetails(run: RunState): ChalinRouteWidgetDetails {
   return {
     route: run.route,
     run: {
@@ -492,7 +492,7 @@ function meshRouteUpdateDetails(run: RunState): MeshRouteWidgetDetails {
   };
 }
 
-function plannedStepsFromRoute(route: RouteDecision): MeshRouteWidgetStep[] {
+function plannedStepsFromRoute(route: RouteDecision): ChalinRouteWidgetStep[] {
   const plan = route.plan;
   if (!plan) return [];
   if (plan.kind === "single") return [{ agent: plan.agent, task: plan.task }];
@@ -501,7 +501,7 @@ function plannedStepsFromRoute(route: RouteDecision): MeshRouteWidgetStep[] {
   return plan.stages.flatMap((stage) => stage.tasks.map((step) => ({ ...step, id: `${stage.id}:${step.id ?? step.agent}` })));
 }
 
-function plannedWidgetSteps(params: MeshRouteToolParams): MeshRouteWidgetStep[] {
+function plannedWidgetSteps(params: ChalinRouteToolParams): ChalinRouteWidgetStep[] {
   if (params.topology === "single") {
     const first = params.steps?.[0];
     return first ? [first] : [];
@@ -511,7 +511,7 @@ function plannedWidgetSteps(params: MeshRouteToolParams): MeshRouteWidgetStep[] 
   return [{ agent: "memory", task: params.task, status: "pending" }];
 }
 
-function formatWidgetStep(step: MeshRouteWidgetStep, index: number, total: number, runStatus?: RunStatus): string {
+function formatWidgetStep(step: ChalinRouteWidgetStep, index: number, total: number, runStatus?: RunStatus): string {
   const detail = step.status === "complete"
     ? step.handoff || "done"
     : step.status === "failed"
@@ -552,7 +552,7 @@ function treePrefix(index: number, total: number): string {
   return index === total - 1 ? "└" : "├";
 }
 
-function routeTitle(topology: MeshRouteToolParams["topology"], task: string): string {
+function routeTitle(topology: ChalinRouteToolParams["topology"], task: string): string {
   if (topology === "memory-only") return "memory lookup";
   return `${topology} · ${truncate(task, 52)}`;
 }
@@ -562,7 +562,7 @@ function compactAgentPath(agents: string[]): string {
   return agents.length > 5 ? `${compact} → +${agents.length - 5}` : compact;
 }
 
-function colorizeMeshWidget(text: string, theme: { fg(scope: string, value: string): string; bold(value: string): string }): string {
+function colorizeChalinWidget(text: string, theme: { fg(scope: string, value: string): string; bold(value: string): string }): string {
   return text.split("\n").map((line, index) => {
     if (index === 0) return theme.fg("toolTitle", theme.bold(line));
     if (/current:/.test(line)) return theme.fg("muted", line);
@@ -599,10 +599,10 @@ function scheduleNonInteractiveShutdown(ctx: { hasUI: boolean; abort(): void; sh
   timer.unref?.();
 }
 
-function formatRoute(route: RouteDecision, result: Awaited<ReturnType<MeshKernel["handleRoute"]>> | undefined, options: { availableAgents?: string[] } = {}): string {
+function formatRoute(route: RouteDecision, result: Awaited<ReturnType<ChalinKernel["handleRoute"]>> | undefined, options: { availableAgents?: string[] } = {}): string {
   if (!result) {
     return [
-      `Mesh workflow: ${route.kind}`,
+      `Chalin workflow: ${route.kind}`,
       `Agents: ${route.agents.join(" → ") || "none"}`,
       `Risk: ${route.risk}`,
       `Reason: ${route.reason}`,
@@ -681,7 +681,7 @@ function stepFullOutput(step: RunState["steps"][number]): string | undefined {
   return step.output?.text || step.output?.raw || step.output?.handoff || step.error;
 }
 
-function outcomeForResult(result: Awaited<ReturnType<MeshKernel["handleRoute"]>>): MeshRouteOutcome {
+function outcomeForResult(result: Awaited<ReturnType<ChalinKernel["handleRoute"]>>): ChalinRouteOutcome {
   if (result.approval.action === "ask") return "ask";
   if (result.approval.action === "block") return "block";
   if (result.run?.status === "failed") return "failed";
@@ -794,7 +794,7 @@ function formatStep(step: RunState["steps"][number]): string {
   return `- ${step.agent}: ${truncate(stepOutput(step) || "no output", 420)}`;
 }
 
-function compactRouteDetails(route: RouteDecision, result: Awaited<ReturnType<MeshKernel["handleRoute"]>>, diagnostics: unknown[]) {
+function compactRouteDetails(route: RouteDecision, result: Awaited<ReturnType<ChalinKernel["handleRoute"]>>, diagnostics: unknown[]) {
   return {
     route,
     approval: result.approval,
@@ -817,7 +817,7 @@ function compactRouteDetails(route: RouteDecision, result: Awaited<ReturnType<Me
   };
 }
 
-function footerStateForRun(run: RunState): Parameters<typeof setMeshStatus>[1] {
+function footerStateForRun(run: RunState): Parameters<typeof setChalinStatus>[1] {
   const active = run.steps.find((step) => step.status === "running") ?? run.steps.find((step) => step.status === "pending");
   const completed = run.steps.filter((step) => isUsableStepStatus(step.status)).length;
   const total = run.steps.length || 1;

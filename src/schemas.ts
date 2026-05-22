@@ -255,7 +255,7 @@ export interface RunState {
   };
 }
 
-export interface MeshRuntimeState {
+export interface ChalinRuntimeState {
   autoRoutingEnabled: boolean;
   pendingApprovals: number;
   activeRuns: number;

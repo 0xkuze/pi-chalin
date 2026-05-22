@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, test } from "bun:test";
-import { MeshKernel, routeFromPlan } from "../src/kernel.ts";
+import { ChalinKernel, routeFromPlan } from "../src/kernel.ts";
 import { createMemoryCandidate, MemoryStore } from "../src/memory.ts";
 import type { WorkerRunner, WorkerRunnerContext } from "../src/runner.ts";
 import type { RouteDecision, RunState } from "../src/schemas.ts";
@@ -12,8 +12,8 @@ const tempDirs: string[] = [];
 afterEach(() => { while (tempDirs.length > 0) fs.rmSync(tempDirs.pop()!, { recursive: true, force: true }); });
 function tempDir(prefix: string): string { const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); tempDirs.push(dir); return dir; }
 
-test("MeshKernel no longer hard-codes prompt routing decisions", () => {
-  const route = new MeshKernel({ cwd: tempDir("pi-chalin-kernel-") }).classify("review this project");
+test("ChalinKernel no longer hard-codes prompt routing decisions", () => {
+  const route = new ChalinKernel({ cwd: tempDir("pi-chalin-kernel-") }).classify("review this project");
   assert.equal(route.kind, "bypass");
   assert.deepEqual(route.agents, []);
   assert.match(route.reason, /LLM-first routing/i);
@@ -78,17 +78,17 @@ test("routeFromPlan builds staged DAG workflows chosen by the primary Pi agent",
   assert.deepEqual(dag.plan?.stages.map((stage) => stage.id), ["discover", "fanout", "review"]);
 });
 
-test("MeshKernel executes an LLM-planned mock route", async () => {
+test("ChalinKernel executes an LLM-planned mock route", async () => {
   const cwd = tempDir("pi-chalin-kernel-");
   const route = routeFromPlan({ topology: "single", steps: [{ agent: "reviewer", task: "Review this diff for bugs." }] });
-  const result = await new MeshKernel({ cwd }).handleRoute(route, "review this diff for bugs", { cwd });
+  const result = await new ChalinKernel({ cwd }).handleRoute(route, "review this diff for bugs", { cwd });
   assert.equal(result.route.kind, "single-agent");
   assert.equal(result.approval.action, "allow");
   assert.equal(result.run?.status, "complete");
   assert.equal(result.run?.steps[0]?.agent, "reviewer");
 });
 
-test("MeshKernel does not block SDK tool results on memory persistence", async () => {
+test("ChalinKernel does not block SDK tool results on memory persistence", async () => {
   const cwd = tempDir("pi-chalin-kernel-memory-");
   const route = routeFromPlan({ topology: "single", steps: [{ agent: "reviewer", task: "Summarize findings." }] });
   const previousDelay = process.env.PI_CHALIN_MEMORY_PERSIST_DELAY_MS;
@@ -105,7 +105,7 @@ test("MeshKernel does not block SDK tool results on memory persistence", async (
     const runner: WorkerRunner = {
       async run(inputRoute: RouteDecision, _context: WorkerRunnerContext): Promise<RunState> {
         return {
-          id: "mesh-test",
+          id: "chalin-test",
           route: inputRoute,
           status: "complete",
           startedAt: new Date().toISOString(),
@@ -136,7 +136,7 @@ test("MeshKernel does not block SDK tool results on memory persistence", async (
     };
 
     const startedAt = Date.now();
-    const result = await new MeshKernel({ cwd, memory: new SlowMemoryStore({ cwd }), sdkRunner: runner }).handleRoute(route, "summarize", {
+    const result = await new ChalinKernel({ cwd, memory: new SlowMemoryStore({ cwd }), sdkRunner: runner }).handleRoute(route, "summarize", {
       cwd,
       extensionContext: { cwd, hasUI: false } as never,
     });

@@ -7,8 +7,8 @@ import { fileURLToPath } from "node:url";
 import {
   ORCHESTRATION_EVAL_CASES,
   summarizeOrchestrationEvalCases,
-  type MeshExpectedTopology,
-  type MeshOrchestrationEvalCase,
+  type ChalinExpectedTopology,
+  type ChalinOrchestrationEvalCase,
 } from "../src/orchestration.ts";
 
 interface UsageTotals {
@@ -22,11 +22,11 @@ interface UsageTotals {
 
 interface ToolMetrics {
   totalCalls: number;
-  meshRouteCalls: number;
+  chalinRouteCalls: number;
   builtInCalls: number;
   callsByName: Record<string, number>;
   firstTool?: string;
-  builtInCallsBeforeMesh: number;
+  builtInCallsBeforeChalin: number;
 }
 
 interface EvalMetrics {
@@ -45,8 +45,8 @@ interface EvalResult {
   id: string;
   prompt: string;
   expectedDecision: string;
-  expectedTopology: MeshExpectedTopology;
-  actualDecision: "mesh" | "direct" | "error";
+  expectedTopology: ChalinExpectedTopology;
+  actualDecision: "chalin" | "direct" | "error";
   actualTopology: string;
   matchedExpectedAgents: string[];
   pass: boolean;
@@ -69,8 +69,8 @@ const sdkRunner = evalRunner === "sdk";
 const timeoutMs = positiveInt(cli.timeoutMs ?? process.env.PI_CHALIN_EVAL_TIMEOUT_MS, sdkRunner ? 75_000 : 60_000);
 const startTimeoutMs = positiveInt(cli.startTimeoutMs ?? process.env.PI_CHALIN_EVAL_START_TIMEOUT_MS, timeoutMs);
 const idleTimeoutMs = positiveInt(cli.idleTimeoutMs ?? process.env.PI_CHALIN_EVAL_IDLE_TIMEOUT_MS, sdkRunner ? 30_000 : 30_000);
-const postMeshIdleTimeoutMs = positiveInt(cli.postMeshIdleTimeoutMs ?? process.env.PI_CHALIN_EVAL_POST_MESH_IDLE_TIMEOUT_MS, sdkRunner ? 8_000 : 5_000);
-const meshToolTimeoutMs = positiveInt(cli.meshToolTimeoutMs ?? process.env.PI_CHALIN_EVAL_MESH_TOOL_TIMEOUT_MS, sdkRunner ? 60_000 : 30_000);
+const postChalinIdleTimeoutMs = positiveInt(cli.postChalinIdleTimeoutMs ?? process.env.PI_CHALIN_EVAL_POST_CHALIN_IDLE_TIMEOUT_MS, sdkRunner ? 8_000 : 5_000);
+const chalinToolTimeoutMs = positiveInt(cli.chalinToolTimeoutMs ?? process.env.PI_CHALIN_EVAL_CHALIN_TOOL_TIMEOUT_MS, sdkRunner ? 60_000 : 30_000);
 const thresholds = {
   maxDurationMs: positiveInt(process.env.PI_CHALIN_EVAL_MAX_DURATION_MS, timeoutMs),
   maxCombinedCost: positiveFloat(process.env.PI_CHALIN_EVAL_MAX_COMBINED_COST, sdkRunner ? 0.25 : Number.POSITIVE_INFINITY),
@@ -78,7 +78,7 @@ const thresholds = {
   maxChildTokens: positiveInt(process.env.PI_CHALIN_EVAL_MAX_CHILD_TOKENS, sdkRunner ? 20_000 : Number.POSITIVE_INFINITY),
   maxPolicyViolations: positiveInt(process.env.PI_CHALIN_EVAL_MAX_POLICY_VIOLATIONS, 0),
   maxDuplicateReads: positiveInt(process.env.PI_CHALIN_EVAL_MAX_DUPLICATE_READS, 0),
-  maxBuiltInsBeforeMesh: positiveInt(process.env.PI_CHALIN_EVAL_MAX_BUILTINS_BEFORE_MESH, 0),
+  maxBuiltInsBeforeChalin: positiveInt(process.env.PI_CHALIN_EVAL_MAX_BUILTINS_BEFORE_CHALIN, 0),
 };
 const limit = positiveInt(cli.limit ?? process.env.PI_CHALIN_EVAL_LIMIT, ORCHESTRATION_EVAL_CASES.length);
 const selected = selectCases(ORCHESTRATION_EVAL_CASES).slice(0, limit);
@@ -95,7 +95,7 @@ for (const testCase of selected) {
 
 const passed = results.filter((result) => result.pass).length;
 const failed = results.length - passed;
-const meshActual = results.filter((result) => result.actualDecision === "mesh").length;
+const chalinActual = results.filter((result) => result.actualDecision === "chalin").length;
 const directActual = results.filter((result) => result.actualDecision === "direct").length;
 const metrics = summarizeMetrics(results);
 const report = {
@@ -104,11 +104,11 @@ const report = {
   fixture,
   extensionPath,
   expected: summarizeOrchestrationEvalCases(selected),
-  actual: { total: results.length, passed, failed, meshActual, directActual },
+  actual: { total: results.length, passed, failed, chalinActual, directActual },
   metrics,
   thresholds,
-  timeouts: { hardTimeoutMs: timeoutMs, startTimeoutMs, idleTimeoutMs, meshToolTimeoutMs, postMeshIdleTimeoutMs },
-  command: "pi -p --no-session --mode json --no-context-files --no-skills --tools read,bash,grep,find,ls,mesh_route -e <extension> <prompt>",
+  timeouts: { hardTimeoutMs: timeoutMs, startTimeoutMs, idleTimeoutMs, chalinToolTimeoutMs, postChalinIdleTimeoutMs },
+  command: "pi -p --no-session --mode json --no-context-files --no-skills --tools read,bash,grep,find,ls,chalin_route -e <extension> <prompt>",
   results,
 };
 
@@ -121,7 +121,7 @@ printReport(reportPath, results);
 
 if (failed > 0 && process.env.PI_CHALIN_EVAL_ALLOW_FAIL !== "1") process.exit(1);
 
-async function runCase(testCase: MeshOrchestrationEvalCase): Promise<EvalResult> {
+async function runCase(testCase: ChalinOrchestrationEvalCase): Promise<EvalResult> {
   const started = Date.now();
   const args = [
     "-p",
@@ -131,7 +131,7 @@ async function runCase(testCase: MeshOrchestrationEvalCase): Promise<EvalResult>
     "--no-context-files",
     "--no-skills",
     "--tools",
-    "read,bash,grep,find,ls,mesh_route",
+    "read,bash,grep,find,ls,chalin_route",
     "-e",
     extensionPath,
   ];
@@ -147,7 +147,7 @@ async function runCase(testCase: MeshOrchestrationEvalCase): Promise<EvalResult>
   const stderr = run.stderr;
   const metrics = extractMetrics(stdout, stderr);
   const detectedDecision = detectDecision(stdout);
-  const actualDecision = run.status === 0 || detectedDecision === "mesh" ? detectedDecision : "error";
+  const actualDecision = run.status === 0 || detectedDecision === "chalin" ? detectedDecision : "error";
   const actualTopology = detectTopology(stdout);
   const matchedExpectedAgents = testCase.expectedAgents.filter((agent) => hasAgent(stdout, agent));
   const durationMs = Date.now() - started;
@@ -197,11 +197,11 @@ function runPi(args: string[]): Promise<{ stdout: string; stderr: string; status
     let stderr = "";
     let timeoutReason: string | undefined;
     let settled = false;
-    let meshResultTimer: NodeJS.Timeout | undefined;
+    let chalinResultTimer: NodeJS.Timeout | undefined;
     let lastOutputAt = Date.now();
     let sawOutput = false;
-    let meshToolStartedAt: number | undefined;
-    let sawMeshResult = false;
+    let chalinToolStartedAt: number | undefined;
+    let sawChalinResult = false;
     const maxBytes = 20 * 1024 * 1024;
 
     const finish = (status: number | null, signal: NodeJS.Signals | null) => {
@@ -209,17 +209,17 @@ function runPi(args: string[]): Promise<{ stdout: string; stderr: string; status
       settled = true;
       clearTimeout(hardTimer);
       clearInterval(progressTimer);
-      if (meshResultTimer) clearTimeout(meshResultTimer);
+      if (chalinResultTimer) clearTimeout(chalinResultTimer);
       resolve({ stdout, stderr, status, signal, timeoutReason });
     };
 
-    const finishAfterMeshResult = () => {
-      if (settled || meshResultTimer) return;
-      meshResultTimer = setTimeout(() => {
+    const finishAfterChalinResult = () => {
+      if (settled || chalinResultTimer) return;
+      chalinResultTimer = setTimeout(() => {
         if (child.exitCode === null) killProcessTree(child.pid, "SIGTERM");
         finish(0, null);
       }, 150);
-      meshResultTimer.unref?.();
+      chalinResultTimer.unref?.();
     };
 
     const kill = (reason: string) => {
@@ -235,9 +235,9 @@ function runPi(args: string[]): Promise<{ stdout: string; stderr: string; status
     const progressTimer = setInterval(() => {
       const idleFor = Date.now() - lastOutputAt;
       if (!sawOutput && idleFor > startTimeoutMs) kill(`startup timeout after ${idleFor}ms without output`);
-      else if (meshToolStartedAt && !sawMeshResult && idleFor > meshToolTimeoutMs) kill(`mesh_route idle timeout after ${idleFor}ms`);
-      else if (sawMeshResult && idleFor > postMeshIdleTimeoutMs) kill(`post-mesh idle timeout after ${idleFor}ms`);
-      else if (sawOutput && !meshToolStartedAt && idleFor > idleTimeoutMs) kill(`idle timeout after ${idleFor}ms`);
+      else if (chalinToolStartedAt && !sawChalinResult && idleFor > chalinToolTimeoutMs) kill(`chalin_route idle timeout after ${idleFor}ms`);
+      else if (sawChalinResult && idleFor > postChalinIdleTimeoutMs) kill(`post-chalin idle timeout after ${idleFor}ms`);
+      else if (sawOutput && !chalinToolStartedAt && idleFor > idleTimeoutMs) kill(`idle timeout after ${idleFor}ms`);
     }, 500);
 
     const append = (target: "stdout" | "stderr", chunk: Buffer) => {
@@ -248,12 +248,12 @@ function runPi(args: string[]): Promise<{ stdout: string; stderr: string; status
       else stderr += text;
       if (stdout.length + stderr.length > maxBytes) kill(`output exceeded ${maxBytes} bytes`);
       const recent = stdout.slice(-20000);
-      if (!meshToolStartedAt && /\"(?:name|toolName)\":\"mesh_route\"|Mesh workflow:/i.test(recent)) {
-        meshToolStartedAt = Date.now();
+      if (!chalinToolStartedAt && /\"(?:name|toolName)\":\"chalin_route\"|Chalin workflow:/i.test(recent)) {
+        chalinToolStartedAt = Date.now();
       }
-      if (/\"role\":\"toolResult\"[\s\S]*\"toolName\":\"mesh_route\"|\"toolName\":\"mesh_route\"[\s\S]*\"role\":\"toolResult\"|\"type\":\"tool_execution_end\"[\s\S]*\"toolName\":\"mesh_route\"|pi-chalin completed:/i.test(recent)) {
-        sawMeshResult = true;
-        finishAfterMeshResult();
+      if (/\"role\":\"toolResult\"[\s\S]*\"toolName\":\"chalin_route\"|\"toolName\":\"chalin_route\"[\s\S]*\"role\":\"toolResult\"|\"type\":\"tool_execution_end\"[\s\S]*\"toolName\":\"chalin_route\"|pi-chalin completed:/i.test(recent)) {
+        sawChalinResult = true;
+        finishAfterChalinResult();
       }
     };
 
@@ -277,8 +277,8 @@ function killProcessTree(pid: number | undefined, signal: NodeJS.Signals): void 
   }
 }
 
-function detectDecision(stdout: string): "mesh" | "direct" {
-  return /"(?:name|toolName)":"mesh_route"|Mesh workflow:|Subagent results:/i.test(stdout) ? "mesh" : "direct";
+function detectDecision(stdout: string): "chalin" | "direct" {
+  return /"(?:name|toolName)":"chalin_route"|Chalin workflow:|Subagent results:/i.test(stdout) ? "chalin" : "direct";
 }
 
 function detectTopology(stdout: string): string {
@@ -294,12 +294,12 @@ function detectTopology(stdout: string): string {
   if (topology === "dag") return "multi-agent-dag";
   if (topology === "memory-only") return "memory-only";
 
-  const workflow = stdout.match(/Mesh workflow:\s*([^\\n"]+)/i)?.[1]?.trim();
+  const workflow = stdout.match(/Chalin workflow:\s*([^\\n"]+)/i)?.[1]?.trim();
   if (workflow) return workflow;
   return "none";
 }
 
-function topologyMatches(expected: MeshExpectedTopology, actual: string): boolean {
+function topologyMatches(expected: ChalinExpectedTopology, actual: string): boolean {
   if (expected === "single") return actual === "single-agent";
   if (expected === "chain") return actual === "multi-agent-chain";
   if (expected === "parallel") return actual === "multi-agent-parallel" || actual === "multi-agent-dag";
@@ -313,7 +313,7 @@ function hasAgent(stdout: string, agent: string): boolean {
   return new RegExp(`"agent":"${escaped}"|"agents":\\[[^\\]]*"${escaped}"`, "i").test(stdout);
 }
 
-function evaluateThresholds(testCase: MeshOrchestrationEvalCase, metrics: EvalMetrics, durationMs: number): string[] {
+function evaluateThresholds(testCase: ChalinOrchestrationEvalCase, metrics: EvalMetrics, durationMs: number): string[] {
   const failures: string[] = [];
   if (durationMs > thresholds.maxDurationMs) failures.push(`duration ${durationMs}ms > ${thresholds.maxDurationMs}ms`);
   if (metrics.combinedUsage.cost.total > thresholds.maxCombinedCost) failures.push(`combined cost $${metrics.combinedUsage.cost.total.toFixed(4)} > $${thresholds.maxCombinedCost}`);
@@ -321,11 +321,11 @@ function evaluateThresholds(testCase: MeshOrchestrationEvalCase, metrics: EvalMe
   if (metrics.childUsage.totalTokens > thresholds.maxChildTokens) failures.push(`child tokens ${metrics.childUsage.totalTokens} > ${thresholds.maxChildTokens}`);
   if (metrics.policy.violations > thresholds.maxPolicyViolations) failures.push(`policy violations ${metrics.policy.violations} > ${thresholds.maxPolicyViolations}`);
   if (metrics.policy.duplicateReadCount > thresholds.maxDuplicateReads) failures.push(`duplicate reads ${metrics.policy.duplicateReadCount} > ${thresholds.maxDuplicateReads}`);
-  if (testCase.expectedDecision === "mesh" && metrics.tools.builtInCallsBeforeMesh > thresholds.maxBuiltInsBeforeMesh) failures.push(`built-ins before mesh ${metrics.tools.builtInCallsBeforeMesh} > ${thresholds.maxBuiltInsBeforeMesh}`);
+  if (testCase.expectedDecision === "chalin" && metrics.tools.builtInCallsBeforeChalin > thresholds.maxBuiltInsBeforeChalin) failures.push(`built-ins before chalin ${metrics.tools.builtInCallsBeforeChalin} > ${thresholds.maxBuiltInsBeforeChalin}`);
   return failures;
 }
 
-function failureReason(testCase: MeshOrchestrationEvalCase, actualDecision: string, actualTopology: string, agents: string[], status: number | null, signal: NodeJS.Signals | null, timeoutReason: string | undefined, stderr: string, thresholdFailures: string[]): string {
+function failureReason(testCase: ChalinOrchestrationEvalCase, actualDecision: string, actualTopology: string, agents: string[], status: number | null, signal: NodeJS.Signals | null, timeoutReason: string | undefined, stderr: string, thresholdFailures: string[]): string {
   if (timeoutReason) return timeoutReason;
   if (signal) return `pi was killed by ${signal}`;
   if (status !== 0) return `pi exited with ${status}: ${snippet(stderr, 500)}`;
@@ -342,8 +342,8 @@ function parseCliArgs(args: string[]): {
   timeoutMs?: string;
   startTimeoutMs?: string;
   idleTimeoutMs?: string;
-  meshToolTimeoutMs?: string;
-  postMeshIdleTimeoutMs?: string;
+  chalinToolTimeoutMs?: string;
+  postChalinIdleTimeoutMs?: string;
 } {
   const result: ReturnType<typeof parseCliArgs> = {};
   for (const arg of args) {
@@ -353,13 +353,13 @@ function parseCliArgs(args: string[]): {
     else if (rawKey === "timeout-ms") result.timeoutMs = value;
     else if (rawKey === "start-timeout-ms") result.startTimeoutMs = value;
     else if (rawKey === "idle-timeout-ms") result.idleTimeoutMs = value;
-    else if (rawKey === "mesh-tool-timeout-ms") result.meshToolTimeoutMs = value;
-    else if (rawKey === "post-mesh-idle-timeout-ms") result.postMeshIdleTimeoutMs = value;
+    else if (rawKey === "chalin-tool-timeout-ms") result.chalinToolTimeoutMs = value;
+    else if (rawKey === "post-chalin-idle-timeout-ms") result.postChalinIdleTimeoutMs = value;
   }
   return result;
 }
 
-function selectCases(cases: MeshOrchestrationEvalCase[]): MeshOrchestrationEvalCase[] {
+function selectCases(cases: ChalinOrchestrationEvalCase[]): ChalinOrchestrationEvalCase[] {
   const ids = process.env.PI_CHALIN_EVAL_CASES?.split(",").map((id) => id.trim()).filter(Boolean);
   if (!ids?.length) return cases;
   const allowed = new Set(ids);
@@ -423,7 +423,7 @@ function extractMetrics(stdout: string, stderr: string): EvalMetrics {
     if (record.type === "message_end") {
       const message = isRecord(record.message) ? record.message : undefined;
       if (message?.role === "assistant") addUsageOnce(message, responseIds, usage);
-      if (message?.role === "toolResult" && message.toolName === "mesh_route") {
+      if (message?.role === "toolResult" && message.toolName === "chalin_route") {
         const child = extractChildRunMetrics(message);
         addUsage(childUsage, child.usage);
         childToolCalls += child.toolCalls;
@@ -443,8 +443,8 @@ function extractMetrics(stdout: string, stderr: string): EvalMetrics {
     }
   }
 
-  const meshIndex = toolOrder.indexOf("mesh_route");
-  const builtInCallsBeforeMesh = meshIndex < 0 ? 0 : toolOrder.slice(0, meshIndex).filter(isBuiltInTool).length;
+  const chalinIndex = toolOrder.indexOf("chalin_route");
+  const builtInCallsBeforeChalin = chalinIndex < 0 ? 0 : toolOrder.slice(0, chalinIndex).filter(isBuiltInTool).length;
   const totalCalls = toolOrder.length;
   const combinedUsage = cloneUsage(usage);
   addUsage(combinedUsage, childUsage);
@@ -454,11 +454,11 @@ function extractMetrics(stdout: string, stderr: string): EvalMetrics {
     combinedUsage,
     tools: {
       totalCalls,
-      meshRouteCalls: callsByName.mesh_route ?? 0,
+      chalinRouteCalls: callsByName.chalin_route ?? 0,
       builtInCalls: toolOrder.filter(isBuiltInTool).length,
       callsByName,
       firstTool: toolOrder[0],
-      builtInCallsBeforeMesh,
+      builtInCallsBeforeChalin,
     },
     childTools: { totalCalls: childToolCalls, callsByName: childCallsByName },
     policy,
@@ -475,9 +475,9 @@ function summarizeMetrics(results: EvalResult[]) {
   const callsByName: Record<string, number> = {};
   const childCallsByName: Record<string, number> = {};
   let totalToolCalls = 0;
-  let meshRouteCalls = 0;
+  let chalinRouteCalls = 0;
   let builtInCalls = 0;
-  let builtInCallsBeforeMesh = 0;
+  let builtInCallsBeforeChalin = 0;
   let childToolCalls = 0;
   let policyViolations = 0;
   let budgetStops = 0;
@@ -497,9 +497,9 @@ function summarizeMetrics(results: EvalResult[]) {
     filesRead += result.metrics.policy.filesRead;
     for (const [name, count] of Object.entries(result.metrics.childTools.callsByName)) childCallsByName[name] = (childCallsByName[name] ?? 0) + count;
     totalToolCalls += result.metrics.tools.totalCalls;
-    meshRouteCalls += result.metrics.tools.meshRouteCalls;
+    chalinRouteCalls += result.metrics.tools.chalinRouteCalls;
     builtInCalls += result.metrics.tools.builtInCalls;
-    builtInCallsBeforeMesh += result.metrics.tools.builtInCallsBeforeMesh;
+    builtInCallsBeforeChalin += result.metrics.tools.builtInCallsBeforeChalin;
     durationMs += result.durationMs;
     stdoutBytes += result.metrics.stdoutBytes;
     stderrBytes += result.metrics.stderrBytes;
@@ -511,7 +511,7 @@ function summarizeMetrics(results: EvalResult[]) {
     usage,
     childUsage,
     combinedUsage,
-    tools: { totalToolCalls, meshRouteCalls, builtInCalls, builtInCallsBeforeMesh, callsByName },
+    tools: { totalToolCalls, chalinRouteCalls, builtInCalls, builtInCallsBeforeChalin, callsByName },
     childTools: { totalToolCalls: childToolCalls, callsByName: childCallsByName },
     policy: { violations: policyViolations, budgetStops, duplicateReadCount, filesRead },
     io: { stdoutBytes, stderrBytes },
@@ -660,7 +660,7 @@ function printReport(reportPath: string, results: EvalResult[]): void {
   for (const result of results) {
     const icon = result.pass ? "✓" : "✖";
     console.log(`${icon} ${result.id}: expected ${result.expectedDecision}/${result.expectedTopology}, got ${result.actualDecision}/${result.actualTopology} (${result.durationMs}ms)`);
-    console.log(`  tools=${result.metrics.tools.totalCalls} mesh=${result.metrics.tools.meshRouteCalls} builtins=${result.metrics.tools.builtInCalls} parentTokens=${result.metrics.usage.totalTokens} childTokens=${result.metrics.childUsage.totalTokens} combinedCost=$${result.metrics.combinedUsage.cost.total.toFixed(4)} policyViolations=${result.metrics.policy.violations} budgetStops=${result.metrics.policy.budgetStops}`);
+    console.log(`  tools=${result.metrics.tools.totalCalls} chalin=${result.metrics.tools.chalinRouteCalls} builtins=${result.metrics.tools.builtInCalls} parentTokens=${result.metrics.usage.totalTokens} childTokens=${result.metrics.childUsage.totalTokens} combinedCost=$${result.metrics.combinedUsage.cost.total.toFixed(4)} policyViolations=${result.metrics.policy.violations} budgetStops=${result.metrics.policy.budgetStops}`);
     if (result.timeoutReason) console.log(`  timeout=${result.timeoutReason}`);
     if (result.thresholdFailures.length) console.log(`  thresholds: ${result.thresholdFailures.join("; ")}`);
     if (!result.pass) console.log(`  ${result.reason}`);

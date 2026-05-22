@@ -2,13 +2,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
-export interface MeshPathsOptions {
+export interface ChalinPathsOptions {
   cwd: string;
   userRoot?: string;
   packageRoot?: string;
 }
 
-export interface MeshPaths {
+export interface ChalinPaths {
   cwd: string;
   packageRoot: string;
   builtInAgentsDir: string;
@@ -24,11 +24,11 @@ export function packageRootFromImportMeta(importMetaUrl = import.meta.url): stri
   return path.resolve(path.dirname(fileURLToPath(importMetaUrl)), "..");
 }
 
-export function resolveMeshPaths(options: MeshPathsOptions): MeshPaths {
+export function resolveChalinPaths(options: ChalinPathsOptions): ChalinPaths {
   const cwd = path.resolve(options.cwd);
   const packageRoot = options.packageRoot ? path.resolve(options.packageRoot) : packageRootFromImportMeta();
   const projectRoot = cwd;
-  const userRoot = options.userRoot ? path.resolve(options.userRoot) : path.join(os.homedir(), ".pi", "mesh");
+  const userRoot = options.userRoot ? path.resolve(options.userRoot) : path.join(os.homedir(), ".pi", "chalin");
 
   return {
     cwd,

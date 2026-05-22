@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import initSqlJs from "sql.js-fts5/dist/sql-asm.js";
-import { resolveMeshPaths, type MeshPathsOptions } from "./paths.ts";
+import { resolveChalinPaths, type ChalinPathsOptions } from "./paths.ts";
 import type { MemoryCandidate, MemoryRecord } from "./schemas.ts";
 
 export interface MemorySearchResult {
@@ -18,8 +18,8 @@ let sqlModulePromise: Promise<SqlJsStatic> | undefined;
 export class MemoryStore {
   private readonly dbPath: string;
 
-  constructor(options: MeshPathsOptions) {
-    this.dbPath = path.join(resolveMeshPaths(options).projectRoot, ".pi-chalin", "memory.sqlite");
+  constructor(options: ChalinPathsOptions) {
+    this.dbPath = path.join(resolveChalinPaths(options).projectRoot, ".pi-chalin", "memory.sqlite");
   }
 
   async submitCandidates(candidates: MemoryCandidate[]): Promise<MemoryRecord[]> {
@@ -292,9 +292,9 @@ function memoryTopicKey(normalized: string): string | undefined {
   if (normalized.includes("memory.sqlite") || (has("memory") && (tokens.has("sqlite") || tokens.has("fts5") || normalized.includes("sql.js-fts5")))) return "memory-store";
   if ((normalized.includes("agents/") || normalized.includes("agents*.md") || normalized.includes("agents/*.md")) && has("agent")) return "agent-catalog";
   if (normalized.includes(".pi-chalin/runs") || normalized.includes("runs/<id>.json") || normalized.includes("runs/*.json")) return "run-persistence";
-  if (normalized.includes("src/commands.ts") || normalized.includes("/mesh")) return "mesh-commands";
+  if (normalized.includes("src/commands.ts") || normalized.includes("/chalin")) return "chalin-commands";
   if (normalized.includes("src/index.ts")) return "runtime-entrypoint";
-  if (normalized.includes("src/kernel.ts") || tokens.has("meshkernel")) return "kernel-routing";
+  if (normalized.includes("src/kernel.ts") || tokens.has("chalinkernel")) return "kernel-routing";
   if (tokens.has("architecture") || tokens.has("monolith") || tokens.has("monolito")) return "architecture";
   if (tokens.has("tui") && (tokens.has("modelos") || tokens.has("models") || tokens.has("rutas") || tokens.has("memory"))) return "tui-surface";
   return undefined;
@@ -304,7 +304,7 @@ function memoryTokens(normalized: string): Set<string> {
   const stop = new Set([
     "the", "and", "for", "that", "this", "with", "from", "into", "using", "uses", "use", "under", "through", "when", "where", "should",
     "este", "esta", "esto", "para", "que", "con", "por", "desde", "hacia", "como", "usa", "usar", "usando", "debe", "deben", "del", "las", "los", "una", "uno", "mas", "más",
-    "project", "proyecto", "pi", "mesh", "pi-chalin", "coding", "agent",
+    "project", "proyecto", "pi", "chalin", "pi-chalin", "coding", "agent",
   ]);
   return new Set(normalized.split(/\s+/).map(canonicalMemoryToken).filter((token) => token.length >= 3 && !stop.has(token)));
 }
@@ -376,14 +376,14 @@ function canonicalMemoryToken(token: string): string {
 function memoryEntities(normalized: string): Set<string> {
   const entities = new Set<string>();
   for (const match of normalized.matchAll(/[\w.-]+\/[\w./-]+|[\w.-]+\.(?:ts|tsx|js|jsx|json|md|sqlite)/g)) entities.add(match[0]);
-  for (const token of ["meshkernel", "agentcatalog", "memorystore", "typescript", "sqlite", "fts5", "tui", "sdk", "bun", "bun:test", "node:test"]) {
+  for (const token of ["chalinkernel", "agentcatalog", "memorystore", "typescript", "sqlite", "fts5", "tui", "sdk", "bun", "bun:test", "node:test"]) {
     if (normalized.includes(token)) entities.add(token);
   }
   return entities;
 }
 
 function isStrongMemoryEntity(entity: string): boolean {
-  return entity.includes("/") || /\.(?:ts|tsx|js|jsx|json|md|sqlite)$/.test(entity) || ["meshkernel", "agentcatalog", "memorystore", "sqlite", "fts5", "bun", "bun:test", "node:test"].includes(entity);
+  return entity.includes("/") || /\.(?:ts|tsx|js|jsx|json|md|sqlite)$/.test(entity) || ["chalinkernel", "agentcatalog", "memorystore", "sqlite", "fts5", "bun", "bun:test", "node:test"].includes(entity);
 }
 
 function jaccard(a: Set<string>, b: Set<string>): number {

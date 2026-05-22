@@ -10,7 +10,7 @@ import {
   type SyntheticQualityFixtureProfile,
 } from "./quality-fixtures.ts";
 
-export type Variant = "simple" | "mesh";
+export type Variant = "simple" | "chalin";
 
 interface RunDiagnostics {
   stdoutBytes: number;
@@ -18,7 +18,7 @@ interface RunDiagnostics {
   jsonEvents: number;
   assistantTextChars: number;
   toolResultEvents: number;
-  meshToolResultChars: number;
+  chalinToolResultChars: number;
   lastEventType?: string;
   lastProgressAt: string;
 }
@@ -58,12 +58,12 @@ async function main(): Promise<void> {
   const prompt = args.prompt ?? process.env.PI_CHALIN_QUALITY_PROMPT ?? fixture?.prompt ?? "revisa este proyecto dime que hace, en profundidad";
 
   const simplePath = args.simple ?? process.env.PI_CHALIN_QUALITY_SIMPLE_FILE;
-  const meshPath = args.mesh ?? process.env.PI_CHALIN_QUALITY_MESH_FILE;
+  const chalinPath = args.chalin ?? process.env.PI_CHALIN_QUALITY_CHALIN_FILE;
   const targetCwd = path.resolve(args.cwd ?? process.env.PI_CHALIN_QUALITY_CWD ?? fixture?.cwd ?? process.cwd());
 
   const outputs = mode === "sdk"
     ? await runSdkComparison({ prompt, targetCwd, variantTimeoutMs, variantsToRun })
-    : readFileComparison(simplePath, meshPath, variantsToRun);
+    : readFileComparison(simplePath, chalinPath, variantsToRun);
 
   const scores = Object.fromEntries(outputs.map((item) => [
     item.variant,
@@ -71,9 +71,9 @@ async function main(): Promise<void> {
   ])) as Partial<Record<Variant, ReturnType<typeof scoreAnalysisAnswer>>>;
   const timedOut = outputs.some((item) => item.timeoutReason);
   const simpleScore = scores.simple;
-  const meshScore = scores.mesh;
-  const pass = !timedOut && (simpleScore && meshScore
-    ? meshScore.pass && meshScore.score >= simpleScore.score
+  const chalinScore = scores.chalin;
+  const pass = !timedOut && (simpleScore && chalinScore
+    ? chalinScore.pass && chalinScore.score >= simpleScore.score
     : outputs.every((item) => scores[item.variant]?.pass));
   const report = {
     startedAt,
@@ -90,13 +90,13 @@ async function main(): Promise<void> {
       requestedTimeoutMs: requestedTimeoutMs ? Number(requestedTimeoutMs) : null,
       variantTimeoutMs,
       maxVariantTimeoutMs: MAX_VARIANT_TIMEOUT_MS,
-      reason: "Live SDK quality evals must fail fast; >2 minutes total for simple+mesh indicates a performance or hang issue to investigate.",
+      reason: "Live SDK quality evals must fail fast; >2 minutes total for simple+chalin indicates a performance or hang issue to investigate.",
     } : null,
-    comparison: simpleScore && meshScore ? {
+    comparison: simpleScore && chalinScore ? {
       simple: simpleScore,
-      mesh: meshScore,
-      scoreDelta: meshScore.score - simpleScore.score,
-      meshBeatsSimple: meshScore.score >= simpleScore.score,
+      chalin: chalinScore,
+      scoreDelta: chalinScore.score - simpleScore.score,
+      chalinBeatsSimple: chalinScore.score >= simpleScore.score,
     } : null,
     scores,
     outputs: outputs.map((item) => ({
@@ -121,10 +121,10 @@ async function main(): Promise<void> {
   fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
 
   console.log(`pi-chalin quality A/B: ${pass ? "PASS" : "FAIL"}`);
-  if (simpleScore && meshScore) {
-    console.log(`simple=${simpleScore.score} mesh=${meshScore.score} delta=${meshScore.score - simpleScore.score}`);
+  if (simpleScore && chalinScore) {
+    console.log(`simple=${simpleScore.score} chalin=${chalinScore.score} delta=${chalinScore.score - simpleScore.score}`);
     console.log(`simple missing: ${simpleScore.missingFacts.join(", ") || "none"}`);
-    console.log(`mesh missing: ${meshScore.missingFacts.join(", ") || "none"}`);
+    console.log(`chalin missing: ${chalinScore.missingFacts.join(", ") || "none"}`);
   } else {
     for (const variant of variantsToRun) {
       const score = scores[variant];
@@ -145,8 +145,8 @@ export function resolveVariantTimeoutMs(value: string | undefined): number {
 }
 
 export function resolveVariantsToRun(value: string | undefined): Variant[] {
-  if (!value || value === "both" || value === "all") return ["simple", "mesh"];
-  if (value === "simple" || value === "mesh") return [value];
+  if (!value || value === "both" || value === "all") return ["simple", "chalin"];
+  if (value === "simple" || value === "chalin") return [value];
   throw new Error(`Unsupported quality eval variant: ${value}`);
 }
 
@@ -165,8 +165,8 @@ function parseSyntheticFixtureProfile(value: string): SyntheticQualityFixturePro
   throw new Error(`Unsupported synthetic fixture profile: ${value}`);
 }
 
-function readFileComparison(simpleFile: string | undefined, meshFile: string | undefined, variantsToRun: Variant[]): RunOutput[] {
-  const paths: Record<Variant, string | undefined> = { simple: simpleFile, mesh: meshFile };
+function readFileComparison(simpleFile: string | undefined, chalinFile: string | undefined, variantsToRun: Variant[]): RunOutput[] {
+  const paths: Record<Variant, string | undefined> = { simple: simpleFile, chalin: chalinFile };
   const missing = variantsToRun.filter((variant) => !paths[variant]);
   if (missing.length > 0) {
     throw new Error(`files mode requires output files for: ${missing.join(", ")}`);
@@ -195,23 +195,23 @@ async function runPiVariant(variant: Variant, config: { prompt: string; targetCw
     "--no-context-files",
     "--no-skills",
     "--tools",
-    variant === "mesh" ? "read,bash,grep,find,ls,mesh_route" : "read,bash,grep,find,ls",
+    variant === "chalin" ? "read,bash,grep,find,ls,chalin_route" : "read,bash,grep,find,ls",
   ];
-  if (variant === "mesh") args.push("-e", extensionPath);
+  if (variant === "chalin") args.push("-e", extensionPath);
   const model = process.env.PI_CHALIN_QUALITY_MODEL;
   if (model) args.push("--model", model);
   const thinking = process.env.PI_CHALIN_QUALITY_THINKING ?? "minimal";
   if (thinking) args.push("--thinking", thinking);
   args.push(config.prompt);
 
-  const run = await runPi(args, config.targetCwd, config.variantTimeoutMs, { finishOnMeshToolEnd: variant === "mesh" });
-  const finalText = variant === "mesh"
-    ? extractMeshToolResultText(run.stdout) || extractFinalText(run.stdout) || run.stdout
+  const run = await runPi(args, config.targetCwd, config.variantTimeoutMs, { finishOnChalinToolEnd: variant === "chalin" });
+  const finalText = variant === "chalin"
+    ? extractChalinToolResultText(run.stdout) || extractFinalText(run.stdout) || run.stdout
     : extractFinalText(run.stdout) || run.stdout;
   return { variant, ...run, finalText, durationMs: Date.now() - started };
 }
 
-function runPi(args: string[], cwd: string, variantTimeoutMs: number, options: { finishOnMeshToolEnd?: boolean } = {}): Promise<{ stdout: string; stderr: string; status: number | null; signal: NodeJS.Signals | null; timeoutReason?: string; diagnostics: RunDiagnostics }> {
+function runPi(args: string[], cwd: string, variantTimeoutMs: number, options: { finishOnChalinToolEnd?: boolean } = {}): Promise<{ stdout: string; stderr: string; status: number | null; signal: NodeJS.Signals | null; timeoutReason?: string; diagnostics: RunDiagnostics }> {
   return new Promise((resolve, reject) => {
     const child = spawn("pi", args, {
       cwd,
@@ -231,7 +231,7 @@ function runPi(args: string[], cwd: string, variantTimeoutMs: number, options: {
       jsonEvents: 0,
       assistantTextChars: 0,
       toolResultEvents: 0,
-      meshToolResultChars: 0,
+      chalinToolResultChars: 0,
       lastProgressAt: new Date().toISOString(),
     };
     const markProgress = () => { diagnostics.lastProgressAt = new Date().toISOString(); };
@@ -254,7 +254,7 @@ function runPi(args: string[], cwd: string, variantTimeoutMs: number, options: {
       diagnostics.stdoutBytes += chunk.length;
       stdoutRemainder = observeJsonLines(stdoutRemainder + text, diagnostics);
       markProgress();
-      if (options.finishOnMeshToolEnd && diagnostics.meshToolResultChars > 0 && !terminalEventTimer) {
+      if (options.finishOnChalinToolEnd && diagnostics.chalinToolResultChars > 0 && !terminalEventTimer) {
         terminalEventTimer = setTimeout(() => {
           if (child.exitCode === null) killProcessTree(child.pid, "SIGTERM");
           finish(0, null);
@@ -297,11 +297,11 @@ function observeJsonLines(buffer: string, diagnostics: RunDiagnostics): string {
         diagnostics.assistantTextChars = Math.max(diagnostics.assistantTextChars, parsed.assistantMessageEvent.content.length);
       }
       if (Array.isArray(parsed.toolResults)) diagnostics.toolResultEvents += parsed.toolResults.length;
-      if (parsed.type === "tool_execution_end" && parsed.toolName === "mesh_route") {
+      if (parsed.type === "tool_execution_end" && parsed.toolName === "chalin_route") {
         const text = toolResultToText(parsed.result);
         if (text.trim()) {
           diagnostics.toolResultEvents += 1;
-          diagnostics.meshToolResultChars = Math.max(diagnostics.meshToolResultChars, text.length);
+          diagnostics.chalinToolResultChars = Math.max(diagnostics.chalinToolResultChars, text.length);
         }
       }
     } catch {
@@ -356,12 +356,12 @@ export function extractFinalText(stdout: string): string {
   return (assistantTexts.at(-1) || currentAssistantText).trim();
 }
 
-export function extractMeshToolResultText(stdout: string): string {
+export function extractChalinToolResultText(stdout: string): string {
   const results: string[] = [];
   for (const line of stdout.split(/\r?\n/).filter(Boolean)) {
     try {
       const parsed = JSON.parse(line) as { type?: unknown; toolName?: unknown; result?: unknown };
-      if (parsed.type === "tool_execution_end" && parsed.toolName === "mesh_route") {
+      if (parsed.type === "tool_execution_end" && parsed.toolName === "chalin_route") {
         const text = toolResultToText(parsed.result);
         if (text.trim()) results.push(text);
       }

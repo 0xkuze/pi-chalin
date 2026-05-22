@@ -25,7 +25,7 @@ async function main(): Promise<void> {
   const startedAt = new Date().toISOString();
   const traceInput = readTraceInput(args);
   const stdout = traceInput.stdout;
-  const variant = parseVariant(args.variant ?? "mesh");
+  const variant = parseVariant(args.variant ?? "chalin");
   const finalText = args.final ? fs.readFileSync(path.resolve(args.final), "utf-8") : args.finalText ?? traceInput.finalText;
   const report = gradePiTrace(stdout, {
     variant,
@@ -86,7 +86,7 @@ function readTraceInput(args: Record<string, string>): { stdout: string; finalTe
   if (args.stdout) return { stdout: fs.readFileSync(path.resolve(args.stdout), "utf-8") };
   if (args.report) {
     const report = JSON.parse(fs.readFileSync(path.resolve(args.report), "utf-8")) as { outputs?: Array<{ variant?: string; stdout?: string; finalText?: string }> };
-    const variant = args.variant ?? "mesh";
+    const variant = args.variant ?? "chalin";
     const output = report.outputs?.find((item) => item.variant === variant);
     if (!output) throw new Error(`Report does not contain output for variant ${variant}`);
     if (output.stdout) return { stdout: output.stdout, finalText: output.finalText };
@@ -174,7 +174,7 @@ function contentToText(content: unknown): string {
 }
 
 function parseVariant(value: string): TraceVariant {
-  if (value === "simple" || value === "mesh") return value;
+  if (value === "simple" || value === "chalin") return value;
   throw new Error(`Unsupported trace variant: ${value}`);
 }
 

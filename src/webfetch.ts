@@ -1,7 +1,7 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { resolveMeshPaths, type MeshPathsOptions } from "./paths.ts";
+import { resolveChalinPaths, type ChalinPathsOptions } from "./paths.ts";
 
 const EXA_MCP_URL = "https://mcp.exa.ai/mcp?tools=web_search_exa,web_fetch_exa";
 const SEARCH_TTL_MS = 6 * 60 * 60 * 1000;
@@ -43,11 +43,11 @@ export interface WebFetchAuditEntry {
   sources: Array<Pick<WebSourceEvidence, "title" | "url">>;
 }
 
-export interface WebFetchAuditOptions extends MeshPathsOptions {
+export interface WebFetchAuditOptions extends ChalinPathsOptions {
   now?: number;
 }
 
-export interface WebSearchRequest extends MeshPathsOptions {
+export interface WebSearchRequest extends ChalinPathsOptions {
   query: string;
   maxSources?: number;
   depth?: WebFetchDepth;
@@ -55,7 +55,7 @@ export interface WebSearchRequest extends MeshPathsOptions {
   signal?: AbortSignal;
 }
 
-export interface WebFetchUrlRequest extends MeshPathsOptions {
+export interface WebFetchUrlRequest extends ChalinPathsOptions {
   urls: string[];
   freshness?: WebFetchFreshness;
   signal?: AbortSignal;
@@ -68,7 +68,7 @@ interface ExaMcpRpcResponse {
 
 export async function searchWeb(request: WebSearchRequest): Promise<WebContextBundle> {
   const normalizedQuery = request.query.trim();
-  if (!normalizedQuery) throw new Error("mesh_web_search requires a non-empty query.");
+  if (!normalizedQuery) throw new Error("chalin_web_search requires a non-empty query.");
   const maxSources = clampInteger(request.maxSources, 1, 10, 5);
   const depth = request.depth ?? "snippets";
   const freshness = request.freshness ?? "cache-ok";
@@ -92,7 +92,7 @@ export async function searchWeb(request: WebSearchRequest): Promise<WebContextBu
 
 export async function fetchWebUrls(request: WebFetchUrlRequest): Promise<WebContextBundle> {
   const urls = request.urls.map((url) => url.trim()).filter(Boolean).slice(0, 5);
-  if (urls.length === 0) throw new Error("mesh_web_search fetch mode requires at least one URL.");
+  if (urls.length === 0) throw new Error("chalin_web_search fetch mode requires at least one URL.");
   const freshness = request.freshness ?? "cache-ok";
   const key = cacheKey("fetch", { urls });
   const ttlMs = freshness === "must-be-fresh" ? 0 : FETCH_TTL_MS;
@@ -131,7 +131,7 @@ export async function callExaMcp(toolName: "web_search_exa" | "web_fetch_exa", a
 
 export function formatWebBundle(bundle: WebContextBundle): string {
   const lines = [
-    bundle.query ? `mesh web search · ${bundle.query}` : `mesh web fetch · ${bundle.urls?.join(", ")}`,
+    bundle.query ? `chalin web search · ${bundle.query}` : `chalin web fetch · ${bundle.urls?.join(", ")}`,
     `provider: ${bundle.provider} · cache: ${bundle.cache.hit ? "hit" : "miss"} · sources: ${bundle.sources.length}`,
     bundle.warnings.length > 0 ? `warnings: ${bundle.warnings.join("; ")}` : undefined,
     "",
@@ -145,7 +145,7 @@ export function formatWebBundle(bundle: WebContextBundle): string {
 }
 
 export async function listWebFetchAudit(options: WebFetchAuditOptions): Promise<WebFetchAuditEntry[]> {
-  const dir = path.join(resolveMeshPaths(options).projectRoot, ".pi-chalin", "cache", "webfetch");
+  const dir = path.join(resolveChalinPaths(options).projectRoot, ".pi-chalin", "cache", "webfetch");
   if (!fs.existsSync(dir)) return [];
   const now = options.now ?? Date.now();
   const entries: WebFetchAuditEntry[] = [];
@@ -241,7 +241,7 @@ function toBundle(input: { query?: string; urls?: string[]; key: string; ttlMs: 
   };
 }
 
-function readCache(options: MeshPathsOptions, key: string, ttlMs: number): WebContextBundle | undefined {
+function readCache(options: ChalinPathsOptions, key: string, ttlMs: number): WebContextBundle | undefined {
   const file = cachePath(options, key);
   if (!fs.existsSync(file)) return undefined;
   try {
@@ -253,14 +253,14 @@ function readCache(options: MeshPathsOptions, key: string, ttlMs: number): WebCo
   }
 }
 
-function writeCache(options: MeshPathsOptions, key: string, bundle: WebContextBundle): void {
+function writeCache(options: ChalinPathsOptions, key: string, bundle: WebContextBundle): void {
   const file = cachePath(options, key);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `${JSON.stringify(bundle, null, 2)}\n`, "utf-8");
 }
 
-function cachePath(options: MeshPathsOptions, key: string): string {
-  return path.join(resolveMeshPaths(options).projectRoot, ".pi-chalin", "cache", "webfetch", `${key}.json`);
+function cachePath(options: ChalinPathsOptions, key: string): string {
+  return path.join(resolveChalinPaths(options).projectRoot, ".pi-chalin", "cache", "webfetch", `${key}.json`);
 }
 
 function cacheKey(kind: string, payload: unknown): string {

@@ -1,44 +1,44 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { AgentCatalog } from "./agents.ts";
 import { loadEffectiveConfig } from "./config.ts";
-import { buildCompactMeshCriticalSystemPrompt, buildCompactMeshOrchestratorSystemPrompt, buildMeshOrchestratorSystemPrompt } from "./orchestration.ts";
-import { beginMeshTurn, recordDirectToolCompletion } from "./runtime-state.ts";
-import { setMeshStatus } from "./ui.ts";
+import { buildCompactChalinCriticalSystemPrompt, buildCompactChalinOrchestratorSystemPrompt, buildChalinOrchestratorSystemPrompt } from "./orchestration.ts";
+import { beginChalinTurn, recordDirectToolCompletion } from "./runtime-state.ts";
+import { setChalinStatus } from "./ui.ts";
 
-export function registerMeshAutoRouter(pi: ExtensionAPI): void {
+export function registerChalinAutoRouter(pi: ExtensionAPI): void {
   pi.on("input", async (event) => {
     if (event.source === "extension") return { action: "continue" };
     const text = event.text.trim();
     if (!text || text.startsWith("/") || text.startsWith("!")) return { action: "continue" };
 
     // Never consume the user prompt. The primary Pi agent stays in control and
-    // decides whether to call mesh_route as one of its normal tools.
+    // decides whether to call chalin_route as one of its normal tools.
     return { action: "continue" };
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
-    beginMeshTurn({ prompt: typeof event.prompt === "string" ? event.prompt : undefined });
+    beginChalinTurn({ prompt: typeof event.prompt === "string" ? event.prompt : undefined });
     const loaded = loadEffectiveConfig({ cwd: ctx.cwd });
     if (!loaded.config.enabled) return;
     const promptText = typeof event.prompt === "string" ? event.prompt : "";
     const useCompactPrompt = shouldUseCompactDirectOrchestrationPrompt(promptText);
-    const useCompactCriticalPrompt = !useCompactPrompt && shouldUseCompactMeshCriticalPrompt(promptText);
+    const useCompactCriticalPrompt = !useCompactPrompt && shouldUseCompactChalinCriticalPrompt(promptText);
     const catalog = useCompactPrompt || useCompactCriticalPrompt ? undefined : AgentCatalog.load({ cwd: ctx.cwd });
     const orchestrationPrompt = useCompactPrompt
-      ? buildCompactMeshOrchestratorSystemPrompt()
-      : useCompactCriticalPrompt ? buildCompactMeshCriticalSystemPrompt() : buildMeshOrchestratorSystemPrompt(catalog?.list() ?? []);
+      ? buildCompactChalinOrchestratorSystemPrompt()
+      : useCompactCriticalPrompt ? buildCompactChalinCriticalSystemPrompt() : buildChalinOrchestratorSystemPrompt(catalog?.list() ?? []);
     return {
       systemPrompt: `${event.systemPrompt}\n\n${orchestrationPrompt}`,
       message: {
         customType: useCompactPrompt ? "pi-chalin-direct-compact-orchestration" : useCompactCriticalPrompt ? "pi-chalin-critical-compact-orchestration" : "pi-chalin-orchestration",
         content: useCompactPrompt ? compactDirectSteeringMessage(ctx.hasUI) : useCompactCriticalPrompt ? compactCriticalSteeringMessage(ctx.hasUI) : [
-          "If the user says continue/resume after an interrupted pi-chalin run, call mesh_resume before answering from partial findings.",
-          "pi-chalin preflight: if this is branch/project analysis, architecture/planning, broad/project-wide review, project-wide refactor strategy, complex/risky multi-file implementation, or memory recall, call mesh_route first. Bounded read-only mini-project reviews, bounded scaffolding, named-file bugfixes, named-file refactors, and simple implementation with explicit acceptance criteria should stay direct.",
+          "If the user says continue/resume after an interrupted pi-chalin run, call chalin_resume before answering from partial findings.",
+          "pi-chalin preflight: if this is branch/project analysis, architecture/planning, broad/project-wide review, project-wide refactor strategy, complex/risky multi-file implementation, or memory recall, call chalin_route first. Bounded read-only mini-project reviews, bounded scaffolding, named-file bugfixes, named-file refactors, and simple implementation with explicit acceptance criteria should stay direct.",
           "For explicit small bugfix/test requests with named files, inspect the target files once, edit promptly, and verify. Do not route or dry-run unless the change is broad, destructive, a security-sensitive mutation, or ambiguous.",
-          "Also call mesh_route for risky surgical/long-file edits; use scout → planner → worker → reviewer so the edit stays targeted and verified.",
-          "If the user asks to compare independent approaches/options, choose mesh_route with parallel planners/reviewers and synthesize the recommendation afterward.",
-          "Choose topology/agents yourself. Use one mesh_route call only, then synthesize from its handoff; do not inspect files directly unless a concrete gap remains.",
-          ctx.hasUI ? undefined : "Non-interactive mode: avoid dry-run for safe bounded edits; either edit directly or run a real mesh_route. Use dryRun only for destructive/high-risk/ambiguous work that genuinely needs user review.",
+          "Also call chalin_route for risky surgical/long-file edits; use scout → planner → worker → reviewer so the edit stays targeted and verified.",
+          "If the user asks to compare independent approaches/options, choose chalin_route with parallel planners/reviewers and synthesize the recommendation afterward.",
+          "Choose topology/agents yourself. Use one chalin_route call only, then synthesize from its handoff; do not inspect files directly unless a concrete gap remains.",
+          ctx.hasUI ? undefined : "Non-interactive mode: avoid dry-run for safe bounded edits; either edit directly or run a real chalin_route. Use dryRun only for destructive/high-risk/ambiguous work that genuinely needs user review.",
           "Simple chat, definitions, one obvious command, tiny isolated edits, bounded read-only mini-project reviews, named-file bugfixes, or bounded scaffolding/simple implementation tasks with explicit files stay direct. Direct mode must still satisfy every explicit acceptance criterion exactly, including requested helper extraction, tests, no dependency additions, and behavior preservation. If the user asks for tests, changing only implementation is incomplete even when existing tests pass; add or update the relevant test file before final verification. Those tests must prove the requested behavior with at least one non-trivial positive case and one meaningful edge/failure case when applicable; merely renaming or preserving a starter smoke/empty test is incomplete. For time/window behavior, make tests deterministic with an injected or controlled clock when possible; avoid brittle mock timer APIs unless you verify the current Bun API in this project. Do not assert exact `Date.now()`-derived milliseconds against real wall time. For dependency-free TypeScript scaffolding, write the exact requested files, keep requested APIs/exported helpers in the requested source file, prefer package.json test script `bun test`, put tests under `test/`, avoid uninstalled runners like tsx/vitest/jest, export the requested API, declare requested package.json `bin` entries that point to executable file paths, never command strings, and fix verification failures and rerun verification after the final edit before answering. For Bun CLI subprocess tests, derive target paths directly with `import.meta.url` and pass `env: { ...process.env, ...overrides }` so stripped PATH/NODE_OPTIONS cannot create false failures. After edits plus a passing final verification, answer immediately with changed files, verification result, and one note naming the requested behavior/constraint satisfied.",
         ].filter((line): line is string => Boolean(line)).join("\n"),
         display: false,
@@ -47,13 +47,13 @@ export function registerMeshAutoRouter(pi: ExtensionAPI): void {
   });
 
   pi.on("agent_end", (_event, ctx) => {
-    setMeshStatus(ctx, { kind: "idle" });
+    setChalinStatus(ctx, { kind: "idle" });
   });
 
   pi.on("tool_execution_end", (event, ctx) => {
-    if (["mesh_route", "mesh_resume"].includes(event.toolName)) {
+    if (["chalin_route", "chalin_resume"].includes(event.toolName)) {
       if (event.isError) return;
-      const blockedReason = meshRouteBlockedReason(event);
+      const blockedReason = chalinRouteBlockedReason(event);
       if (blockedReason) {
         pi.sendMessage({
           customType: "pi-chalin-route-blocked-nudge",
@@ -141,7 +141,7 @@ export function registerMeshAutoRouter(pi: ExtensionAPI): void {
 
   pi.on("session_shutdown", () => {
     // No background auto-routing workers are owned by this module anymore.
-    // Subagent execution is driven through the mesh_route tool and Pi's native
+    // Subagent execution is driven through the chalin_route tool and Pi's native
     // abort signal.
   });
 }
@@ -150,7 +150,7 @@ export function registerMeshAutoRouter(pi: ExtensionAPI): void {
 export function shouldUseCompactDirectOrchestrationPrompt(prompt: string): boolean {
   const text = prompt.toLowerCase();
   if (!text.trim()) return false;
-  if (looksLikeMeshOrchestrationWork(text)) return false;
+  if (looksLikeChalinOrchestrationWork(text)) return false;
   const pathMentions = countPathMentions(prompt);
   const hasDirectMutationVerb = /\b(implementa|implementar|implement|fix|corrige|corregir|refactor|refactoriza|añade|agrega|add|update|actualiza|scaffold|scaffoldea|crea|create|write|escribe)\b/i.test(prompt);
   const hasScaffoldContract = /\b(scaffold|scaffoldea|greenfield|desde cero|librer[ií]a|cli|package\.json|readme|sin dependencias|no external dependencies)\b/i.test(prompt)
@@ -158,7 +158,7 @@ export function shouldUseCompactDirectOrchestrationPrompt(prompt: string): boole
   return (hasDirectMutationVerb && pathMentions > 0 && pathMentions <= 6) || hasScaffoldContract;
 }
 
-export function shouldUseCompactMeshCriticalPrompt(prompt: string): boolean {
+export function shouldUseCompactChalinCriticalPrompt(prompt: string): boolean {
   const text = prompt.toLowerCase();
   return /\b(long-file|archivo largo|surgical|quir[uú]rgic|evita reescribir|avoid rewrite|auth|refresh token|security-sensitive|seguridad|dos cambios independientes|independent implementation|modulos separados|m[oó]dulos separados)\b/i.test(text)
     && /\b(implementa|implement|cambia|change|fix|corrige|agrega|add|tests|pruebas|worker|parallel|paralel)\b/i.test(text);
@@ -166,8 +166,8 @@ export function shouldUseCompactMeshCriticalPrompt(prompt: string): boolean {
 
 function compactCriticalSteeringMessage(hasUI?: boolean): string {
   return [
-    "pi-chalin critical preflight: this is risky/complex/surgical work. First action must be `mesh_route`; do not answer direct and do not inspect with native tools first.",
-    hasUI ? undefined : "Non-interactive mode: one real mesh_route, then stop from the mesh handoff; no post-mesh native exploration.",
+    "pi-chalin critical preflight: this is risky/complex/surgical work. First action must be `chalin_route`; do not answer direct and do not inspect with native tools first.",
+    hasUI ? undefined : "Non-interactive mode: one real chalin_route, then stop from the chalin handoff; no post-chalin native exploration.",
     "Use worker/reviewer discipline: decompose, assign ownership, verify, and preserve a compact final handoff.",
   ].filter((line): line is string => Boolean(line)).join("\n");
 }
@@ -184,7 +184,7 @@ function compactDirectSteeringMessage(hasUI?: boolean): string {
   ].filter((line): line is string => Boolean(line)).join("\n");
 }
 
-function looksLikeMeshOrchestrationWork(text: string): boolean {
+function looksLikeChalinOrchestrationWork(text: string): boolean {
   return /\b(en profundidad|deep|todo el proyecto|project-wide|arquitectura|architecture|migration|migraci[oó]n|strategy|estrategia|review completo|security review|broad|riesgoso|risky|long-file|archivo largo|surgical|quir[uú]rgic|paralel|parallel|compare approaches|opciones|resume|contin[uú]a|memory|memoria)\b/i.test(text);
 }
 
@@ -193,7 +193,7 @@ function countPathMentions(prompt: string): number {
   return matches?.length ?? 0;
 }
 
-function meshRouteBlockedReason(event: unknown): string | undefined {
+function chalinRouteBlockedReason(event: unknown): string | undefined {
   const details = (event as { result?: { details?: { approval?: { action?: unknown; reason?: unknown }; routeGuard?: { action?: unknown; reason?: unknown } } } }).result?.details;
   if (details?.routeGuard?.action === "direct-recommended") {
     const reason = details.routeGuard.reason;

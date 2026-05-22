@@ -429,7 +429,7 @@ test("unrecovered read-only DAG failures remain failed until a downstream stage 
 });
 
 test("parseAgentOutput accepts richer memory categories for long-running work", () => {
-  const output = parseAgentOutput("planner", "## Memory Candidates\n- testing: This project runs regression tests with bun:test and isolated temp directories, so feature tests should not share filesystem state.\n- workflow: Long-running mesh features should checkpoint handoffs and validation contracts after each stage so later agents can resume safely.");
+  const output = parseAgentOutput("planner", "## Memory Candidates\n- testing: This project runs regression tests with bun:test and isolated temp directories, so feature tests should not share filesystem state.\n- workflow: Long-running chalin features should checkpoint handoffs and validation contracts after each stage so later agents can resume safely.");
   assert.deepEqual(output.memoryCandidates.map((candidate) => candidate.category), ["testing", "workflow"]);
 });
 
@@ -569,7 +569,7 @@ test("childToolNames removes inspection tools for handoff-only synthesis steps",
   };
 
   assert.deepEqual(childToolNames(agent, "Synthesize scout findings into final answer material.", true, true), []);
-  assert.ok(childToolNames(agent, "Save a checkpoint for this long-running feature.", true, true).includes("mesh_artifact_write"));
+  assert.ok(childToolNames(agent, "Save a checkpoint for this long-running feature.", true, true).includes("chalin_artifact_write"));
 });
 
 test("childToolNames keeps inspection tools for deep synthesis with possible coverage gaps", () => {
@@ -608,7 +608,7 @@ test("childToolNames uses discovery plus snapshot mode for branch reconnaissance
     diagnostics: [],
   };
 
-  assert.deepEqual(childToolNames(agent, "Inspect current git branch, status, recent commits, and diff against base.", false, false), ["mesh_project_discovery", "mesh_project_snapshot"]);
+  assert.deepEqual(childToolNames(agent, "Inspect current git branch, status, recent commits, and diff against base.", false, false), ["chalin_project_discovery", "chalin_project_snapshot"]);
 });
 
 

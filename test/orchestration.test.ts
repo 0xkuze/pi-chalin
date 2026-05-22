@@ -3,7 +3,7 @@ import { test } from "bun:test";
 import { AgentCatalog } from "../src/agents.ts";
 import {
   ORCHESTRATION_EVAL_CASES,
-  buildMeshOrchestratorSystemPrompt,
+  buildChalinOrchestratorSystemPrompt,
   summarizeOrchestrationEvalCases,
 } from "../src/orchestration.ts";
 import { directExecutionRecommendation, ensureMutationRouteHasWorker } from "../src/tools.ts";
@@ -18,11 +18,11 @@ const expectedTopologyMap = new Map([
   ["none", "none"],
 ]);
 
-test("orchestration eval cases cover mesh and direct decisions", () => {
+test("orchestration eval cases cover chalin and direct decisions", () => {
   const summary = summarizeOrchestrationEvalCases();
 
   assert.equal(summary.total, 19);
-  assert.equal(summary.meshExpected, 13);
+  assert.equal(summary.chalinExpected, 13);
   assert.equal(summary.directExpected, 6);
   assert.equal(summary.byTopology.chain, 9);
   assert.equal(summary.byTopology.parallel, 1);
@@ -35,19 +35,19 @@ test("orchestration eval cases cover mesh and direct decisions", () => {
     assert.ok(testCase.reason.length > 20);
     assert.equal(expectedTopologyMap.has(testCase.expectedTopology), true);
     if (testCase.expectedDecision === "direct") assert.equal(testCase.expectedTopology, "none");
-    if (testCase.expectedDecision === "mesh") assert.notEqual(testCase.expectedTopology, "none");
+    if (testCase.expectedDecision === "chalin") assert.notEqual(testCase.expectedTopology, "none");
   }
 });
 
 test("orchestrator prompt teaches LLM-first routing without prompt keyword classifiers", () => {
   const catalog = AgentCatalog.load({ cwd: process.cwd() });
-  const prompt = buildMeshOrchestratorSystemPrompt(catalog.list());
+  const prompt = buildChalinOrchestratorSystemPrompt(catalog.list());
 
   assert.match(prompt, /primary Pi agent/i);
-  assert.match(prompt, /answer directly, call `mesh_interview`, or call `mesh_route`/i);
-  assert.match(prompt, /MUST call `mesh_interview` before `mesh_route`/i);
+  assert.match(prompt, /answer directly, call `chalin_interview`, or call `chalin_route`/i);
+  assert.match(prompt, /MUST call `chalin_interview` before `chalin_route`/i);
   assert.match(prompt, /Interview when/i);
-  assert.match(prompt, /MUST call `mesh_route` first/i);
+  assert.match(prompt, /MUST call `chalin_route` first/i);
   assert.match(prompt, /Gate/i);
   assert.match(prompt, /branch\/diff\/PR/i);
   assert.match(prompt, /Architecture\/migration/i);
@@ -85,7 +85,7 @@ test("orchestrator prompt teaches LLM-first routing without prompt keyword class
   assert.doesNotMatch(prompt, /regex|if the prompt contains|hard-coded prompt/i);
 });
 
-test("mesh mutation routes without workers are normalized before execution", () => {
+test("chalin mutation routes without workers are normalized before execution", () => {
   const route: RouteDecision = {
     kind: "multi-agent-chain",
     agents: ["scout", "planner", "reviewer"],
@@ -119,7 +119,7 @@ test("bounded explicit-file refactors are recommended back to direct execution",
     ambiguity: "low",
     needsMemory: false,
     needsArtifacts: true,
-    reason: "parent chose mesh",
+    reason: "parent chose chalin",
     plan: { kind: "chain", steps: [{ agent: "worker", task: "edit" }] },
   };
 
@@ -139,7 +139,7 @@ test("bounded read-only mini reviews are recommended back to direct execution", 
     ambiguity: "low",
     needsMemory: false,
     needsArtifacts: false,
-    reason: "parent chose mesh",
+    reason: "parent chose chalin",
     plan: { kind: "chain", steps: [{ agent: "scout", task: "inspect" }, { agent: "reviewer", task: "review" }] },
   };
 
@@ -159,7 +159,7 @@ test("broad risky file work is not recommended back to direct execution", () => 
     ambiguity: "low",
     needsMemory: false,
     needsArtifacts: true,
-    reason: "parent chose mesh",
+    reason: "parent chose chalin",
     plan: { kind: "chain", steps: [{ agent: "worker", task: "edit" }] },
   };
 

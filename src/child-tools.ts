@@ -28,7 +28,7 @@ const BashParams = Type.Object({
   timeout: Type.Optional(Type.Number({ description: "Timeout in seconds" })),
 });
 
-const MeshArtifactWriteParams = Type.Object({
+const ChalinArtifactWriteParams = Type.Object({
   kind: Type.Union([Type.Literal("checkpoint"), Type.Literal("validation-contract"), Type.Literal("worker-skill"), Type.Literal("feature-state")]),
   featureId: Type.String({ description: "Stable feature/task artifact id." }),
   title: Type.Optional(Type.String({ description: "Checkpoint or validation title." })),
@@ -45,7 +45,7 @@ const MeshArtifactWriteParams = Type.Object({
   chain: Type.Optional(Type.Array(Type.String())),
 });
 
-type MeshArtifactWriteParamsShape = {
+type ChalinArtifactWriteParamsShape = {
   kind: "checkpoint" | "validation-contract" | "worker-skill" | "feature-state";
   featureId: string;
   title?: string;
@@ -62,7 +62,7 @@ type MeshArtifactWriteParamsShape = {
   chain?: string[];
 };
 
-const MeshWebSearchParams = Type.Object({
+const ChalinWebSearchParams = Type.Object({
   query: Type.Optional(Type.String({ description: "Web search query." })),
   url: Type.Optional(Type.String({ description: "Single URL to fetch." })),
   urls: Type.Optional(Type.Array(Type.String(), { description: "URLs to fetch." })),
@@ -283,35 +283,35 @@ export function createChildTools(policy: ChildToolPolicy): ToolDefinition[] {
   ];
   const tools: Array<[string, ToolDefinition<any, any, any>]> = [
     ...builtinTools.map(([name, tool]) => [name, guardTool(tool, name, policy)] as [string, ToolDefinition<any, any, any>]),
-    ["mesh_project_discovery", createProjectDiscoveryTool(policy)],
-    ["mesh_project_snapshot", createProjectSnapshotTool(policy)],
+    ["chalin_project_discovery", createProjectDiscoveryTool(policy)],
+    ["chalin_project_snapshot", createProjectSnapshotTool(policy)],
     ["bash", createGuardedBashTool(policy)],
-    ["mesh_web_search", createMeshWebSearchTool(policy)],
-    ["mesh_artifact_write", createMeshArtifactWriteTool(policy)],
+    ["chalin_web_search", createChalinWebSearchTool(policy)],
+    ["chalin_artifact_write", createChalinArtifactWriteTool(policy)],
   ];
   return tools.filter(([name]) => policy.allowedTools.has(name)).map(([, tool]) => tool);
 }
 
 export function createProjectDiscoveryTool(policy: ChildToolPolicy): ToolDefinition {
   return defineTool<typeof DiscoveryParams, unknown>({
-    name: "mesh_project_discovery",
-    label: "Mesh Project Discovery",
+    name: "chalin_project_discovery",
+    label: "Chalin Project Discovery",
     description: "Return a raw, stack-agnostic project file index with shallow files, config-like files, test-like files, directories, and extension histogram. It does not infer architecture or framework.",
-    promptSnippet: "mesh_project_discovery: get a raw non-semantic file index before deciding which files to inspect.",
+    promptSnippet: "chalin_project_discovery: get a raw non-semantic file index before deciding which files to inspect.",
     promptGuidelines: [
-      "Call mesh_project_discovery before broad repository exploration.",
+      "Call chalin_project_discovery before broad repository exploration.",
       "Use it as an index, not as proof of architecture.",
       "Read evidence files before making project claims.",
     ],
     parameters: DiscoveryParams,
     async execute(_toolCallId, params) {
-      const gate = policy.beforeTool("mesh_project_discovery", params);
+      const gate = policy.beforeTool("chalin_project_discovery", params);
       if (!gate.allowed) return blockedToolResult(gate.reason);
       const index = buildProjectDiscoveryIndex(policy.cwd, {
         maxDepth: typeof params.maxDepth === "number" ? params.maxDepth : undefined,
         maxEntries: typeof params.maxEntries === "number" ? params.maxEntries : undefined,
       });
-      return policy.afterTool("mesh_project_discovery", {
+      return policy.afterTool("chalin_project_discovery", {
         content: [{ type: "text" as const, text: formatProjectDiscoveryIndex(index) }],
         details: { index },
       }) as never;
@@ -321,20 +321,20 @@ export function createProjectDiscoveryTool(policy: ChildToolPolicy): ToolDefinit
 
 export function createProjectSnapshotTool(policy: ChildToolPolicy): ToolDefinition {
   return defineTool<typeof SnapshotParams, unknown>({
-    name: "mesh_project_snapshot",
-    label: "Mesh Project Snapshot",
+    name: "chalin_project_snapshot",
+    label: "Chalin Project Snapshot",
     description: "Return a stack-agnostic, cached project snapshot: stack signals, test/build commands, entrypoints, high-signal files, and git context.",
-    promptSnippet: "mesh_project_snapshot: get cached stack/project/git context before manual repository exploration.",
+    promptSnippet: "chalin_project_snapshot: get cached stack/project/git context before manual repository exploration.",
     promptGuidelines: [
-      "Call mesh_project_snapshot before broad repository exploration.",
+      "Call chalin_project_snapshot before broad repository exploration.",
       "Use the snapshot to choose high-signal files instead of scanning the whole repository.",
     ],
     parameters: SnapshotParams,
     async execute() {
-      const gate = policy.beforeTool("mesh_project_snapshot", {});
+      const gate = policy.beforeTool("chalin_project_snapshot", {});
       if (!gate.allowed) return blockedToolResult(gate.reason);
       const snapshot = buildProjectSnapshot({ cwd: policy.cwd });
-      return policy.afterTool("mesh_project_snapshot", {
+      return policy.afterTool("chalin_project_snapshot", {
         content: [{ type: "text" as const, text: formatProjectSnapshot(snapshot) }],
         details: { snapshot },
       }) as never;
@@ -379,20 +379,20 @@ export function createGuardedBashTool(policy: ChildToolPolicy): ToolDefinition {
 }
 
 
-export function createMeshWebSearchTool(policy: ChildToolPolicy): ToolDefinition {
-  return defineTool<typeof MeshWebSearchParams, unknown>({
-    name: "mesh_web_search",
-    label: "Mesh Web Search",
+export function createChalinWebSearchTool(policy: ChildToolPolicy): ToolDefinition {
+  return defineTool<typeof ChalinWebSearchParams, unknown>({
+    name: "chalin_web_search",
+    label: "Chalin Web Search",
     description: "Search or fetch current web context through Exa MCP. Available only to agents with external-context capability.",
-    promptSnippet: "mesh_web_search: fetch compact external evidence through Exa MCP when authorized.",
+    promptSnippet: "chalin_web_search: fetch compact external evidence through Exa MCP when authorized.",
     promptGuidelines: [
-      "Use mesh_web_search only when current external docs/facts or a URL are needed.",
+      "Use chalin_web_search only when current external docs/facts or a URL are needed.",
       "Return source URLs in the handoff; do not paste raw dumps.",
     ],
-    parameters: MeshWebSearchParams,
+    parameters: ChalinWebSearchParams,
     async execute(_toolCallId, params, signal) {
       const input = isRecord(params) ? params : {};
-      const gate = policy.beforeTool("mesh_web_search", input);
+      const gate = policy.beforeTool("chalin_web_search", input);
       if (!gate.allowed) return blockedToolResult(gate.reason);
       const urls = [
         ...(Array.isArray(params.urls) ? params.urls : []),
@@ -402,27 +402,27 @@ export function createMeshWebSearchTool(policy: ChildToolPolicy): ToolDefinition
       const bundle = urls.length > 0
         ? await fetchWebUrls({ cwd: policy.cwd, urls, freshness, signal })
         : await searchWeb({ cwd: policy.cwd, query: String(params.query ?? ""), maxSources: Number(params.maxSources ?? 5), depth: params.depth as "snippets" | "content" | undefined, freshness, signal });
-      return policy.afterTool("mesh_web_search", { content: [{ type: "text" as const, text: formatWebBundle(bundle) }], details: bundle }) as never;
+      return policy.afterTool("chalin_web_search", { content: [{ type: "text" as const, text: formatWebBundle(bundle) }], details: bundle }) as never;
     },
   });
 }
 
 
-export function createMeshArtifactWriteTool(policy: ChildToolPolicy): ToolDefinition {
-  return defineTool<typeof MeshArtifactWriteParams, unknown>({
-    name: "mesh_artifact_write",
-    label: "Mesh Artifact Write",
+export function createChalinArtifactWriteTool(policy: ChildToolPolicy): ToolDefinition {
+  return defineTool<typeof ChalinArtifactWriteParams, unknown>({
+    name: "chalin_artifact_write",
+    label: "Chalin Artifact Write",
     description: "Write controlled pi-chalin checkpoints, validation contracts, worker skills, or feature state for long-running work.",
-    promptSnippet: "mesh_artifact_write: save compact task artifacts for resumable mesh workflows; never store raw logs or code dumps.",
+    promptSnippet: "chalin_artifact_write: save compact task artifacts for resumable chalin workflows; never store raw logs or code dumps.",
     promptGuidelines: [
       "Use after a meaningful handoff, validation boundary, or worker-specific convention is discovered.",
       "Write compact human-readable summaries only. Do not store raw command output, stack traces, or code dumps.",
       "Prefer validation contracts with explicit commands and success criteria before handing work to another agent.",
     ],
-    parameters: MeshArtifactWriteParams,
-    async execute(_toolCallId, params: MeshArtifactWriteParamsShape) {
+    parameters: ChalinArtifactWriteParams,
+    async execute(_toolCallId, params: ChalinArtifactWriteParamsShape) {
       const input = isRecord(params) ? params : {};
-      const gate = policy.beforeTool("mesh_artifact_write", input);
+      const gate = policy.beforeTool("chalin_artifact_write", input);
       if (!gate.allowed) return blockedToolResult(gate.reason);
       const validation = validateArtifactParams(params);
       if (!validation.allowed) return blockedToolResult(validation.reason);
@@ -461,7 +461,7 @@ export function createMeshArtifactWriteTool(policy: ChildToolPolicy): ToolDefini
   });
 }
 
-function validateArtifactParams(params: MeshArtifactWriteParamsShape): { allowed: true } | { allowed: false; reason: string } {
+function validateArtifactParams(params: ChalinArtifactWriteParamsShape): { allowed: true } | { allowed: false; reason: string } {
   if (!params.featureId || params.featureId.length > 96) return { allowed: false, reason: "artifact_feature_id_invalid" };
   const text = [params.title, params.summary, ...(params.successCriteria ?? []), ...(params.rules ?? [])].filter(Boolean).join("\n");
   if (text.length > 3000) return { allowed: false, reason: "artifact_payload_too_large" };
@@ -583,7 +583,7 @@ function compressToolResult(result: unknown, toolName: string, maxChars: number)
   if (!isRecord(result) || !Array.isArray(result.content)) return { result, outputChars: 0, truncated: false };
   const perToolMax = toolName === "read" ? Math.min(maxChars, 6000)
     : toolName === "grep" || toolName === "find" ? Math.min(maxChars, 5000)
-      : toolName === "mesh_web_search" ? Math.min(maxChars, 7000)
+      : toolName === "chalin_web_search" ? Math.min(maxChars, 7000)
         : maxChars;
   let outputChars = 0;
   let truncated = false;

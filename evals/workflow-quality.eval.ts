@@ -9,7 +9,7 @@ import { scoreWorkflowWorkspace, type WorkflowQualityReport } from "../src/workf
 import { gradePiTrace, parsePiJsonTrace, type TraceQualityReport, type TraceVariant } from "../src/trace-quality.ts";
 import { DEFAULT_JUDGE_MODEL, resolveJudgeTimeoutMs } from "./trace-quality.eval.ts";
 
-export type WorkflowVariant = "simple" | "mesh";
+export type WorkflowVariant = "simple" | "chalin";
 export type WorkflowJudgeMode = "none" | "auto" | "pi";
 
 export const DEFAULT_WORKFLOW_TIMEOUT_MS = 45_000;
@@ -29,8 +29,8 @@ interface WorkflowEfficiencyDiagnostics {
   jsonEvents: number;
   toolEvents: number;
   toolCallsByName: Record<string, number>;
-  meshRouteCalls: number;
-  meshRouteNonExecutable: number;
+  chalinRouteCalls: number;
+  chalinRouteNonExecutable: number;
   duplicateToolCalls: number;
   readCalls: number;
   writeCalls: number;
@@ -112,8 +112,8 @@ interface VariantStats {
   avgWriteCalls: number;
   avgEditCalls: number;
   avgRetries: number;
-  avgMeshRouteCalls: number;
-  avgMeshRouteNonExecutable: number;
+  avgChalinRouteCalls: number;
+  avgChalinRouteNonExecutable: number;
   avgDuplicateToolCalls: number;
   avgTokens: number;
   totalTokens: number;
@@ -128,8 +128,8 @@ interface WorkflowRegressionGates {
   failures: string[];
   warnings: string[];
   thresholds: {
-    minMeshPassRate: number;
-    maxDirectMeshRouteCalls: number;
+    minChalinPassRate: number;
+    maxDirectChalinRouteCalls: number;
     maxDuplicateToolCalls: number;
   };
 }
@@ -312,8 +312,8 @@ export function resolveCaseIds(value: string | undefined): string[] {
 }
 
 export function resolveVariants(value: string | undefined): WorkflowVariant[] {
-  if (!value || value === "both" || value === "all") return ["simple", "mesh"];
-  if (value === "simple" || value === "mesh") return [value];
+  if (!value || value === "both" || value === "all") return ["simple", "chalin"];
+  if (value === "simple" || value === "chalin") return [value];
   throw new Error(`Unsupported workflow variant: ${value}`);
 }
 
@@ -349,16 +349,16 @@ export function assertSdkRunBudget(options: { caseIds: string[]; variants: Workf
 }
 
 export function evaluateWorkflowRegressionGates(outputs: WorkflowRunOutput[], grouped: WorkflowComparisonSummary[]): WorkflowRegressionGates {
-  const thresholds = { minMeshPassRate: 1, maxDirectMeshRouteCalls: 0, maxDuplicateToolCalls: 2 };
+  const thresholds = { minChalinPassRate: 1, maxDirectChalinRouteCalls: 0, maxDuplicateToolCalls: 2 };
   const failures: string[] = [];
   const warnings: string[] = [];
 
   for (const output of outputs) {
     const label = `${output.variant} ${output.workspace.caseId}#${output.runIndex}`;
-    const isMesh = output.variant === "mesh";
+    const isChalin = output.variant === "chalin";
     if (output.diagnostics.infrastructureFailure) {
       const message = `${label}: infrastructure failure ${output.diagnostics.infrastructureFailure.kind}`;
-      if (isMesh) failures.push(message);
+      if (isChalin) failures.push(message);
       else warnings.push(message);
     }
     if (output.diagnostics.recoveredInfrastructureFailures?.length) {
@@ -366,45 +366,45 @@ export function evaluateWorkflowRegressionGates(outputs: WorkflowRunOutput[], gr
     }
     if (!outputPass(output)) {
       const message = `${label}: output did not pass deterministic/judge checks`;
-      if (isMesh) failures.push(message);
+      if (isChalin) failures.push(message);
       else warnings.push(message);
     }
     if (output.diagnostics.finalAnswerMissing) {
       const message = `${label}: missing final answer evidence`;
-      if (isMesh) failures.push(message);
+      if (isChalin) failures.push(message);
       else warnings.push(message);
     }
     if (getWorkflowEvalCase(output.workspace.caseId).expected.validation?.runTests && !output.diagnostics.verificationPassed) {
       const message = `${label}: did not execute a passing verification command`;
-      if (isMesh) failures.push(message);
+      if (isChalin) failures.push(message);
       else warnings.push(message);
     }
     if (output.trace.warnings.some((issue) => issue.id === "thin-answer")) {
       const message = `${label}: thin final answer`;
-      if (isMesh) failures.push(message);
+      if (isChalin) failures.push(message);
       else warnings.push(message);
     }
     if (output.diagnostics.duplicateToolCalls > thresholds.maxDuplicateToolCalls) {
       warnings.push(`${label}: duplicate tool calls ${output.diagnostics.duplicateToolCalls} > ${thresholds.maxDuplicateToolCalls}`);
     }
-    if (output.variant === "mesh" && !shouldRequireMeshRoute(getWorkflowEvalCase(output.workspace.caseId)) && output.diagnostics.meshRouteCalls > thresholds.maxDirectMeshRouteCalls) {
-      failures.push(`${label}: direct-eligible case called mesh_route ${output.diagnostics.meshRouteCalls} time(s)`);
+    if (output.variant === "chalin" && !shouldRequireChalinRoute(getWorkflowEvalCase(output.workspace.caseId)) && output.diagnostics.chalinRouteCalls > thresholds.maxDirectChalinRouteCalls) {
+      failures.push(`${label}: direct-eligible case called chalin_route ${output.diagnostics.chalinRouteCalls} time(s)`);
     }
   }
 
   for (const group of grouped) {
     const evalCase = getWorkflowEvalCase(group.caseId);
-    const mesh = group.variants.mesh;
-    if (!mesh) continue;
-    const meshOutputs = outputs.filter((output) => output.variant === "mesh" && output.workspace.caseId === group.caseId);
-    const meshAllPass = meshOutputs.length > 0 && meshOutputs.every(outputPass);
-    const recoveredInfra = meshOutputs.some((output) => output.diagnostics.recoveredInfrastructureFailures?.length);
-    if (mesh.passRate < thresholds.minMeshPassRate) failures.push(`${group.caseId}: mesh passRate ${mesh.passRate} < ${thresholds.minMeshPassRate}`);
-    if (mesh.avgWorkspaceScore < 90) failures.push(`${group.caseId}: mesh workspace avg ${mesh.avgWorkspaceScore} < 90`);
-    if (mesh.avgTraceScore < 90) failures.push(`${group.caseId}: mesh trace avg ${mesh.avgTraceScore} < 90`);
-    if (evalCase.expected.maxDurationMs && mesh.p95DurationMs > evalCase.expected.maxDurationMs) {
-      const message = `${group.caseId}: mesh p95 ${mesh.p95DurationMs}ms > case budget ${evalCase.expected.maxDurationMs}ms`;
-      if (meshAllPass && recoveredInfra) warnings.push(`${message} due to recovered infrastructure retry`);
+    const chalin = group.variants.chalin;
+    if (!chalin) continue;
+    const chalinOutputs = outputs.filter((output) => output.variant === "chalin" && output.workspace.caseId === group.caseId);
+    const chalinAllPass = chalinOutputs.length > 0 && chalinOutputs.every(outputPass);
+    const recoveredInfra = chalinOutputs.some((output) => output.diagnostics.recoveredInfrastructureFailures?.length);
+    if (chalin.passRate < thresholds.minChalinPassRate) failures.push(`${group.caseId}: chalin passRate ${chalin.passRate} < ${thresholds.minChalinPassRate}`);
+    if (chalin.avgWorkspaceScore < 90) failures.push(`${group.caseId}: chalin workspace avg ${chalin.avgWorkspaceScore} < 90`);
+    if (chalin.avgTraceScore < 90) failures.push(`${group.caseId}: chalin trace avg ${chalin.avgTraceScore} < 90`);
+    if (evalCase.expected.maxDurationMs && chalin.p95DurationMs > evalCase.expected.maxDurationMs) {
+      const message = `${group.caseId}: chalin p95 ${chalin.p95DurationMs}ms > case budget ${evalCase.expected.maxDurationMs}ms`;
+      if (chalinAllPass && recoveredInfra) warnings.push(`${message} due to recovered infrastructure retry`);
       else failures.push(message);
     }
     if (!group.pass) failures.push(`${group.caseId}: comparison gate failed (${group.reason})`);
@@ -433,8 +433,8 @@ export function buildWorkflowJudgePrompt(output: Pick<WorkflowRunOutput, "varian
 }
 
 function workflowEvalPass(outputs: WorkflowRunOutput[], grouped: Array<{ pass: boolean }>): boolean {
-  const hasBothVariants = outputs.some((item) => item.variant === "simple") && outputs.some((item) => item.variant === "mesh");
-  if (hasBothVariants) return outputs.filter((item) => item.variant === "mesh").every(outputPass) && grouped.every((item) => item.pass);
+  const hasBothVariants = outputs.some((item) => item.variant === "simple") && outputs.some((item) => item.variant === "chalin");
+  if (hasBothVariants) return outputs.filter((item) => item.variant === "chalin").every(outputPass) && grouped.every((item) => item.pass);
   return outputs.every(outputPass);
 }
 
@@ -444,7 +444,7 @@ function disabledWorkflowRegressionGates(): WorkflowRegressionGates {
     pass: true,
     failures: [],
     warnings: [],
-    thresholds: { minMeshPassRate: 1, maxDirectMeshRouteCalls: 0, maxDuplicateToolCalls: 2 },
+    thresholds: { minChalinPassRate: 1, maxDirectChalinRouteCalls: 0, maxDuplicateToolCalls: 2 },
   };
 }
 
@@ -464,19 +464,19 @@ export function summarizeComparison(outputs: WorkflowRunOutput[]): WorkflowCompa
   const caseIds = [...new Set(outputs.map((item) => item.workspace.caseId))];
   return caseIds.map((caseId) => {
     const simpleRuns = outputs.filter((item) => item.workspace.caseId === caseId && item.variant === "simple");
-    const meshRuns = outputs.filter((item) => item.workspace.caseId === caseId && item.variant === "mesh");
+    const chalinRuns = outputs.filter((item) => item.workspace.caseId === caseId && item.variant === "chalin");
     const simple = summarizeVariant(simpleRuns);
-    const mesh = summarizeVariant(meshRuns);
-    const infraFailure = [...simpleRuns, ...meshRuns].find((item) => item.diagnostics.infrastructureFailure)?.diagnostics.infrastructureFailure;
-    if (!simple || !mesh) {
-      const only = simple ?? mesh;
+    const chalin = summarizeVariant(chalinRuns);
+    const infraFailure = [...simpleRuns, ...chalinRuns].find((item) => item.diagnostics.infrastructureFailure)?.diagnostics.infrastructureFailure;
+    if (!simple || !chalin) {
+      const only = simple ?? chalin;
       return {
         caseId,
         pass: Boolean(only && only.passRate === 1),
         reason: infraFailure
           ? `infrastructure-failure ${infraFailure.kind}: ${infraFailure.message}`
           : only ? `single-variant diagnosis passRate=${only.passRate}` : "single-variant diagnosis with no runs",
-        variants: { simple, mesh },
+        variants: { simple, chalin },
       };
     }
     if (infraFailure) {
@@ -484,24 +484,24 @@ export function summarizeComparison(outputs: WorkflowRunOutput[]): WorkflowCompa
         caseId,
         pass: false,
         reason: `infrastructure-failure ${infraFailure.kind}: ${infraFailure.message}`,
-        variants: { simple, mesh },
+        variants: { simple, chalin },
       };
     }
     const qualityFloor = Math.max(90, simple.avgWorkspaceScore - 5);
-    const meshQualityComparable = mesh.avgWorkspaceScore >= qualityFloor;
-    const meshReliabilityComparable = mesh.passRate >= simple.passRate;
-    const meshEfficiencyBudget = Math.max(simple.p95DurationMs * 1.75, simple.p95DurationMs + 15_000);
-    const slowestMeshRun = meshRuns.reduce<WorkflowRunOutput | undefined>((slowest, item) => !slowest || item.durationMs > slowest.durationMs ? item : slowest, undefined);
-    const meshP95InflatedByRecoveredInfra = meshRuns.length > 0
-      && meshRuns.every(outputPass)
-      && Boolean(slowestMeshRun?.diagnostics.recoveredInfrastructureFailures?.length)
-      && mesh.p95DurationMs >= (slowestMeshRun?.durationMs ?? 0);
-    const meshEfficiencyComparable = mesh.p95DurationMs <= meshEfficiencyBudget || meshP95InflatedByRecoveredInfra;
+    const chalinQualityComparable = chalin.avgWorkspaceScore >= qualityFloor;
+    const chalinReliabilityComparable = chalin.passRate >= simple.passRate;
+    const chalinEfficiencyBudget = Math.max(simple.p95DurationMs * 1.75, simple.p95DurationMs + 15_000);
+    const slowestChalinRun = chalinRuns.reduce<WorkflowRunOutput | undefined>((slowest, item) => !slowest || item.durationMs > slowest.durationMs ? item : slowest, undefined);
+    const chalinP95InflatedByRecoveredInfra = chalinRuns.length > 0
+      && chalinRuns.every(outputPass)
+      && Boolean(slowestChalinRun?.diagnostics.recoveredInfrastructureFailures?.length)
+      && chalin.p95DurationMs >= (slowestChalinRun?.durationMs ?? 0);
+    const chalinEfficiencyComparable = chalin.p95DurationMs <= chalinEfficiencyBudget || chalinP95InflatedByRecoveredInfra;
     return {
       caseId,
-      pass: meshQualityComparable && meshReliabilityComparable && meshEfficiencyComparable,
-      reason: `meshAvg=${mesh.avgWorkspaceScore}, simpleAvg=${simple.avgWorkspaceScore}, meshPass=${mesh.passRate}, simplePass=${simple.passRate}, meshP95=${mesh.p95DurationMs}ms, simpleP95=${simple.p95DurationMs}ms${meshP95InflatedByRecoveredInfra ? ", meshP95RecoveredInfra=true" : ""}`,
-      variants: { simple, mesh },
+      pass: chalinQualityComparable && chalinReliabilityComparable && chalinEfficiencyComparable,
+      reason: `chalinAvg=${chalin.avgWorkspaceScore}, simpleAvg=${simple.avgWorkspaceScore}, chalinPass=${chalin.passRate}, simplePass=${simple.passRate}, chalinP95=${chalin.p95DurationMs}ms, simpleP95=${simple.p95DurationMs}ms${chalinP95InflatedByRecoveredInfra ? ", chalinP95RecoveredInfra=true" : ""}`,
+      variants: { simple, chalin },
     };
   });
 }
@@ -531,8 +531,8 @@ function summarizeVariant(items: WorkflowRunOutput[]): VariantStats | undefined 
     avgWriteCalls: avg(items.map((item) => item.diagnostics.writeCalls)),
     avgEditCalls: avg(items.map((item) => item.diagnostics.editCalls)),
     avgRetries: avg(items.map((item) => item.diagnostics.retries)),
-    avgMeshRouteCalls: avg(items.map((item) => item.diagnostics.meshRouteCalls)),
-    avgMeshRouteNonExecutable: avg(items.map((item) => item.diagnostics.meshRouteNonExecutable)),
+    avgChalinRouteCalls: avg(items.map((item) => item.diagnostics.chalinRouteCalls)),
+    avgChalinRouteNonExecutable: avg(items.map((item) => item.diagnostics.chalinRouteNonExecutable)),
     avgDuplicateToolCalls: avg(items.map((item) => item.diagnostics.duplicateToolCalls)),
     avgTokens: avg(items.map((item) => item.diagnostics.tokenTotal)),
     totalTokens: items.reduce((sum, item) => sum + item.diagnostics.tokenTotal, 0),
@@ -553,14 +553,14 @@ async function runSdkCase(evalCase: WorkflowEvalCase, variant: WorkflowVariant, 
     "--no-context-files",
     "--no-skills",
     "--tools",
-    variant === "mesh" ? "read,bash,grep,find,ls,edit,write,mesh_route" : "read,bash,grep,find,ls,edit,write",
+    variant === "chalin" ? "read,bash,grep,find,ls,edit,write,chalin_route" : "read,bash,grep,find,ls,edit,write",
   ];
-  if (variant === "mesh") args.push("-e", extensionPath);
+  if (variant === "chalin") args.push("-e", extensionPath);
   const model = options.model;
   if (model) args.push("--model", model);
   args.push("--thinking", options.thinking, fixture.prompt);
   const run = await runPi(args, fixture.cwd, timeoutMs, {
-    observeWorkspacePass: shouldRequireMeshRoute(evalCase) ? undefined : () => scoreWorkflowWorkspace(fixture.cwd, evalCase, { finalText: "", validateTests: false }).pass,
+    observeWorkspacePass: shouldRequireChalinRoute(evalCase) ? undefined : () => scoreWorkflowWorkspace(fixture.cwd, evalCase, { finalText: "", validateTests: false }).pass,
   });
   const durationMs = Date.now() - started;
   // Never treat raw JSON event streams as the final answer.
@@ -568,7 +568,7 @@ async function runSdkCase(evalCase: WorkflowEvalCase, variant: WorkflowVariant, 
   // and tool traces as if the agent had delivered evidence.
   const finalText = extractFinalText(run.stdout);
   const workspace = scoreWorkflowWorkspace(fixture.cwd, evalCase, { finalText, durationMs, validateTests: evalCase.expected.validation?.runTests === true });
-  const trace = gradePiTrace(run.stdout, { variant: variant as TraceVariant, finalText, promptKind: "generic", requireMeshRoute: shouldRequireMeshRoute(evalCase), status: run.status, signal: run.signal, timeoutReason: run.timeoutReason, durationMs, maxDurationMs: timeoutMs });
+  const trace = gradePiTrace(run.stdout, { variant: variant as TraceVariant, finalText, promptKind: "generic", requireChalinRoute: shouldRequireChalinRoute(evalCase), status: run.status, signal: run.signal, timeoutReason: run.timeoutReason, durationMs, maxDurationMs: timeoutMs });
   const diagnostics = workflowDiagnostics(run.stdout, run.stderr, run.timeToWorkspaceValidMs, run.timeToVerificationPassMs, run.timeToFinalAnswerMs, finalText.length === 0, run.objectiveStopReason, run.timeoutReason);
   const output: WorkflowRunOutput = { variant, runIndex, cwd: fixture.cwd, stdout: run.stdout, stderr: run.stderr, finalText, status: run.status, signal: run.signal, timeoutReason: run.timeoutReason, durationMs, workspace, trace, diagnostics, promptVariantIndex: fixture.promptVariantIndex, promptVariantCount: fixture.promptVariantCount };
   if (options.judgeMode === "pi" || (options.judgeMode === "auto" && shouldRunWorkflowJudge(output))) output.judge = await runWorkflowJudge(output, evalCase);
@@ -624,7 +624,7 @@ function withRetryDiagnostics(output: WorkflowRunOutput, failedAttempts: Workflo
   };
 }
 
-function shouldRequireMeshRoute(_evalCase: WorkflowEvalCase): boolean {
+function shouldRequireChalinRoute(_evalCase: WorkflowEvalCase): boolean {
   return false;
 }
 
@@ -747,8 +747,8 @@ function workflowDiagnostics(stdout: string, stderr: string, timeToWorkspaceVali
     jsonEvents: parsed.jsonEvents,
     toolEvents: parsed.toolEvents.length,
     toolCallsByName,
-    meshRouteCalls: toolCallsByName.mesh_route ?? 0,
-    meshRouteNonExecutable: parsed.toolEvents.filter((item) => item.name === "mesh_route" && item.phase === "end" && /status:\s*direct-recommended|direct execution recommended|approval is required|status:\s*(ask|block)|Approval:\s*(ask|block)/i.test(item.resultText)).length,
+    chalinRouteCalls: toolCallsByName.chalin_route ?? 0,
+    chalinRouteNonExecutable: parsed.toolEvents.filter((item) => item.name === "chalin_route" && item.phase === "end" && /status:\s*direct-recommended|direct execution recommended|approval is required|status:\s*(ask|block)|Approval:\s*(ask|block)/i.test(item.resultText)).length,
     duplicateToolCalls,
     readCalls: toolCallsByName.read ?? 0,
     writeCalls: toolCallsByName.write ?? 0,
@@ -1109,7 +1109,7 @@ function resolveJudgeMode(value: string): WorkflowJudgeMode {
 }
 
 function emptyDiagnostics(): WorkflowEfficiencyDiagnostics {
-  return { jsonEvents: 0, toolEvents: 0, toolCallsByName: {}, meshRouteCalls: 0, meshRouteNonExecutable: 0, duplicateToolCalls: 0, readCalls: 0, writeCalls: 0, editCalls: 0, retries: 0, tokenTotal: 0, verificationPassed: false, verificationToolCalls: 0, finalAnswerMissing: false };
+  return { jsonEvents: 0, toolEvents: 0, toolCallsByName: {}, chalinRouteCalls: 0, chalinRouteNonExecutable: 0, duplicateToolCalls: 0, readCalls: 0, writeCalls: 0, editCalls: 0, retries: 0, tokenTotal: 0, verificationPassed: false, verificationToolCalls: 0, finalAnswerMissing: false };
 }
 
 function extractTokenTotal(stdout: string): number {

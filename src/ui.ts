@@ -1,7 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ArtifactStore, FeatureArtifactState } from "./artifacts.ts";
 import { setAgentModelOverride, setAgentThinkingOverride, type ModelPersistenceTarget } from "./config.ts";
-import type { AgentDefinition, AgentThinkingLevel, ApprovalDecision, MeshRuntimeState, MemoryRecord, RouteDecision, RunState } from "./schemas.ts";
+import type { AgentDefinition, AgentThinkingLevel, ApprovalDecision, ChalinRuntimeState, MemoryRecord, RouteDecision, RunState } from "./schemas.ts";
 import { formatWebFetchAudit, type WebFetchAuditEntry } from "./webfetch.ts";
 
 const FOOTER_FRAMES = ["◆", "◇"];
@@ -9,16 +9,16 @@ const FOOTER_ANIMATION_MS = 650;
 let footerTimer: ReturnType<typeof setInterval> | undefined;
 let footerFrame = 0;
 let footerTarget: Pick<ExtensionContext, "hasUI" | "ui"> | undefined;
-let footerState: MeshFooterState = { kind: "idle" };
+let footerState: ChalinFooterState = { kind: "idle" };
 
 const LEGACY_CONTROL_WIDGET_KEY = "pi-chalin-control";
 
-export function clearLegacyMeshControlWidget(ctx: Pick<ExtensionContext, "hasUI" | "ui">): void {
+export function clearLegacyChalinControlWidget(ctx: Pick<ExtensionContext, "hasUI" | "ui">): void {
   if (!ctx.hasUI) return;
   ctx.ui.setWidget(LEGACY_CONTROL_WIDGET_KEY, undefined);
 }
 
-export type MeshFooterState =
+export type ChalinFooterState =
   | { kind: "idle" }
   | { kind: "off" }
   | { kind: "on" }
@@ -28,7 +28,7 @@ export type MeshFooterState =
   | { kind: "stopped" }
   | { kind: "failed" };
 
-export function setMeshStatus(ctx: Pick<ExtensionContext, "hasUI" | "ui">, state: MeshFooterState | string | undefined): void {
+export function setChalinStatus(ctx: Pick<ExtensionContext, "hasUI" | "ui">, state: ChalinFooterState | string | undefined): void {
   if (!ctx.hasUI) return;
   if (state === undefined) {
     stopFooterAnimation();
@@ -36,31 +36,31 @@ export function setMeshStatus(ctx: Pick<ExtensionContext, "hasUI" | "ui">, state
     return;
   }
   footerTarget = ctx;
-  footerState = typeof state === "string" ? parseLegacyMeshStatus(state) : state;
-  renderMeshFooterStatus();
+  footerState = typeof state === "string" ? parseLegacyChalinStatus(state) : state;
+  renderChalinFooterStatus();
   if (footerState.kind === "running" || footerState.kind === "synthesizing") startFooterAnimation();
   else stopFooterAnimation(false);
 }
 
-export function meshFooterText(state: MeshFooterState, frame = 0): string {
-  if (state.kind === "idle") return "mesh ◦ idle";
-  if (state.kind === "off") return "mesh × off";
-  if (state.kind === "on") return "mesh ◦ ready";
-  if (state.kind === "stopped") return "mesh ■ stopped";
-  if (state.kind === "failed") return "mesh × failed";
-  if (state.kind === "complete") return state.intent ? `mesh ✓ ${state.intent}` : "mesh ✓ complete";
-  if (state.kind === "synthesizing") return `mesh ${FOOTER_FRAMES[frame % FOOTER_FRAMES.length]} synthesizing`;
-  return `mesh ${FOOTER_FRAMES[frame % FOOTER_FRAMES.length]} ${state.intent} · ${state.agent} ${state.completed}/${state.total}`;
+export function chalinFooterText(state: ChalinFooterState, frame = 0): string {
+  if (state.kind === "idle") return "chalin ◦ idle";
+  if (state.kind === "off") return "chalin × off";
+  if (state.kind === "on") return "chalin ◦ ready";
+  if (state.kind === "stopped") return "chalin ■ stopped";
+  if (state.kind === "failed") return "chalin × failed";
+  if (state.kind === "complete") return state.intent ? `chalin ✓ ${state.intent}` : "chalin ✓ complete";
+  if (state.kind === "synthesizing") return `chalin ${FOOTER_FRAMES[frame % FOOTER_FRAMES.length]} synthesizing`;
+  return `chalin ${FOOTER_FRAMES[frame % FOOTER_FRAMES.length]} ${state.intent} · ${state.agent} ${state.completed}/${state.total}`;
 }
 
-function parseLegacyMeshStatus(text: string): MeshFooterState {
+function parseLegacyChalinStatus(text: string): ChalinFooterState {
   if (/off$/i.test(text)) return { kind: "off" };
   if (/on$/i.test(text)) return { kind: "on" };
   if (/idle$/i.test(text)) return { kind: "idle" };
   if (/stopped$/i.test(text)) return { kind: "stopped" };
   if (/failed$/i.test(text)) return { kind: "failed" };
   if (/consolidating|synth/i.test(text)) return { kind: "synthesizing" };
-  if (/running$/i.test(text)) return { kind: "running", intent: "working", agent: text.replace(/^mesh:\s*/i, "").replace(/\s*running$/i, ""), completed: 0, total: 1 };
+  if (/running$/i.test(text)) return { kind: "running", intent: "working", agent: text.replace(/^chalin:\s*/i, "").replace(/\s*running$/i, ""), completed: 0, total: 1 };
   return { kind: "idle" };
 }
 
@@ -68,7 +68,7 @@ function startFooterAnimation(): void {
   if (footerTimer) return;
   footerTimer = setInterval(() => {
     footerFrame += 1;
-    renderMeshFooterStatus();
+    renderChalinFooterStatus();
   }, FOOTER_ANIMATION_MS);
   footerTimer.unref?.();
 }
@@ -79,11 +79,11 @@ function stopFooterAnimation(render = true): void {
     footerTimer = undefined;
   }
   footerFrame = 0;
-  if (render) renderMeshFooterStatus();
+  if (render) renderChalinFooterStatus();
 }
 
-function renderMeshFooterStatus(): void {
-  footerTarget?.ui.setStatus("pi-chalin", meshFooterText(footerState, footerFrame));
+function renderChalinFooterStatus(): void {
+  footerTarget?.ui.setStatus("pi-chalin", chalinFooterText(footerState, footerFrame));
 }
 
 function routeShortName(kind: RouteDecision["kind"]): string {
@@ -108,10 +108,10 @@ export async function openSafetyApproval(ctx: ExtensionContext, route: RouteDeci
     ctx.ui.notify(lines.join("\n"), "error");
     return false;
   }
-  return ctx.ui.confirm("pi-chalin Safety Approval", `${lines.slice(1).join("\n")}\n\nApprove this mesh route once?`);
+  return ctx.ui.confirm("pi-chalin Safety Approval", `${lines.slice(1).join("\n")}\n\nApprove this chalin route once?`);
 }
 
-export function summarizeMeshHome(state: MeshRuntimeState, agentCount: number): string[] {
+export function summarizeChalinHome(state: ChalinRuntimeState, agentCount: number): string[] {
   return [
     "pi-chalin",
     `routing: ${state.autoRoutingEnabled ? "on" : "off"}`,
@@ -126,7 +126,7 @@ export function summarizeMeshHome(state: MeshRuntimeState, agentCount: number): 
 export async function openSmartPanel(
   ctx: ExtensionContext,
   options: {
-    state: MeshRuntimeState;
+    state: ChalinRuntimeState;
     agents: AgentDefinition[];
     diagnostics: string[];
     pendingMemories: MemoryRecord[];
@@ -137,8 +137,8 @@ export async function openSmartPanel(
     onSelectWebFetch?(): Promise<void>;
   },
 ): Promise<void> {
-  const lines = summarizeMeshHome(options.state, options.agents.length);
-  setMeshStatus(ctx, options.state.activeRuns > 0 ? { kind: "running", intent: "activity", agent: "mesh", completed: 0, total: 1 } : options.state.autoRoutingEnabled ? { kind: "idle" } : { kind: "off" });
+  const lines = summarizeChalinHome(options.state, options.agents.length);
+  setChalinStatus(ctx, options.state.activeRuns > 0 ? { kind: "running", intent: "activity", agent: "chalin", completed: 0, total: 1 } : options.state.autoRoutingEnabled ? { kind: "idle" } : { kind: "off" });
 
   if (!ctx.hasUI) {
     ctx.ui.notify(lines.join(" | "), "info");
@@ -380,13 +380,13 @@ export async function openAgentModelPicker(
 }
 
 export async function openActivityMonitor(ctx: ExtensionContext, run: RunState | undefined): Promise<void> {
-  clearLegacyMeshControlWidget(ctx);
+  clearLegacyChalinControlWidget(ctx);
   if (!run) {
     ctx.ui.notify("No pi-chalin activity yet.", "info");
     return;
   }
-  setMeshStatus(ctx, run.status === "running"
-    ? { kind: "running", intent: routeShortName(run.route.kind), agent: run.steps.find((step) => step.status === "running")?.agent ?? "mesh", completed: run.steps.filter((step) => isUsableActivityStatus(step.status)).length, total: Math.max(run.steps.length, 1) }
+  setChalinStatus(ctx, run.status === "running"
+    ? { kind: "running", intent: routeShortName(run.route.kind), agent: run.steps.find((step) => step.status === "running")?.agent ?? "chalin", completed: run.steps.filter((step) => isUsableActivityStatus(step.status)).length, total: Math.max(run.steps.length, 1) }
     : run.status === "complete"
       ? { kind: "complete", intent: routeShortName(run.route.kind) }
       : run.status === "failed"
@@ -506,7 +506,7 @@ function memoryStatusRank(status: MemoryRecord["status"]): number {
   return status === "pending" ? 0 : status === "active" ? 1 : 2;
 }
 
-function summarizeActivity(state: MeshRuntimeState): string {
+function summarizeActivity(state: ChalinRuntimeState): string {
   if (state.activeRuns > 0) return "running";
   if (state.lastRun) return `last ${state.lastRun.status}`;
   return "none";

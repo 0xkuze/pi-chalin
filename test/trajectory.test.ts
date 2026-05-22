@@ -5,7 +5,7 @@ import type { RunState } from "../src/schemas.ts";
 
 function run(overrides: Partial<RunState> = {}): RunState {
   return {
-    id: "mesh-test",
+    id: "chalin-test",
     route: {
       kind: "multi-agent-chain",
       agents: ["scout", "worker", "reviewer"],
