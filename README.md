@@ -1,58 +1,50 @@
 <p align="center">
+  <img src="assets/pi-chalin-banner.png" alt="Chalin banner" width="100%">
+</p>
+
+<p align="center">
   <a href="package.json"><img alt="version" src="https://img.shields.io/badge/version-0.3.0-111111?style=for-the-badge"></a>
-  <a href="package.json"><img alt="license" src="https://img.shields.io/badge/license-MIT-0f766e?style=for-the-badge"></a>
+  <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT%20%2B%20Attribution-0f766e?style=for-the-badge"></a>
   <a href="package.json"><img alt="bun" src="https://img.shields.io/badge/bun-%3E%3D1.3.14-111111?style=for-the-badge&logo=bun&logoColor=white"></a>
   <a href="package.json"><img alt="typescript" src="https://img.shields.io/badge/typescript-6.0-3178c6?style=for-the-badge&logo=typescript&logoColor=white"></a>
-  <a href="package.json"><img alt="status" src="https://img.shields.io/badge/status-MVP-2563eb?style=for-the-badge"></a>
 </p>
 
-<h1 align="center">pi-chalin</h1>
+<h1 align="center">Chalin</h1>
 
 <p align="center">
-  A Pi Coding Agent extension for routed, memory-aware subagent workflows.
+  Routed, memory-aware subagent orchestration for Pi Coding Agent.
 </p>
 
 <p align="center">
-  <a href="#what-it-does">What It Does</a> ·
+  <a href="#why-chalin">Why Chalin</a> ·
+  <a href="#features">Features</a> ·
   <a href="#quick-start">Quick Start</a> ·
   <a href="#commands">Commands</a> ·
-  <a href="#architecture">Architecture</a> ·
+  <a href="#configuration">Configuration</a> ·
   <a href="#development">Development</a>
 </p>
 
 ---
 
-## What It Does
+## Why Chalin
 
-`pi-chalin` adds a coordination layer to Pi Coding Agent. It keeps simple prompts direct, but routes broad, risky, or memory-sensitive work through focused subagents when that extra structure improves the result.
+Chalin is a Pi Coding Agent extension for work that benefits from deliberate coordination: broad repository analysis, risky edits, multi-step implementation, memory recall, and review-heavy workflows.
 
-Use it when a task benefits from:
+The extension keeps small prompts direct. When a task needs more structure, Chalin gives the primary Pi agent a guarded way to route work through focused subagents, preserve handoffs, use memory, and surface what is happening in the TUI.
 
-- deeper repository discovery before implementation;
-- isolated planning, execution, and review roles;
-- resumable long-running work;
-- first-class memory through either pi-chalin local review or native Engram;
-- visible routing, safety, and runtime state in the Pi TUI;
-- audited web context for current external information.
+The product goal is simple: keep the human in command while giving complex engineering work a reliable execution frame.
 
-## Capabilities
+## Features
 
-| Area | What pi-chalin provides |
+| Area | Capability |
 | --- | --- |
-| Routing | Direct execution for bounded work, chalin workflows for broad or risky work. |
+| Routing | Direct execution for bounded work; routed workflows for broad, risky, or memory-sensitive work. |
 | Subagents | Built-in `scout`, `planner`, `worker`, `reviewer`, `researcher`, `delegate`, `oracle`, `context-builder`, and `conflict-resolver` agents. |
-| Topologies | `single`, `chain`, `parallel`, `dag`, and `memory-only` workflow shapes. |
-| Memory | First-class `pi-chalin local`, `engram`, or `auto` backends with search, write, revise, review, and cloud-aware Engram sync. |
-| Artifacts | Resumable checkpoints, validation contracts, interviews, and handoffs. |
-| Safety | Approval thresholds, autonomy modes, recursion guards, single-writer isolation, stale-run recovery, and mutation checks. |
-| TUI | Smart Panel, agent manager, activity monitor, memory review, artifact panel, and web fetch audit. |
-| Evaluation | Orchestration, memory, trace, trajectory, mutation, and workflow quality evaluators. |
-
-## Current Status
-
-This is an MVP package, but it is not a sketch. The repository includes the extension entrypoint, command registration, tool registration, routing kernel, agent catalog, memory store, artifact support, web fetch support, worktree isolation, runtime guards, evaluators, and tests for the main behaviors.
-
-The README is the canonical project overview in this repository. Historical design docs are not currently checked into the tree, so the documentation below sticks to the code and files that actually exist.
+| Workflow shapes | `single`, `chain`, `parallel`, `dag`, and `memory-only` plans. |
+| Memory | Built-in SQLite memory with review, or native Engram memory with optional cloud sync. |
+| Safety | Approval thresholds, critical-route blocking, recursion guards, single-writer protection, mutation expectation checks, and destructive-action confirmation. |
+| State | Resumable runs, artifacts, validation contracts, activity monitoring, and cached discovery context. |
+| TUI | Smart Panel, Settings, Agent Manager, Memory Review, Activity, Artifacts, and WebFetch audit panels. |
 
 ## Quick Start
 
@@ -64,16 +56,13 @@ The README is the canonical project overview in this repository. Historical desi
 ### Install
 
 ```bash
-bun add pi-chalin
+pi install npm:pi-chalin
 ```
 
-For local development in this repository, run `bun install`.
-
-### Verify
+For local development in this repository:
 
 ```bash
-bun run typecheck
-bun run test
+bun install
 ```
 
 ### Load In Pi
@@ -97,91 +86,104 @@ Once Pi loads the package, use `/chalin` inside a Pi session.
 | `/chalin` | Open the Smart Panel. |
 | `/chalin on` | Enable autonomous routing for the current project. |
 | `/chalin off` | Disable autonomous routing for the current project. |
-| `/chalin agents` | Open the agent manager. |
-| `/chalin memory` | Review memory records and pending candidates. |
+| `/chalin settings` | Tune routing, safety approvals, memory provider, agent overrides, maintenance, and diagnostics. |
+| `/chalin agents` | Inspect agents and override model or thinking settings. |
+| `/chalin memory` | Review built-in memory records or Engram observations. |
 | `/chalin memory <query>` | Search the configured memory backend. |
-| `/chalin artifacts` | Open artifact and resumable task context. |
-| `/chalin artifacts <feature>` | Resume context for a specific feature artifact. |
+| `/chalin artifacts` | Open resumable task artifacts. |
+| `/chalin artifacts <feature>` | Resume context for a named feature artifact. |
 | `/chalin activity` | Inspect the active or latest run. |
-| `/chalin web` | Open the web fetch audit panel. |
-| `/chalin settings` | Choose the memory provider: `auto`, `engram`, or `pi-chalin` local. |
-| `/chalin status` | Print routing, autonomy, safety, agent, memory, and guard status. |
+| `/chalin web` | Review cached WebFetch bundles and freshness. |
+| `/chalin status` | Print routing, autonomy, safety, memory, agent, and guard status. |
 
 ## Tools
 
-The extension registers tools that the primary Pi agent can call when a prompt needs orchestration instead of direct execution.
+The extension registers Pi tools for the primary agent. The primary agent stays in control; Chalin provides the execution frame when routing is useful.
 
 | Tool | Purpose |
 | --- | --- |
 | `chalin_route` | Run a selected workflow with concrete agents, topology, risk, memory, and artifact needs. |
-| `chalin_interview` | Ask blocking clarification questions before planning or running agents. |
-| `chalin_web_search` | Search or fetch web context through the audited web layer. |
+| `chalin_resume` | Resume the latest paused or stale Chalin run. |
+| `chalin_interview` | Ask blocking clarification questions before planning or execution. |
 | `chalin_memory_search` | Retrieve compact durable memory during direct or routed work. |
 | `chalin_memory_write` | Save durable project or user knowledge through WriteGuard. |
 | `chalin_memory_revise` | Correct stale or inaccurate memory with evidence. |
 | `chalin_artifact_resume` | Load resumable task context from stored artifacts. |
-| `chalin_resume` | Resume the latest paused or stale chalin run. |
+| `chalin_web_search` | Search or fetch current web context through the audited web layer. |
 
-Child agents also receive guarded internal tools, such as `chalin_project_discovery`, `chalin_project_snapshot`, `chalin_artifact_write`, `chalin_memory_search`, `chalin_memory_write`, `chalin_memory_revise`, and `chalin_web_search`, according to their capabilities and budget.
+Child agents receive only the guarded tools appropriate to their role, capability set, and budget.
 
-## Architecture
+## Configuration
 
-`pi-chalin` is intentionally a modular monolith. That is the right foundation here: clear module boundaries without premature service boundaries.
-
-```txt
-Package
-  assets/                 banner and packaged image assets
-  agents/                 built-in agent definitions
-  src/                    extension source
-  test/                   Bun test coverage
-  evals/                  quality and behavior evaluators
-```
-
-The npm package ships only runtime extension source, built-in agents, and this README. Tests, evaluators, and local assets stay in the repository to keep installation small.
-
-Core modules:
+Project configuration lives at:
 
 ```txt
-src/index.ts              extension registration
-src/commands.ts           /chalin command tree
-src/tools.ts              Pi tool definitions
-src/autoroute.ts          prompt-time routing nudges
-src/kernel.ts             route validation and orchestration
-src/runner.ts             mock and SDK-backed worker execution
-src/agents.ts             built-in, project, and user agent catalog
-src/config.ts             config, autonomy, safety, and overrides
-src/memory.ts             memory records, candidates, and search
-src/memory-provider.ts    configurable pi-chalin local and Engram memory backends
-src/artifacts.ts          resumable task state and handoffs
-src/webfetch.ts           audited external context
-src/worktrees.ts          isolated writer worktrees
-src/ui.ts                 TUI surfaces and notifications
-src/schemas.ts            shared route, run, agent, and memory types
+.pi-chalin/config.json
 ```
 
-Runtime flow:
+User-level configuration and agents live under:
 
 ```txt
-Prompt
-  -> Pi primary agent
-  -> direct answer, chalin_interview, chalin_resume, or chalin_route
-  -> ChalinKernel
-  -> config and safety checks
-  -> memory and artifact context
-  -> agent resolution
-  -> worker runner
-  -> output parsing
-  -> artifact and memory capture
-  -> TUI status and final response
+~/.pi/chalin/
 ```
 
-## Agent Model
+Useful top-level settings:
+
+```json
+{
+  "enabled": true,
+  "autonomy": "balanced",
+  "safety": {
+    "approvalRiskThreshold": "medium"
+  },
+  "memory": {
+    "provider": "auto"
+  }
+}
+```
+
+Use `/chalin settings` for the supported interactive path. It exposes:
+
+- routing on/off and autonomy;
+- safety approval threshold, including a no-prompt mode for non-critical routes;
+- memory provider selection;
+- agent override summary and Agent Manager access;
+- maintenance for caches;
+- diagnostics.
+
+Critical routes remain blocked by the safety policy even when approval prompts are disabled.
+
+## Memory
+
+Chalin supports three memory modes:
+
+| Provider | Behavior |
+| --- | --- |
+| `auto` | Uses Engram when reachable, otherwise falls back to built-in memory. |
+| `engram` | Uses Engram as the source of truth for memory surfaces and tools. |
+| `pi-chalin` | Uses the built-in SQLite memory store. The UI labels this mode as `built-in`. |
+
+Built-in memory keeps the review workflow: pending candidates can be approved, rejected, revised, or deleted. Destructive memory actions require confirmation.
+
+Engram mode uses Engram directly for memory listing, search, write, revise, and routed workflow context. When the configured Engram runtime is local and `autoSync` is enabled, Chalin can use Engram's local-first cloud sync path through the runtime environment.
+
+Common Engram environment variables:
+
+```txt
+ENGRAM_URL
+ENGRAM_PORT
+ENGRAM_BIN
+ENGRAM_CLOUD_TOKEN
+PI_CHALIN_MEMORY_PROVIDER
+```
+
+## Agents
 
 Agents are Markdown files with YAML frontmatter. They can come from three scopes:
 
 ```txt
-agents/*.md              built-in package agents
-.pi-chalin/agents/*.md   project agents
+agents/*.md                built-in package agents
+.pi-chalin/agents/*.md     project agents
 ~/.pi/chalin/agents/*.md   user agents
 ```
 
@@ -194,11 +196,31 @@ user/name        -> user only
 built-in/name    -> built-in only
 ```
 
-Project agents win locally, user agents remain portable across projects, and built-ins provide the default catalog.
+Project agents win locally, user agents remain portable, and built-ins provide the default catalog.
 
-## Runtime Storage
+## Architecture
 
-Project-local runtime files live under `.pi-chalin/`:
+Chalin is a modular monolith. The extension keeps runtime boundaries explicit without splitting the product into premature services.
+
+```txt
+src/index.ts              extension registration
+src/commands.ts           /chalin command tree
+src/tools.ts              Pi tool definitions
+src/autoroute.ts          prompt-time routing guidance
+src/kernel.ts             route validation and orchestration
+src/runner.ts             worker execution, resume, and run metrics
+src/agents.ts             agent catalog and resolution
+src/config.ts             config, safety, autonomy, and overrides
+src/memory.ts             built-in memory store
+src/memory-provider.ts    built-in and Engram memory backends
+src/artifacts.ts          resumable task state and handoffs
+src/webfetch.ts           audited external context cache
+src/worktrees.ts          isolated writer worktrees
+src/ui.ts                 TUI panels and confirmations
+src/schemas.ts            shared runtime types
+```
+
+Runtime state is project-local:
 
 ```txt
 .pi-chalin/config.json
@@ -209,99 +231,35 @@ Project-local runtime files live under `.pi-chalin/`:
 .pi-chalin/runs/
 ```
 
-Memory can run against pi-chalin's local SQLite store or Engram. Configure it in `.pi-chalin/config.json` or through `/chalin settings`:
-
-```json
-{
-  "memory": {
-    "provider": "auto",
-    "engram": {
-      "baseUrl": "http://127.0.0.1:7437",
-      "command": "engram",
-      "autoStart": false,
-      "autoSync": true,
-      "syncThrottleMs": 30000,
-      "timeoutMs": 800
-    }
-  }
-}
-```
-
-`auto` uses Engram when the HTTP service is reachable and falls back to local memory. `engram` uses Engram as the memory source for `/chalin memory`; the `baseUrl` may point at any Engram local-runtime-compatible endpoint, including a remote `engram serve` instance. Engram Cloud is supported through Engram's local-first sync model: run `engram serve` against a cloud-enrolled/synced Engram store, then point pi-chalin at that runtime. When `autoSync` is enabled and the configured Engram runtime is local, pi-chalin checks `/sync/status` and runs the official `engram sync --cloud --import --project <project>` before reads, then `engram sync --cloud --project <project>` after writes. This uses `ENGRAM_CLOUD_TOKEN` from the runtime environment and never persists the token.
-
-If the user already has `gentle-pi`/`gentle-engram` working, pi-chalin reuses that Engram runtime. No MCP bootstrap command is required from pi-chalin: choose `engram` in `/chalin settings`, and pi-chalin will use `ENGRAM_URL`, `ENGRAM_PORT`, `ENGRAM_BIN`, the default `http://127.0.0.1:7437` runtime, and Engram's own project detection. If Engram Cloud is enrolled and the Pi process has `ENGRAM_CLOUD_TOKEN`, reads automatically import pending cloud chunks before listing/searching memory.
-
-When Engram is the active/preferred memory provider, `/chalin memory` lists Engram observations only, including project and personal scopes returned by Engram. pi-chalin does not expose its local `approve`/`reject` review flow in that mode. If the user selects `pi-chalin local`, the local SQLite memory store keeps its existing pending-review, approve, reject, delete, search, and revise behavior.
-
-### Engram Memory
-
-Engram is supported as a native memory backend, not as an external afterthought. When `/chalin settings` is set to `engram`, every memory-facing surface uses Engram directly:
-
-- `/chalin memory` lists and searches Engram observations.
-- `chalin_memory_search`, `chalin_memory_write`, and `chalin_memory_revise` operate against Engram.
-- Routed, chained, parallel, DAG, and `memory-only` workflows receive memory from the configured Engram backend.
-- Engram-backed memory does not use pi-chalin's local pending `approve`/`reject` queue.
-- Engram Cloud works through Engram's official local-first sync path when the runtime is enrolled and the Pi process has `ENGRAM_CLOUD_TOKEN`.
-
-Use `auto` when you want Engram if it is reachable with a local fallback, `engram` when Engram must be the source of truth, and `pi-chalin` when you want the local SQLite review workflow.
-
-User-level configuration and agents currently live under `~/.pi/chalin/`. That path is part of the Pi chalin workflow namespace, not the package name.
-
-## Environment Variables
-
-Common runtime and evaluation switches use the `PI_CHALIN_` prefix:
-
-```txt
-PI_CHALIN_DISABLED
-PI_CHALIN_CHILD
-PI_CHALIN_RUNNER
-PI_CHALIN_MOCK_STEP_DELAY_MS
-PI_CHALIN_WORKFLOW_MODEL
-PI_CHALIN_WORKFLOW_THINKING
-PI_CHALIN_WORKFLOW_GATES
-PI_CHALIN_MEMORY_PROVIDER
-ENGRAM_URL
-ENGRAM_PORT
-ENGRAM_BIN
-ENGRAM_CLOUD_TOKEN
-```
-
-See `package.json` and the evaluator files under `evals/` for the full set used by development scripts.
-
 ## Development
 
-Useful scripts:
+Fast verification:
 
 ```bash
-bun run test
 bun run typecheck
+bun run test
+```
+
+Focused evaluator scripts are available for routing, memory, trace, trajectory, and workflow quality work:
+
+```bash
 bun run eval
-bun run eval:all
+bun run eval:memory
+bun run eval:trace
 bun run eval:workflow
-bun run eval:workflow:matrix
 ```
 
-The fast confidence path is:
-
-```bash
-bun run typecheck
-bun run test
-```
-
-The broader evaluator path is intentionally heavier. Use it when changing routing, runtime policy, child-tool budgets, memory behavior, or workflow scoring.
-
-The test script runs Bun's test runner directly, so `bun test` and `bun run test` exercise the same suite.
+Use the broader evaluator path when changing routing policy, runner behavior, child-tool budgets, memory semantics, or workflow scoring.
 
 ## Design Principles
 
-- Route only when routing helps.
+- Route only when routing improves quality.
 - Keep the human in command.
 - Make autonomy observable.
-- Prefer local memory with review.
-- Treat safety gates as product behavior, not plumbing.
-- Keep the architecture modular before splitting boundaries.
-- Verify with tests and evaluators, not intuition.
+- Prefer durable memory with review.
+- Treat safety gates as product behavior.
+- Verify behavior with tests and evaluators.
 
 ## License
 
-MIT. See [`package.json`](package.json) for the current package metadata.
+Chalin is distributed under an MIT-style license with an attribution addendum. See [LICENSE](LICENSE).

@@ -50,7 +50,7 @@ export function summarizeChalinHome(state: ChalinRuntimeState, agentCount: numbe
     `agents: ${agentCount}`,
     `activity: ${summarizeActivity(state)}`,
     `guards: ${summarizeGuardHealth(state.lastRun)}`,
-    `memory: ${state.memoryBackend ?? "pi-chalin local"}`,
+    `memory: ${state.memoryBackend ?? "built-in"}`,
     `memory candidates: ${state.pendingMemoryCandidates}`,
     `approvals: ${state.pendingApprovals}`,
   ];
@@ -697,10 +697,22 @@ export async function openMemoryReview(
     ctx.ui.notify(formatMemoryDetail(record), "info");
     return;
   }
-  if (action === "Approve") actions.approve(record.id);
-  if (action === "Reject") actions.reject(record.id);
-  if (action === "Delete" || action === "Delete permanently") actions.delete(record.id);
-  if (action && action !== "Close") ctx.ui.notify(`Memory ${action.toLowerCase().replace(/\s+.*/, "")}d: ${memoryTitle(record)}`, "info");
+  if (action === "Approve") {
+    actions.approve(record.id);
+    ctx.ui.notify(`Memory approved: ${memoryTitle(record)}`, "info");
+    return;
+  }
+  if (action === "Reject") {
+    if (!await confirmMemoryDestructiveAction(ctx, record, "reject")) return;
+    actions.reject(record.id);
+    ctx.ui.notify(`Memory rejected: ${memoryTitle(record)}`, "info");
+    return;
+  }
+  if (action === "Delete" || action === "Delete permanently") {
+    if (!await confirmMemoryDestructiveAction(ctx, record, "delete")) return;
+    actions.delete(record.id);
+    ctx.ui.notify(`Memory deleted: ${memoryTitle(record)}`, "info");
+  }
 }
 
 export async function openMemoryReviewWithLoading(
@@ -727,6 +739,7 @@ export async function openMemoryReviewWithLoading(
 type MemoryOverlayAction = "details" | "approve" | "reject" | "delete";
 type MemoryOverlayResult = { action: MemoryOverlayAction; id: string } | undefined;
 type MemoryOverlayLoadedResult = ({ action: MemoryOverlayAction; id: string; memories: MemoryRecord[] } | undefined);
+type MemoryDestructiveAction = Extract<MemoryOverlayAction, "reject" | "delete">;
 
 async function openMemoryReviewOverlay(ctx: ExtensionContext, memories: MemoryRecord[], options: MemoryReviewOptions): Promise<MemoryOverlayResult> {
   return ctx.ui.custom<MemoryOverlayResult>(
@@ -848,6 +861,7 @@ class MemoryReviewOverlay implements Component, Focusable {
   private selectedIndex = 0;
   private detailOpen = false;
   private detailScroll = 0;
+  private pendingConfirmation: { action: MemoryDestructiveAction; record: MemoryRecord } | undefined;
   private readonly filters: Array<MemoryRecord["status"] | "all">;
 
   constructor(
@@ -864,6 +878,10 @@ class MemoryReviewOverlay implements Component, Focusable {
   }
 
   handleInput(data: string): void {
+    if (this.pendingConfirmation) {
+      this.handleConfirmationInput(data);
+      return;
+    }
     if (this.detailOpen) {
       this.handleDetailInput(data);
       return;
@@ -942,6 +960,9 @@ class MemoryReviewOverlay implements Component, Focusable {
   render(width: number): string[] {
     const overlayWidth = Math.max(1, width);
     const innerWidth = Math.max(1, overlayWidth - 2);
+    if (this.pendingConfirmation) {
+      return renderMemoryConfirmationDialog(this.theme, overlayWidth, this.pendingConfirmation.action, this.pendingConfirmation.record);
+    }
     const filtered = this.filteredMemories();
     this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, filtered.length - 1));
     const selected = filtered[this.selectedIndex];
@@ -1053,7 +1074,29 @@ class MemoryReviewOverlay implements Component, Focusable {
       this.tui.requestRender();
       return;
     }
+    if (isDestructiveMemoryAction(action)) {
+      this.pendingConfirmation = { action, record };
+      this.tui.requestRender();
+      return;
+    }
     this.done({ action, id: record.id });
+  }
+
+  private handleConfirmationInput(data: string): void {
+    const pending = this.pendingConfirmation;
+    if (!pending) return;
+    if (matchesKey(data, "ctrl+c")) {
+      this.done(undefined);
+      return;
+    }
+    if (matchesKey(data, "escape") || data === "N" || data === "n") {
+      this.pendingConfirmation = undefined;
+      this.tui.requestRender();
+      return;
+    }
+    if (matchesKey(data, "enter") || data === "Y" || data === "y") {
+      this.done({ action: pending.action, id: pending.record.id });
+    }
   }
 
   private filteredMemories(): MemoryRecord[] {
@@ -1105,6 +1148,26 @@ function renderMemoryLoadingShell(theme: Theme, width: number, title: string, er
   ]);
 }
 
+function renderMemoryConfirmationDialog(theme: Theme, width: number, action: MemoryDestructiveAction, record: MemoryRecord): string[] {
+  const dialogWidth = Math.max(40, Math.min(72, width - 2));
+  const contentWidth = Math.max(20, dialogWidth - 4);
+  const title = action === "delete" ? "Confirm Delete" : "Confirm Reject";
+  const consequence = action === "delete"
+    ? "This permanently removes the memory from the configured store."
+    : "This marks the memory rejected and removes it from retrieval.";
+  const rows = [
+    theme.fg("accent", theme.bold("Confirm destructive action")),
+    "",
+    ...wrapPlainText(consequence, contentWidth),
+    "",
+    theme.fg("dim", truncateToWidth(`Memory: ${memoryTitle(record)}`, contentWidth, "...", false)),
+    "",
+    theme.fg("text", "Enter/Y confirm"),
+    theme.fg("dim", "Esc/N cancel"),
+  ];
+  return centerRenderedBlock(renderMemoryInnerBox(theme, dialogWidth, title, rows), width);
+}
+
 function memoryShortcutLine(record: MemoryRecord | undefined, hasQuery: boolean, hasStatusFilter: boolean): string {
   const clear = hasQuery ? " · Ctrl+U" : "";
   const status = hasStatusFilter ? " · Tab status" : "";
@@ -1137,6 +1200,18 @@ function handleMemoryReviewResult(ctx: ExtensionContext, memories: MemoryRecord[
   if (result.action === "reject") actions.reject(record.id);
   if (result.action === "delete") actions.delete(record.id);
   ctx.ui.notify(`Memory ${memoryActionPast(result.action)}: ${memoryTitle(record)}`, "info");
+}
+
+async function confirmMemoryDestructiveAction(ctx: ExtensionContext, record: MemoryRecord, action: MemoryDestructiveAction): Promise<boolean> {
+  const title = action === "delete" ? "Delete Memory" : "Reject Memory";
+  const consequence = action === "delete"
+    ? "This permanently removes the memory from the configured store."
+    : "This marks the memory rejected and removes it from retrieval.";
+  return ctx.ui.confirm(title, `${consequence}\n\nMemory: ${memoryTitle(record)}\n\nContinue?`);
+}
+
+function isDestructiveMemoryAction(action: MemoryOverlayAction): action is MemoryDestructiveAction {
+  return action === "reject" || action === "delete";
 }
 
 function renderMemoryListWindow(memories: MemoryRecord[], selectedIndex: number, theme: Theme, width: number): string[] {
@@ -1870,6 +1945,13 @@ function padAnsi(text: string, width: number): string {
 
 function clampRenderedLines(lines: string[], width: number): string[] {
   return lines.map((line) => padAnsi(line, width));
+}
+
+function centerRenderedBlock(lines: string[], width: number): string[] {
+  return lines.map((line) => {
+    const left = Math.max(0, Math.floor((width - visibleWidth(line)) / 2));
+    return padAnsi(`${" ".repeat(left)}${line}`, width);
+  });
 }
 
 function errorMessage(error: unknown): string {

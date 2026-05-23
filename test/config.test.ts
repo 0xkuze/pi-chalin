@@ -38,7 +38,7 @@ test("safety non-downgrade prevents disabling mandatory guards", () => {
   const userRoot = tempDir("pi-chalin-user-");
   writeJson(path.join(userRoot, "config.json"), {
     safety: {
-      approvalRiskThreshold: "critical",
+      approvalRiskThreshold: "high",
       recursionGuard: false,
       singleWriterGuard: false,
       mutationExpectationGuard: false,
@@ -51,6 +51,20 @@ test("safety non-downgrade prevents disabling mandatory guards", () => {
   assert.equal(loaded.config.safety.singleWriterGuard, true);
   assert.equal(loaded.config.safety.mutationExpectationGuard, true);
   assert.ok(loaded.diagnostics.some((line) => line.includes("Safety non-downgrade enforced")));
+});
+
+test("config supports explicit no-approval threshold", () => {
+  const cwd = tempDir("pi-chalin-cwd-");
+  writeJson(path.join(cwd, ".pi-chalin", "config.json"), {
+    safety: {
+      approvalRiskThreshold: "none",
+    },
+  });
+
+  const loaded = loadEffectiveConfig({ cwd });
+
+  assert.equal(loaded.config.safety.approvalRiskThreshold, "none");
+  assert.equal(loaded.config.safety.blockCritical, true);
 });
 
 test("config persists and validates per-agent thinking overrides", () => {

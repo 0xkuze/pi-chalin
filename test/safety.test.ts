@@ -20,6 +20,19 @@ test("approvalDecision blocks critical risk", () => {
   assert.equal(approvalDecision(DEFAULT_CONFIG, route("critical")).action, "block");
 });
 
+test("approvalDecision supports disabling approval prompts without disabling critical blocks", () => {
+  const config = {
+    ...DEFAULT_CONFIG,
+    safety: {
+      ...DEFAULT_CONFIG.safety,
+      approvalRiskThreshold: "none" as const,
+    },
+  };
+
+  assert.equal(approvalDecision(config, route("high")).action, "allow");
+  assert.equal(approvalDecision(config, route("critical")).action, "block");
+});
+
 test("child policy compresses oversized tool output and records output/read budgets", () => {
   const policy = createChildToolPolicy({ cwd: process.cwd(), maxToolCalls: 4, allowedTools: ["read"] });
   assert.deepEqual(policy.beforeTool("read", { path: "src/index.ts" }), { allowed: true });

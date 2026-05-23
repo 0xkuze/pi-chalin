@@ -445,7 +445,7 @@ export async function resolveMemoryBackendStatus(options: ChalinPathsOptions, co
       configuredProvider: provider,
       activeProvider: "pi-chalin",
       engramAvailable: false,
-      summary: "pi-chalin local",
+      summary: "built-in",
     };
   }
   const engram = new EngramMemoryStore({
@@ -468,7 +468,7 @@ export async function resolveMemoryBackendStatus(options: ChalinPathsOptions, co
     configuredProvider: provider,
     activeProvider: available ? "engram" : "pi-chalin",
     engramAvailable: available,
-    summary: available ? `engram (${engramBaseUrl(config)})` : `pi-chalin local (Engram unavailable at ${engramBaseUrl(config)})`,
+    summary: available ? `engram (${engramBaseUrl(config)})` : `built-in (Engram unavailable at ${engramBaseUrl(config)})`,
     ...(detail ? { detail } : {}),
   };
 }

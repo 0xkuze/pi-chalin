@@ -4,9 +4,11 @@ import { resolveChalinPaths, type ChalinPathsOptions } from "./paths.ts";
 import { isAgentThinkingLevel, riskRank, type AgentScope, type AgentThinkingLevel, type ApprovalDecision, type RouteDecision, type RouteRisk } from "./schemas.ts";
 
 export type AutonomyLevel = "low" | "balanced" | "high";
-export type ApprovalRiskThreshold = RouteRisk;
+export type ApprovalRiskThreshold = RouteRisk | "none";
 export type ModelPersistenceTarget = "session" | "project" | "user";
 export type MemoryProvider = "auto" | "engram" | "pi-chalin";
+
+const DEFAULT_APPROVAL_RISK_THRESHOLD: RouteRisk = "medium";
 
 export interface ChalinConfig {
   enabled: boolean;
@@ -47,7 +49,7 @@ export const DEFAULT_CONFIG: ChalinConfig = {
   enabled: true,
   autonomy: "balanced",
   safety: {
-    approvalRiskThreshold: "medium",
+    approvalRiskThreshold: DEFAULT_APPROVAL_RISK_THRESHOLD,
     recursionGuard: true,
     singleWriterGuard: true,
     mutationExpectationGuard: true,
@@ -113,18 +115,18 @@ function coerceConfig(input: ChalinConfig, diagnostics: string[]): ChalinConfig 
     config.autonomy = DEFAULT_CONFIG.autonomy;
   }
 
-  if (!["low", "medium", "high", "critical"].includes(config.safety.approvalRiskThreshold)) {
+  if (!["low", "medium", "high", "critical", "none"].includes(config.safety.approvalRiskThreshold)) {
     diagnostics.push(
       `Invalid safety.approvalRiskThreshold '${String(config.safety.approvalRiskThreshold)}'; using '${DEFAULT_CONFIG.safety.approvalRiskThreshold}'.`,
     );
     config.safety.approvalRiskThreshold = DEFAULT_CONFIG.safety.approvalRiskThreshold;
   }
 
-  if (riskRank(config.safety.approvalRiskThreshold) > riskRank(DEFAULT_CONFIG.safety.approvalRiskThreshold)) {
+  if (config.safety.approvalRiskThreshold !== "none" && riskRank(config.safety.approvalRiskThreshold) > riskRank(DEFAULT_APPROVAL_RISK_THRESHOLD)) {
     diagnostics.push(
-      `Safety non-downgrade enforced: approvalRiskThreshold '${config.safety.approvalRiskThreshold}' is weaker than '${DEFAULT_CONFIG.safety.approvalRiskThreshold}'.`,
+      `Safety non-downgrade enforced: approvalRiskThreshold '${config.safety.approvalRiskThreshold}' is weaker than '${DEFAULT_APPROVAL_RISK_THRESHOLD}'.`,
     );
-    config.safety.approvalRiskThreshold = DEFAULT_CONFIG.safety.approvalRiskThreshold;
+    config.safety.approvalRiskThreshold = DEFAULT_APPROVAL_RISK_THRESHOLD;
   }
 
   for (const key of ["recursionGuard", "singleWriterGuard", "mutationExpectationGuard", "blockCritical"] as const) {
@@ -238,6 +240,9 @@ export function approvalDecision(config: ChalinConfig, route: RouteDecision): Ap
   if (route.kind === "bypass" || route.kind === "memory-only") return { action: "allow", reason: "No subagent execution required." };
   if (route.risk === "critical" && config.safety.blockCritical) {
     return { action: "block", reason: "Critical routes are blocked by default safety policy." };
+  }
+  if (config.safety.approvalRiskThreshold === "none") {
+    return { action: "allow", reason: "Approval prompts are disabled; critical routes remain governed by safety.blockCritical." };
   }
   const threshold = config.autonomy === "low" ? "low" : config.safety.approvalRiskThreshold;
   if (riskRank(route.risk) >= riskRank(threshold)) {

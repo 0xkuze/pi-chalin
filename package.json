@@ -2,7 +2,7 @@
   "name": "pi-chalin",
   "version": "0.3.0",
   "description": "Pi Coding Agent extension for routed, memory-aware subagent workflows",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/0xkuze/pi-chalin.git"
@@ -18,7 +18,9 @@
   "files": [
     "src/**/*.ts",
     "agents/**/*.md",
-    "README.md"
+    "assets/**/*.png",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "test": "bun test",

@@ -1109,6 +1109,57 @@ test("Agent model picker refreshes Pi registry and persisted selection reappears
   assert.match(notifications.join("\n"), /built-in\/worker model set to local\/new-model \(project\)/);
 });
 
+test("Agent manager confirms reset actions before removing overrides", async () => {
+  const cwd = tempDir("pi-chalin-agent-reset-ui-");
+  const agent: AgentDefinition = {
+    name: "worker",
+    scope: "project",
+    concern: "implementation",
+    capabilities: [],
+    description: "Worker",
+    model: "inherit",
+    thinking: "high",
+    tools: [],
+    memory: { read: false, write: "never", categories: [] },
+    systemPrompt: "",
+    diagnostics: [],
+  };
+  const sessionOverrides = new Map<string, string>([["project/worker", "local/custom-model"]]);
+  const confirmations: Array<{ title: string; message: string }> = [];
+  const notifications: string[] = [];
+
+  await openAgentManager({
+    cwd,
+    hasUI: true,
+    ui: {
+      select: async (title: string, options: string[]) => title === "Agents" ? options[0] : "Reset model",
+      confirm: async (title: string, message: string) => {
+        confirmations.push({ title, message });
+        return false;
+      },
+      notify: (message: string) => notifications.push(message),
+    },
+  } as never, [agent], sessionOverrides, new Map(), { "project/worker": "local/custom-model" }, {});
+
+  assert.equal(confirmations[0]?.title, "Reset Agent Model");
+  assert.match(confirmations[0]?.message ?? "", /removes the saved model override/);
+  assert.equal(sessionOverrides.get("project/worker"), "local/custom-model");
+  assert.equal(notifications.length, 0);
+
+  await openAgentManager({
+    cwd,
+    hasUI: true,
+    ui: {
+      select: async (title: string, options: string[]) => title === "Agents" ? options[0] : "Reset model",
+      confirm: async () => true,
+      notify: (message: string) => notifications.push(message),
+    },
+  } as never, [agent], sessionOverrides, new Map(), { "project/worker": "local/custom-model" }, {});
+
+  assert.equal(sessionOverrides.get("project/worker"), undefined);
+  assert.match(notifications.join("\n"), /project\/worker reset to inherit/);
+});
+
 test("Memory Review uses compact list items and a detail drill-down", async () => {
   const record = memoryRecord({
     status: "pending",
@@ -1144,6 +1195,43 @@ test("Memory Review uses compact list items and a detail drill-down", async () =
   assert.match(notifications.join("\n"), /status: pending/);
   assert.match(notifications.join("\n"), /category: agent-note/);
   assert.deepEqual(approved, []);
+});
+
+test("Memory Review confirms destructive select actions", async () => {
+  const record = memoryRecord({
+    status: "active",
+    category: "project-fact",
+    content: "Deleting memory should require an explicit confirmation step.",
+  });
+  const selections: Array<{ title: string; options: string[] }> = [];
+  const confirmations: Array<{ title: string; message: string }> = [];
+  const notifications: string[] = [];
+  const deleted: string[] = [];
+
+  await openMemoryReview({
+    cwd: tempDir("pi-chalin-memory-confirm-"),
+    hasUI: true,
+    ui: {
+      notify: (message: string) => notifications.push(message),
+      select: async (title: string, options: string[]) => {
+        selections.push({ title, options });
+        return selections.length === 1 ? options[0] : "Delete";
+      },
+      confirm: async (title: string, message: string) => {
+        confirmations.push({ title, message });
+        return false;
+      },
+    },
+  } as never, [record], {
+    approve: () => {},
+    reject: () => {},
+    delete: (id) => deleted.push(id),
+  });
+
+  assert.equal(confirmations[0]?.title, "Delete Memory");
+  assert.match(confirmations[0]?.message ?? "", /permanently removes/);
+  assert.deepEqual(deleted, []);
+  assert.doesNotMatch(notifications.join("\n"), /Memory deleted/);
 });
 
 test("Memory Review uses a searchable overlay for large memory sets", async () => {
@@ -1274,6 +1362,8 @@ test("Memory Review shows a loading overlay before records resolve", async () =>
         component.handleInput?.("\r");
         renders.push(component.render(96).join("\n"));
         component.handleInput?.("D");
+        renders.push(component.render(96).join("\n"));
+        component.handleInput?.("\r");
         component.dispose?.();
         return result;
       },
@@ -1296,6 +1386,8 @@ test("Memory Review shows a loading overlay before records resolve", async () =>
   assert.doesNotMatch(renders[1] ?? "", /A approve/);
   assert.match(renders[2] ?? "", /Memory detail/);
   assert.match(renders[2] ?? "", /D delete/);
+  assert.match(renders[3] ?? "", /Confirm Delete/);
+  assert.match(renders[3] ?? "", /Enter\/Y confirm/);
   assert.deepEqual(deleted, ["memory-loading-1"]);
   assert.ok(requestRenderCount > 0);
   for (const render of renders) {
@@ -1448,6 +1540,119 @@ test("/chalin settings persists the selected memory provider", async () => {
   const config = JSON.parse(fs.readFileSync(path.join(cwd, ".pi-chalin", "config.json"), "utf-8")) as { memory?: { provider?: string } };
   assert.equal(config.memory?.provider, "engram");
   assert.match(notifications.join("\n"), /Memory provider set to engram/);
+});
+
+test("/chalin settings persists disabled approval prompts", async () => {
+  const fake = createFakePi();
+  registerPiChalin(fake.api as never);
+  const command = fake.commands.get("chalin") as { handler: (args: string, ctx: unknown) => Promise<void> };
+  const cwd = tempDir("pi-chalin-settings-");
+  const selections = ["Safety · approvals from medium", "Approval threshold · from medium", "None · do not ask for approvals"];
+  const notifications: string[] = [];
+
+  await command.handler("settings", {
+    cwd,
+    hasUI: true,
+    ui: {
+      select: async () => selections.shift(),
+      notify: (message: string) => notifications.push(message),
+      setStatus: () => {},
+    },
+  });
+
+  const config = JSON.parse(fs.readFileSync(path.join(cwd, ".pi-chalin", "config.json"), "utf-8")) as { safety?: { approvalRiskThreshold?: string } };
+  assert.equal(config.safety?.approvalRiskThreshold, "none");
+  assert.match(notifications.join("\n"), /Approval threshold set to disabled/);
+});
+
+test("/chalin settings persists routing autonomy", async () => {
+  const fake = createFakePi();
+  registerPiChalin(fake.api as never);
+  const command = fake.commands.get("chalin") as { handler: (args: string, ctx: unknown) => Promise<void> };
+  const cwd = tempDir("pi-chalin-settings-routing-");
+  const selections = ["Routing · on · balanced", "Autonomy · balanced", "High · fewer interruptions"];
+  const notifications: string[] = [];
+
+  await command.handler("settings", {
+    cwd,
+    hasUI: true,
+    ui: {
+      select: async () => selections.shift(),
+      notify: (message: string) => notifications.push(message),
+      setStatus: () => {},
+    },
+  });
+
+  const config = JSON.parse(fs.readFileSync(path.join(cwd, ".pi-chalin", "config.json"), "utf-8")) as { autonomy?: string };
+  assert.equal(config.autonomy, "high");
+  assert.match(notifications.join("\n"), /Autonomy set to high/);
+});
+
+test("/chalin settings exposes agents diagnostics and maintenance", async () => {
+  const fake = createFakePi();
+  registerPiChalin(fake.api as never);
+  const command = fake.commands.get("chalin") as { handler: (args: string, ctx: unknown) => Promise<void> };
+  const cwd = tempDir("pi-chalin-settings-sections-");
+  fs.mkdirSync(path.join(cwd, ".pi-chalin", "cache", "webfetch"), { recursive: true });
+  fs.writeFileSync(path.join(cwd, ".pi-chalin", "cache", "webfetch", "bundle.json"), "{}\n", "utf-8");
+  fs.writeFileSync(path.join(cwd, ".pi-chalin", "cache", "project-snapshot.json"), "{}\n", "utf-8");
+  fs.mkdirSync(path.join(cwd, ".pi-chalin"), { recursive: true });
+  fs.writeFileSync(path.join(cwd, ".pi-chalin", "config.json"), JSON.stringify({
+    agents: { modelOverrides: { "built-in/worker": "local/custom-model" } },
+  }), "utf-8");
+
+  const notifications: string[] = [];
+  const confirmations: string[] = [];
+  const selectAgentsSummary = async (title: string, options: string[]) => {
+    if (title === "Settings") return options.find((option) => option.startsWith("Agents ·"));
+    if (title === "Agents") return "Override summary";
+    return undefined;
+  };
+  await command.handler("settings", {
+    cwd,
+    hasUI: true,
+    ui: {
+      select: selectAgentsSummary,
+      notify: (message: string) => notifications.push(message),
+      setStatus: () => {},
+    },
+  });
+  assert.match(notifications.join("\n"), /model overrides: \d+/);
+  assert.match(notifications.join("\n"), /thinking overrides: \d+/);
+
+  notifications.length = 0;
+  await command.handler("settings", {
+    cwd,
+    hasUI: true,
+    ui: {
+      select: async (title: string, options: string[]) => {
+        if (title === "Settings") return "Maintenance";
+        if (title === "Maintenance") return options.find((option) => option.startsWith("Clear WebFetch cache"));
+        return undefined;
+      },
+      confirm: async (title: string) => {
+        confirmations.push(title);
+        return true;
+      },
+      notify: (message: string) => notifications.push(message),
+      setStatus: () => {},
+    },
+  });
+  assert.deepEqual(confirmations, ["Clear WebFetch Cache"]);
+  assert.equal(fs.existsSync(path.join(cwd, ".pi-chalin", "cache", "webfetch")), false);
+  assert.match(notifications.join("\n"), /Cleared 1 WebFetch cache file/);
+
+  notifications.length = 0;
+  await command.handler("settings", {
+    cwd,
+    hasUI: true,
+    ui: {
+      select: async (title: string, options: string[]) => title === "Settings" ? options.find((option) => option.startsWith("Diagnostics ·")) : undefined,
+      notify: (message: string) => notifications.push(message),
+      setStatus: () => {},
+    },
+  });
+  assert.match(notifications.join("\n"), /No pi-chalin diagnostics/);
 });
 
 

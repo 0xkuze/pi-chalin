@@ -45,6 +45,7 @@ export async function openAgentManager(
   if (action === "Change thinking") return openAgentThinkingPicker(ctx, agent, sessionThinkingOverrides);
   if (action === "Reset model") {
     const key = `${agent.scope}/${agent.name}`;
+    if (!await confirmAgentReset(ctx, key, "model")) return;
     sessionModelOverrides.delete(key);
     setAgentModelOverride({ cwd: ctx.cwd }, key, undefined, defaultPersistenceTarget(agent.scope) === "user" ? "user" : "project");
     ctx.ui.notify(`${key} reset to inherit.`, "info");
@@ -52,6 +53,7 @@ export async function openAgentManager(
   }
   if (action === "Reset thinking") {
     const key = `${agent.scope}/${agent.name}`;
+    if (!await confirmAgentReset(ctx, key, "thinking")) return;
     sessionThinkingOverrides.delete(key);
     setAgentThinkingOverride({ cwd: ctx.cwd }, key, undefined, defaultPersistenceTarget(agent.scope) === "user" ? "user" : "project");
     ctx.ui.notify(`${key} thinking reset to inherit.`, "info");
@@ -73,6 +75,13 @@ export async function openAgentManager(
       agent.diagnostics.length > 0 ? "warning" : "info",
     );
   }
+}
+
+async function confirmAgentReset(ctx: ExtensionContext, key: string, field: "model" | "thinking"): Promise<boolean> {
+  return ctx.ui.confirm(
+    field === "model" ? "Reset Agent Model" : "Reset Agent Thinking",
+    `This removes the saved ${field} override for ${key} and restores inherited behavior.\n\nContinue?`,
+  );
 }
 
 export async function openAgentThinkingPicker(
