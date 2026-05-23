@@ -8,13 +8,14 @@ import registerPiChalin from "../src/index.ts";
 import { looksLikeContinuationPrompt, shouldUseCompactDirectOrchestrationPrompt, shouldUseCompactChalinCriticalPrompt } from "../src/autoroute.ts";
 import { resetRuntimeState, setLatestRun, setLiveStepSession } from "../src/runtime-state.ts";
 import { openAgentManager, openAgentModelPicker } from "../src/ui-agents.ts";
-import { openMemoryReview, openSmartPanel, summarizeRuntimeGuards } from "../src/ui.ts";
+import { openMemoryReview, openMemoryReviewWithLoading, openSmartPanel, openWebFetchAuditPanel, summarizeRuntimeGuards } from "../src/ui.ts";
 import { finalAnswerMaterial } from "../src/route-format.ts";
 import { formatChalinRoutePlanWidget, formatChalinRunWidget } from "../src/route-widget.ts";
 import { createRunState, persistRun } from "../src/runner-state.ts";
 import { chalinFooterText } from "../src/ui-status.ts";
 import { createMemoryCandidate, MemoryStore } from "../src/memory.ts";
 import type { AgentDefinition, MemoryRecord, RunState } from "../src/schemas.ts";
+import type { WebFetchAuditEntry } from "../src/webfetch.ts";
 
 const tempDirs: string[] = [];
 afterEach(() => {
@@ -822,7 +823,7 @@ test("/chalin shows active run status while subagents are running", async () => 
   });
 
   assert.deepEqual(notifications, [], "active /chalin should open controls without printing into the transcript");
-  assert.deepEqual(selectedTitles, ["pi-chalin Control"]);
+  assert.deepEqual(selectedTitles, ["Control"]);
   assert.ok(widgets.every((entry) => entry.content === undefined), "/chalin may clear the legacy widget but must not create a second persistent widget; the tool-result tree is the single live surface");
   assert.match(statuses.join("\n"), /chalin .*chain.*reviewer 1\/2/);
   assert.doesNotMatch(notifications.join("\n"), /Abort \(placeholder\)|run: chalin-live|step-2 running reviewer/);
@@ -951,9 +952,10 @@ test("Live status opens a tabbed overlay with current subagent history", async (
     },
   });
 
-  assert.deepEqual(selectedTitles, ["pi-chalin Control"]);
+  assert.deepEqual(selectedTitles, ["Control"]);
   assert.match(JSON.stringify(customOptions), /"overlay":true/);
-  assert.match(renders[0] ?? "", /pi-chalin Live Status/);
+  assert.match(renders[0] ?? "", /\bLive\b/);
+  assert.doesNotMatch(renders[0] ?? "", /pi-chalin Live Status/);
   assert.match(renders[0] ?? "", /worker/);
   assert.match(renders[0] ?? "", /I am inspecting async retry tests/);
   assert.match(renders[0] ?? "", /ctrl\+o tools/);
@@ -1023,7 +1025,7 @@ test("/chalin Smart Panel does not auto-open memory when pending memories exist"
     onSelectMemory: async () => { memoryOpened = true; },
   });
 
-  assert.deepEqual(selectedTitles, ["pi-chalin Smart Panel"]);
+  assert.deepEqual(selectedTitles, ["Smart Panel"]);
   assert.equal(memoryOpened, false);
   assert.ok(selectedOptions[0]?.some((option) => option === "Memory · 1 pending"));
 });
@@ -1133,7 +1135,7 @@ test("Memory Review uses compact list items and a detail drill-down", async () =
     delete: () => {},
   });
 
-  assert.equal(selections[0]?.title, "pi-chalin Memory");
+  assert.equal(selections[0]?.title, "Memory");
   assert.equal(selections[0]?.options.length, 2);
   assert.match(selections[0]?.options[0] ?? "", /^○ pending · agent-note · context-builder · Engram is local-first/);
   assert.doesNotMatch(selections[0]?.options[0] ?? "", /SQLite is the source of truth for persistent project memory\.$/);
@@ -1181,6 +1183,16 @@ test("Memory Review uses a searchable overlay for large memory sets", async () =
         renders.push(component.render(110).join("\n"));
         for (const char of "needle") component.handleInput?.(char);
         renders.push(component.render(110).join("\n"));
+        component.handleInput?.("\x15");
+        for (const char of "category:workflow source:reviewer") component.handleInput?.(char);
+        renders.push(component.render(110).join("\n"));
+        component.handleInput?.("\x15");
+        component.handleInput?.("A");
+        renders.push(component.render(110).join("\n"));
+        component.handleInput?.("\x15");
+        for (const char of "category:workflow source:reviewer") component.handleInput?.(char);
+        component.handleInput?.("\r");
+        renders.push(component.render(110).join("\n"));
         component.handleInput?.("A");
         return result;
       },
@@ -1193,15 +1205,206 @@ test("Memory Review uses a searchable overlay for large memory sets", async () =
 
   assert.equal(selectCalled, false);
   assert.match(JSON.stringify(customOptions), /"overlay":true/);
-  assert.match(renders[0] ?? "", /pi-chalin Memory/);
+  assert.match(renders[0] ?? "", /\bMemory\b/);
+  assert.doesNotMatch(renders[0] ?? "", /pi-chalin Memory/);
   assert.match(renders[0] ?? "", /64\/64 records/);
   assert.doesNotMatch(renders[0] ?? "", /Routine memory 64/);
   assert.match(renders[1] ?? "", /1\/64 records/);
+  assert.match(renders[1] ?? "", /Search: needle/);
   assert.match(renders[1] ?? "", /needle memory overlay/);
+  assert.match(renders[1] ?? "", /Enter open\/action/);
+  assert.doesNotMatch(renders[1] ?? "", /A approve/);
+  assert.doesNotMatch(renders[1] ?? "", /R reject/);
+  assert.doesNotMatch(renders[1] ?? "", /D delete/);
+  assert.match(renders[1] ?? "", /cat\/source\/status:value/);
+  assert.match(renders[1] ?? "", /Tab status/);
+  assert.match(renders[1] ?? "", /Enter/);
+  assert.doesNotMatch(renders[1] ?? "", /A\/R\/D action/);
+  assert.doesNotMatch(renders[1] ?? "", /workflow\s+reviewer/);
+  assert.match(renders[2] ?? "", /1\/64 records/);
+  assert.match(renders[2] ?? "", /Search: category:workflow source:reviewer/);
+  assert.match(renders[2] ?? "", /needle memory overlay/);
+  assert.doesNotMatch(renders[2] ?? "", /Routine memory 1/);
+  assert.match(renders[3] ?? "", /Search: A/);
+  assert.doesNotMatch(renders[3] ?? "", /Memory detail/);
+  assert.match(renders[4] ?? "", /Memory detail/);
+  assert.match(renders[4] ?? "", /workflow · project · reviewer/);
+  assert.match(renders[4] ?? "", /A approve · R reject · D delete/);
+  assert.match(renders[4] ?? "", /Esc back/);
   assert.deepEqual(approved, ["memory-18"]);
   assert.ok(requestRenderCount > 0);
   for (const render of renders) {
     for (const line of render.split("\n")) assert.ok(visibleWidth(line) <= 110, `line exceeds overlay width: ${visibleWidth(line)} > 110`);
+  }
+});
+
+test("Memory Review shows a loading overlay before records resolve", async () => {
+  const record = memoryRecord({
+    id: "memory-loading-1",
+    status: "active",
+    category: "testing",
+    content: "Memory loading overlay should open immediately before Engram records finish syncing.",
+  });
+  let resolveLoad: (records: MemoryRecord[]) => void = () => {};
+  const pendingRecords = new Promise<MemoryRecord[]>((resolve) => { resolveLoad = resolve; });
+  const renders: string[] = [];
+  const deleted: string[] = [];
+  let customOptions: unknown;
+  let requestRenderCount = 0;
+  const plainTheme = {
+    fg: (_color: string, text: string) => text,
+    bg: (_color: string, text: string) => text,
+    bold: (text: string) => text,
+  };
+
+  await openMemoryReviewWithLoading({
+    cwd: tempDir("pi-chalin-memory-loading-"),
+    hasUI: true,
+    ui: {
+      notify: () => {},
+      select: async () => undefined,
+      custom: async (factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (result: { action: string; id: string; memories?: MemoryRecord[] } | undefined) => void) => { render(width: number): string[]; handleInput?(data: string): void; dispose?(): void }, options: unknown) => {
+        customOptions = options;
+        let result: { action: string; id: string; memories?: MemoryRecord[] } | undefined;
+        const component = factory({ requestRender: () => { requestRenderCount += 1; } }, plainTheme, {}, (value) => { result = value; });
+        renders.push(component.render(96).join("\n"));
+        resolveLoad([record]);
+        for (let index = 0; index < 10 && requestRenderCount === 0; index += 1) await Promise.resolve();
+        renders.push(component.render(96).join("\n"));
+        component.handleInput?.("\r");
+        renders.push(component.render(96).join("\n"));
+        component.handleInput?.("D");
+        component.dispose?.();
+        return result;
+      },
+    },
+  } as never, async () => pendingRecords, {
+    approve: () => {},
+    reject: () => {},
+    delete: (id) => deleted.push(id),
+  }, { title: "Engram Memory", loadingMessage: "Loading memory records...", showStatusFilter: false });
+
+  assert.match(JSON.stringify(customOptions), /"overlay":true/);
+  assert.match(renders[0] ?? "", /╭/);
+  assert.match(renders[0] ?? "", /\bMemory\b/);
+  assert.doesNotMatch(renders[0] ?? "", /Engram Memory/);
+  assert.match(renders[0] ?? "", /Loading memory records/);
+  assert.match(renders[1] ?? "", /Memory loading overlay should open immediately/);
+  assert.match(renders[1] ?? "", /Search: type text or filters/);
+  assert.doesNotMatch(renders[1] ?? "", /Tab status/);
+  assert.doesNotMatch(renders[1] ?? "", /D delete/);
+  assert.doesNotMatch(renders[1] ?? "", /A approve/);
+  assert.match(renders[2] ?? "", /Memory detail/);
+  assert.match(renders[2] ?? "", /D delete/);
+  assert.deepEqual(deleted, ["memory-loading-1"]);
+  assert.ok(requestRenderCount > 0);
+  for (const render of renders) {
+    for (const line of render.split("\n")) assert.ok(visibleWidth(line) <= 96, `line exceeds overlay width: ${visibleWidth(line)} > 96`);
+  }
+});
+
+test("WebFetch Audit uses a searchable overlay with detail drill-down", async () => {
+  const observedAt = new Date().toISOString();
+  const entries: WebFetchAuditEntry[] = [
+    {
+      key: "search-localstack-sqs",
+      kind: "search",
+      label: "AWS SQS local development LocalStack queues DLQ FIFO best practices",
+      provider: "exa-mcp",
+      observedAt,
+      ageMs: 8 * 60 * 60 * 1000,
+      ttlMs: 6 * 60 * 60 * 1000,
+      freshness: "stale",
+      sourceCount: 2,
+      warnings: ["Cache entry is stale; prefer fresh evidence before making architectural claims."],
+      sources: [
+        { title: "LocalStack SQS developer guide", url: "https://docs.localstack.cloud/user-guide/aws/sqs/" },
+        { title: "AWS SQS dead-letter queue best practices", url: "https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-dead-letter-queues.html" },
+      ],
+    },
+    {
+      key: "fetch-go-blog",
+      kind: "fetch",
+      label: "https://go.dev/blog/all",
+      provider: "exa-mcp",
+      observedAt,
+      ageMs: 10 * 1000,
+      ttlMs: 24 * 60 * 60 * 1000,
+      freshness: "fresh",
+      sourceCount: 1,
+      warnings: [],
+      sources: [{ title: "The Go Blog", url: "https://go.dev/blog/all" }],
+    },
+    {
+      key: "search-golang-news",
+      kind: "search",
+      label: "Go programming language community news May 2026 latest",
+      provider: "exa-mcp",
+      observedAt,
+      ageMs: 0,
+      ttlMs: 0,
+      freshness: "no-ttl",
+      sourceCount: 1,
+      warnings: [],
+      sources: [{ title: "Golang Weekly", url: "https://golangweekly.com/" }],
+    },
+  ];
+  const renders: string[] = [];
+  let selectCalled = false;
+  let customOptions: unknown;
+  let requestRenderCount = 0;
+  const plainTheme = {
+    fg: (_color: string, text: string) => text,
+    bg: (_color: string, text: string) => text,
+    bold: (text: string) => text,
+  };
+
+  await openWebFetchAuditPanel({
+    cwd: tempDir("pi-chalin-webfetch-overlay-"),
+    hasUI: true,
+    ui: {
+      notify: () => {},
+      select: async () => {
+        selectCalled = true;
+        return undefined;
+      },
+      custom: async (factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (result: undefined) => void) => { render(width: number): string[]; handleInput?(data: string): void }, options: unknown) => {
+        customOptions = options;
+        const component = factory({ requestRender: () => { requestRenderCount += 1; } }, plainTheme, {}, () => undefined);
+        renders.push(component.render(112).join("\n"));
+        for (const char of "kind:search localstack") component.handleInput?.(char);
+        renders.push(component.render(112).join("\n"));
+        component.handleInput?.("\r");
+        renders.push(component.render(112).join("\n"));
+        component.handleInput?.("\x1b");
+        component.handleInput?.("\t");
+        renders.push(component.render(112).join("\n"));
+      },
+    },
+  } as never, entries);
+
+  assert.equal(selectCalled, false);
+  assert.match(JSON.stringify(customOptions), /"overlay":true/);
+  assert.match(renders[0] ?? "", /\bArticles\b/);
+  assert.doesNotMatch(renders[0] ?? "", /pi-chalin WebFetch Audit/);
+  assert.match(renders[0] ?? "", /3\/3 bundles/);
+  assert.match(renders[0] ?? "", /Search: type text or filters like kind:search source:github/);
+  assert.match(renders[0] ?? "", /Enter details/);
+  assert.match(renders[0] ?? "", /Tab freshness/);
+  assert.doesNotMatch(renders[0] ?? "", /Summary\nClose/);
+  assert.match(renders[1] ?? "", /1\/3 bundles/);
+  assert.match(renders[1] ?? "", /Search: kind:search localstack/);
+  assert.match(renders[1] ?? "", /LocalStack queues DLQ FIFO/);
+  assert.doesNotMatch(renders[1] ?? "", /The Go Blog/);
+  assert.match(renders[2] ?? "", /WebFetch detail/);
+  assert.match(renders[2] ?? "", /Cache entry is stale/);
+  assert.match(renders[2] ?? "", /LocalStack SQS developer guide/);
+  assert.match(renders[2] ?? "", /https:\/\/docs\.localstack\.cloud\/user-guide\/aws\/sqs\//);
+  assert.match(renders[2] ?? "", /Esc back/);
+  assert.match(renders[3] ?? "", /fresh/);
+  assert.ok(requestRenderCount > 0);
+  for (const render of renders) {
+    for (const line of render.split("\n")) assert.ok(visibleWidth(line) <= 112, `line exceeds overlay width: ${visibleWidth(line)} > 112`);
   }
 });
 

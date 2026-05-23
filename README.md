@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="package.json"><img alt="version" src="https://img.shields.io/badge/version-0.2.0-111111?style=for-the-badge"></a>
+  <a href="package.json"><img alt="version" src="https://img.shields.io/badge/version-0.3.0-111111?style=for-the-badge"></a>
   <a href="package.json"><img alt="license" src="https://img.shields.io/badge/license-MIT-0f766e?style=for-the-badge"></a>
   <a href="package.json"><img alt="bun" src="https://img.shields.io/badge/bun-%3E%3D1.3.14-111111?style=for-the-badge&logo=bun&logoColor=white"></a>
   <a href="package.json"><img alt="typescript" src="https://img.shields.io/badge/typescript-6.0-3178c6?style=for-the-badge&logo=typescript&logoColor=white"></a>

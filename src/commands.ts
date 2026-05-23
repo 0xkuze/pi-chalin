@@ -7,7 +7,7 @@ import { createConfiguredMemoryStore, resolveMemoryBackendStatus, type MemoryBac
 import { getActiveRun, getLatestRun } from "./runtime-state.ts";
 import { openAgentManager } from "./ui-agents.ts";
 import {
-  openMemoryReview,
+  openMemoryReviewWithLoading,
   openArtifactPanel,
   openActivityMonitor,
   openWebFetchAuditPanel,
@@ -18,7 +18,7 @@ import { listWebFetchAudit } from "./webfetch.ts";
 
 export function registerChalinCommands(pi: ExtensionAPI): void {
   pi.registerCommand("chalin", {
-    description: "Open pi-chalin Smart Panel or toggle autonomous routing with: /chalin on|off",
+    description: "Open Smart Panel or toggle autonomous routing with: /chalin on|off",
     getArgumentCompletions: (prefix) => {
       const values = ["on", "off", "agents", "memory", "artifacts", "activity", "web", "settings", "status"];
       const filtered = values.filter((value) => value.startsWith(prefix.trim()));
@@ -43,8 +43,6 @@ export function registerChalinCommands(pi: ExtensionAPI): void {
       const artifacts = new ArtifactStore({ cwd: ctx.cwd });
       const agents = catalog.list();
       const diagnostics = [...loaded.diagnostics, ...catalog.diagnostics.warnings, ...catalog.diagnostics.errors];
-      const pendingMemories = await memory.list("pending");
-      const memoryStatus = await resolveMemoryBackendStatus({ cwd: ctx.cwd }, loaded.config);
       const activeRun = getActiveRun();
       const lastRun = getLatestRun();
 
@@ -59,11 +57,17 @@ export function registerChalinCommands(pi: ExtensionAPI): void {
           const bundle = await memory.retrieve({ query, sourceAgent: "human-command", limit: 10, tokenBudget: 1200, includeEvidence: true });
           ctx.ui.notify(bundle.text || "No memory matches.", "info");
         } else {
-          await openMemoryReview(ctx, await memory.list(), {
+          await openMemoryReviewWithLoading(ctx, async () => {
+            const [memories, status] = await Promise.all([
+              memory.list(),
+              resolveMemoryBackendStatus({ cwd: ctx.cwd }, loaded.config),
+            ]);
+            return { memories, options: memoryReviewOptions(status) };
+          }, {
             approve: (id) => void memory.approve(id),
             reject: (id) => void memory.reject(id),
             delete: (id) => void memory.delete(id),
-          }, memoryReviewOptions(memoryStatus));
+          }, { title: "Memory", loadingMessage: "Loading memory records..." });
         }
         return;
       }
@@ -94,6 +98,10 @@ export function registerChalinCommands(pi: ExtensionAPI): void {
       }
 
       if (command === "status") {
+        const [pendingMemoryCount, memoryStatus] = await Promise.all([
+          memory.pendingCount(),
+          resolveMemoryBackendStatus({ cwd: ctx.cwd }, loaded.config),
+        ]);
         ctx.ui.notify(
           [
             `routing: ${loaded.config.enabled ? "on" : "off"}`,
@@ -102,7 +110,7 @@ export function registerChalinCommands(pi: ExtensionAPI): void {
             `memory: ${memoryStatus.summary}`,
             ...(memoryStatus.detail ? [`memory detail: ${memoryStatus.detail}`] : []),
             `agents: ${agents.length}`,
-            `pending memory: ${pendingMemories.length}`,
+            `pending memory: ${pendingMemoryCount}`,
             `last activity: ${lastRun?.id ?? "none"}`,
             lastRun ? `guards: ${lastRun.metrics?.policyViolations?.length ?? 0} policy violations · ${lastRun.metrics?.budgetStopCount ?? 0} budget stops` : "guards: no run yet",
           ].join("\n"),
@@ -121,6 +129,11 @@ export function registerChalinCommands(pi: ExtensionAPI): void {
         return;
       }
 
+      const [pendingMemories, memoryStatus] = await Promise.all([
+        memory.list("pending"),
+        resolveMemoryBackendStatus({ cwd: ctx.cwd }, loaded.config),
+      ]);
+
       await openSmartPanel(ctx, {
         state: {
           autoRoutingEnabled: loaded.config.enabled,
@@ -135,11 +148,17 @@ export function registerChalinCommands(pi: ExtensionAPI): void {
         pendingMemories,
         onSelectAgents: () => openAgentManager(ctx, agents, sessionModelOverrides, sessionThinkingOverrides, loaded.config.agents.modelOverrides, loaded.config.agents.thinkingOverrides),
         onSelectActivity: () => openActivityMonitor(ctx, activeRun ?? lastRun),
-        onSelectMemory: async () => openMemoryReview(ctx, await memory.list(), {
+        onSelectMemory: async () => openMemoryReviewWithLoading(ctx, async () => {
+          const [memories, status] = await Promise.all([
+            memory.list(),
+            resolveMemoryBackendStatus({ cwd: ctx.cwd }, loaded.config),
+          ]);
+          return { memories, options: memoryReviewOptions(status) };
+        }, {
           approve: (id) => void memory.approve(id),
           reject: (id) => void memory.reject(id),
           delete: (id) => void memory.delete(id),
-        }, memoryReviewOptions(memoryStatus)),
+        }, { title: memoryReviewOptions(memoryStatus).title, loadingMessage: "Loading memory records..." }),
         onSelectArtifacts: () => openArtifactPanel(ctx, artifacts),
         onSelectWebFetch: async () => openWebFetchAuditPanel(ctx, await listWebFetchAudit({ cwd: ctx.cwd })),
         onSelectSettings: () => openChalinSettings(ctx, loaded.config),
@@ -155,7 +174,7 @@ async function openChalinSettings(ctx: ExtensionContext, config: ChalinConfig): 
     return;
   }
 
-  const selected = await ctx.ui.select("pi-chalin Settings", [`Memory provider · ${labelForMemoryProvider(current)}`, "Close"]);
+  const selected = await ctx.ui.select("Settings", [`Memory provider · ${labelForMemoryProvider(current)}`, "Close"]);
   if (!selected?.startsWith("Memory provider")) return;
 
   const choice = await ctx.ui.select("Memory Provider", [
@@ -185,10 +204,11 @@ function labelForMemoryProvider(provider: MemoryProvider): string {
   return "pi-chalin local";
 }
 
-function memoryReviewOptions(status: MemoryBackendStatus): { title: string; emptyMessage: string } {
+function memoryReviewOptions(status: MemoryBackendStatus): { title: string; emptyMessage: string; showStatusFilter?: boolean } {
   if (status.configuredProvider === "engram") {
     return {
       title: "Engram Memory",
+      showStatusFilter: false,
       emptyMessage: status.engramAvailable
         ? status.detail ?? "No Engram memory records found."
         : "Engram memory is selected, but Engram is unavailable. Start Engram or update /chalin settings.",
@@ -197,11 +217,12 @@ function memoryReviewOptions(status: MemoryBackendStatus): { title: string; empt
   if (status.activeProvider === "engram") {
     return {
       title: "Engram Memory",
+      showStatusFilter: false,
       emptyMessage: status.detail ?? "No Engram memory records found.",
     };
   }
   return {
-    title: "pi-chalin Memory",
+    title: "Memory",
     emptyMessage: "No pi-chalin memory records found.",
   };
 }

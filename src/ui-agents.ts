@@ -35,7 +35,7 @@ export async function openAgentManager(
     return;
   }
 
-  const selected = await ctx.ui.select("pi-chalin Agents", agents.map(format));
+  const selected = await ctx.ui.select("Agents", agents.map(format));
   if (!selected) return;
   const agent = agents.find((candidate) => selected.startsWith(`${candidate.scope}/${candidate.name} ·`));
   if (!agent) return;

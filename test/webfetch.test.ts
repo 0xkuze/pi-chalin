@@ -62,7 +62,7 @@ test("WebFetch audit summarizes cache freshness and sources", async () => {
   assert.equal(entries[0]?.freshness, "fresh");
 
   const formatted = formatWebFetchAudit(entries);
-  assert.match(formatted, /pi-chalin WebFetch Audit/);
+  assert.match(formatted, /WebFetch Audit/);
   assert.match(formatted, /search · Exa MCP/);
   assert.match(formatted, /Exa docs/);
   assert.match(formatted, /https:\/\/exa.ai\/docs/);

@@ -178,9 +178,9 @@ export async function listWebFetchAudit(options: WebFetchAuditOptions): Promise<
 }
 
 export function formatWebFetchAudit(entries: WebFetchAuditEntry[]): string {
-  if (entries.length === 0) return "pi-chalin WebFetch Audit\nNo cached WebFetch bundles yet.";
+  if (entries.length === 0) return "WebFetch Audit\nNo cached WebFetch bundles yet.";
   const lines = [
-    "pi-chalin WebFetch Audit",
+    "WebFetch Audit",
     `cached bundles: ${entries.length}`,
     "",
     ...entries.flatMap((entry) => [

@@ -274,7 +274,7 @@ export function registerChalinTools(pi: ExtensionAPI): void {
 
       const preApproval = await kernel.approvalFor(route);
       const approvalOverride = preApproval.action === "ask" && await openSafetyApproval(ctx, route, preApproval)
-        ? { action: "allow" as const, reason: "Approved once through pi-chalin Safety Approval." }
+        ? { action: "allow" as const, reason: "Approved once through Safety Approval." }
         : undefined;
       if (preApproval.action === "block" || (preApproval.action === "ask" && !approvalOverride)) {
         finishChalinRouteInvocation(guard.invocationId, preApproval.action);
