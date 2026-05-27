@@ -95,7 +95,7 @@ export class ChalinKernel {
     }
 
     const runner = context.extensionContext ? this.sdkRunner : this.runner;
-    const run = await runner.run(route, { ...context, cwd: this.cwd, agents, modelOverrides: this.modelOverrides, thinkingOverrides: this.thinkingOverrides });
+    const run = await runner.run(route, { ...context, cwd: this.cwd, rootTask: prompt, agents, modelOverrides: this.modelOverrides, thinkingOverrides: this.thinkingOverrides });
     const candidates = run.steps.flatMap((step) => step.output?.memoryCandidates ?? []);
     if (candidates.length > 0) {
       if (context.extensionContext) {
@@ -109,14 +109,14 @@ export class ChalinKernel {
   }
 
   async resumeRun(run: RunState, context: Omit<WorkerRunnerContext, "agents" | "modelOverrides" | "thinkingOverrides"> = { cwd: this.cwd }): Promise<ChalinHandleResult> {
-    const approval = approvalDecision(this.config, run.route);
+    const approval = resumeApprovalDecision(this.config, run.route);
     const diagnostics = [...this.catalog.diagnostics.warnings, ...this.catalog.diagnostics.errors];
     if (approval.action !== "allow" || !run.route.plan) return { route: run.route, approval, memories: [], diagnostics, run };
     const agents = this.resolvePlanAgents(run.route);
     const runner = context.extensionContext ? this.sdkRunner : this.runner;
     const resumed = runner.resume
-      ? await runner.resume(run, { ...context, cwd: this.cwd, agents, modelOverrides: this.modelOverrides, thinkingOverrides: this.thinkingOverrides })
-      : await runner.run(run.route, { ...context, cwd: this.cwd, agents, modelOverrides: this.modelOverrides, thinkingOverrides: this.thinkingOverrides });
+      ? await runner.resume(run, { ...context, cwd: this.cwd, rootTask: run.rootTask, agents, modelOverrides: this.modelOverrides, thinkingOverrides: this.thinkingOverrides })
+      : await runner.run(run.route, { ...context, cwd: this.cwd, rootTask: run.rootTask, agents, modelOverrides: this.modelOverrides, thinkingOverrides: this.thinkingOverrides });
     const candidates = resumed.steps.flatMap((step) => step.output?.memoryCandidates ?? []);
     if (candidates.length > 0) {
       if (context.extensionContext) this.persistMemoriesAfterToolResult(candidates, resumed.id, context.extensionContext.hasUI);
@@ -152,6 +152,12 @@ export class ChalinKernel {
     }, delayMs);
     timer.unref?.();
   }
+}
+
+function resumeApprovalDecision(config: ChalinConfig, route: RouteDecision): ApprovalDecision {
+  const current = approvalDecision(config, route);
+  if (current.action === "block") return current;
+  return { action: "allow", reason: "Existing pi-chalin run resumes under the start-time approval gate; non-critical routes are not re-approved mid-run." };
 }
 
 function askUser(reason: string): RouteDecision {

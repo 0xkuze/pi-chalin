@@ -8,7 +8,7 @@ import { loadEffectiveConfig, writeProjectConfig, type ApprovalRiskThreshold, ty
 import { createConfiguredMemoryStore, resolveMemoryBackendStatus, type MemoryBackendStatus } from "./memory-provider.ts";
 import { resolveChalinPaths } from "./paths.ts";
 import { getActiveRun, getLatestRun } from "./runtime-state.ts";
-import type { AgentDefinition } from "./schemas.ts";
+import type { AgentDefinition, RunState } from "./schemas.ts";
 import { openAgentManager } from "./ui-agents.ts";
 import {
   openMemoryReviewWithLoading,
@@ -120,7 +120,7 @@ export function registerChalinCommands(pi: ExtensionAPI): void {
             `agents: ${agents.length}`,
             `pending memory: ${pendingMemoryCount}`,
             `last activity: ${lastRun?.id ?? "none"}`,
-            lastRun ? `guards: ${lastRun.metrics?.policyViolations?.length ?? 0} policy violations · ${lastRun.metrics?.budgetStopCount ?? 0} budget stops` : "guards: no run yet",
+            lastRun ? `guards: ${lastRun.metrics?.policyViolations?.length ?? 0} policy violations · ${formatCommandBudgetSummary(lastRun.metrics)}` : "guards: no run yet",
           ].join("\n"),
           "info",
         );
@@ -177,6 +177,14 @@ export function registerChalinCommands(pi: ExtensionAPI): void {
       });
     },
   });
+}
+
+function formatCommandBudgetSummary(metrics: RunState["metrics"] | undefined): string {
+  const hits = metrics?.budgetCapHits ?? [];
+  const stops = metrics?.budgetStopCount ?? 0;
+  const soft = hits.filter((hit) => hit.severity === "soft").length;
+  const hard = hits.filter((hit) => hit.severity === "hard").length || stops;
+  return `${soft} budget warnings · ${hard} budget stops`;
 }
 
 interface ChalinSettingsOptions {

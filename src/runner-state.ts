@@ -4,15 +4,19 @@ import { estimateBudgetPreflight } from "./budget.ts";
 import { resolveChalinPaths, type ChalinPathsOptions } from "./paths.ts";
 import type { AgentStep, RouteDecision, RoutePlan, RunState, RunStepState } from "./schemas.ts";
 
-export function createRunState(route: RouteDecision, cwd: string): RunState {
+export function createRunState(route: RouteDecision, cwd: string, rootTask?: string, metadata: { parentRunId?: string; parentStepId?: string; delegationDepth?: number } = {}): RunState {
   const id = `chalin-${Date.now().toString(36)}`;
   return {
     id,
     route,
+    ...(rootTask?.trim() ? { rootTask: rootTask.trim() } : {}),
     status: "running",
     startedAt: new Date().toISOString(),
     steps: route.plan ? planSteps(route.plan) : [],
     logsPath: path.join(resolveChalinPaths({ cwd }).projectRoot, ".pi-chalin", "runs", `${id}.json`),
+    ...(metadata.parentRunId ? { parentRunId: metadata.parentRunId } : {}),
+    ...(metadata.parentStepId ? { parentStepId: metadata.parentStepId } : {}),
+    ...(metadata.delegationDepth !== undefined ? { delegationDepth: metadata.delegationDepth } : {}),
     warnings: [],
     budgetPreflight: estimateBudgetPreflight({
       task: route.reason,
@@ -39,7 +43,7 @@ export function prepareRunForResume(run: RunState): RunState {
   return run;
 }
 
-export function loadResumableRunState(options: ChalinPathsOptions & { runId?: string }): RunState | undefined {
+export function loadResumableRunState(options: ChalinPathsOptions & { runId?: string; recoverStale?: boolean }): RunState | undefined {
   const runsDir = path.join(resolveChalinPaths(options).projectRoot, ".pi-chalin", "runs");
   if (!fs.existsSync(runsDir)) return undefined;
   const files = fs.readdirSync(runsDir)
@@ -52,7 +56,7 @@ export function loadResumableRunState(options: ChalinPathsOptions & { runId?: st
       if (options.runId && parsed.id !== options.runId) continue;
       if (isResumableRun(parsed)) {
         parsed.logsPath ??= file;
-        if (parsed.status === "running") {
+        if (parsed.status === "running" && options.recoverStale !== false) {
           parsed.status = "paused";
           parsed.warnings = [...(parsed.warnings ?? []), "Recovered stale running run from disk after process shutdown."];
           persistRun(parsed);
@@ -93,7 +97,7 @@ function planSteps(plan: RoutePlan): RunStepState[] {
       status: "pending" as const,
     })));
   }
-  const rawSteps = plan.kind === "single" ? [{ agent: plan.agent, task: plan.task }] : plan.kind === "chain" ? plan.steps : plan.tasks;
+  const rawSteps = plan.kind === "single" ? [{ agent: plan.agent, task: plan.task, budget: plan.budget }] : plan.kind === "chain" ? plan.steps : plan.tasks;
   return rawSteps.map((step, index) => ({ id: `step-${index + 1}`, agent: step.agent, task: step.task, budget: step.budget, status: "pending" }));
 }
 

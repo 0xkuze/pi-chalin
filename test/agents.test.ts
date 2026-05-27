@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, test } from "bun:test";
 import { AgentCatalog } from "../src/agents.ts";
+import { childToolNames } from "../src/runner-prompt.ts";
 
 const tempDirs: string[] = [];
 
@@ -38,16 +39,26 @@ test("AgentCatalog loads explicit concern capabilities", () => {
   const worker = catalog.resolve("worker").agent;
   const conflictResolver = catalog.resolve("conflict-resolver").agent;
   const planner = catalog.resolve("planner").agent;
+  const scout = catalog.resolve("scout").agent;
 
   assert.ok(worker?.capabilities.includes("edit-files"));
   assert.ok(worker?.capabilities.includes("write-new-files"));
+  assert.ok(scout?.capabilities.includes("run-safe-bash"));
   assert.ok(conflictResolver?.capabilities.includes("edit-files"));
   assert.equal(conflictResolver?.capabilities.includes("write-new-files"), false);
   assert.equal(planner?.capabilities.includes("edit-files"), false);
   assert.equal(planner?.capabilities.includes("write-new-files"), false);
   assert.equal(worker?.thinking, "high");
   assert.equal(planner?.thinking, "high");
-  assert.equal(catalog.resolve("scout").agent?.thinking, "low");
+  assert.equal(scout?.thinking, "low");
+});
+
+test("scout receives native bash for branch and PR reconnaissance", () => {
+  const cwd = tempDir("pi-chalin-cwd-");
+  const scout = AgentCatalog.load({ cwd }).resolve("scout").agent;
+
+  assert.ok(scout);
+  assert.ok(childToolNames(scout, "Review PR comments and map relevant branch context.").includes("bash"));
 });
 
 test("AgentCatalog validates per-agent thinking frontmatter", () => {

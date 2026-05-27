@@ -20,10 +20,6 @@ export interface ProjectDiscoveryIndex {
   truncated: boolean;
   ignoredDirs: string[];
   extensionHistogram: Record<string, number>;
-  shallowFiles: string[];
-  instructionFiles: string[];
-  configLikeFiles: string[];
-  testLikeFiles: string[];
 }
 
 export interface ProjectDiscoveryOptions {
@@ -40,6 +36,7 @@ const IGNORED_DIRS = new Set([
   ".hg",
   ".svn",
   ".pi-chalin",
+  ".workflow-oracle",
   "node_modules",
   "vendor",
   "dist",
@@ -105,34 +102,24 @@ export function buildProjectDiscoveryIndex(cwdInput: string, options: ProjectDis
     truncated,
     ignoredDirs: [...ignoredDirs].sort(),
     extensionHistogram: extensionHistogram(files),
-    shallowFiles: files.filter((entry) => entry.depth <= 2).map((entry) => entry.path).slice(0, 80),
-    instructionFiles: files.filter((entry) => isInstructionLike(entry.path)).map((entry) => entry.path).slice(0, 80),
-    configLikeFiles: files.filter((entry) => isConfigLike(entry.path)).map((entry) => entry.path).slice(0, 80),
-    testLikeFiles: files.filter((entry) => isTestLike(entry.path)).map((entry) => entry.path).slice(0, 80),
   };
 }
 
 export function formatProjectDiscoveryIndex(index: ProjectDiscoveryIndex): string {
-  const dirs = index.entries.filter((entry) => entry.type === "dir").map((entry) => `${entry.path}/`).slice(0, 100);
-  const files = index.entries.filter((entry) => entry.type === "file").map((entry) => entry.path).slice(0, 160);
+  const entries = index.entries.slice(0, 220).map(formatDiscoveryEntry);
   const histogram = Object.entries(index.extensionHistogram)
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .slice(0, 18)
     .map(([ext, count]) => `${ext}:${count}`)
     .join(", ");
   return [
-    "Project discovery index (raw, non-semantic):",
+    "Project discovery inventory (raw filesystem facts, non-semantic):",
     `- cwd: ${index.cwd}`,
     `- entries: ${index.entries.length}${index.truncated ? " (truncated)" : ""}`,
     index.ignoredDirs.length ? `- ignored dirs: ${index.ignoredDirs.join(", ")}` : undefined,
     histogram ? `- extension histogram: ${histogram}` : undefined,
-    dirs.length ? `- directories: ${dirs.join(", ")}` : undefined,
-    index.instructionFiles.length ? `- instruction/JIT files: ${index.instructionFiles.join(", ")}` : undefined,
-    index.shallowFiles.length ? `- shallow files: ${index.shallowFiles.join(", ")}` : undefined,
-    index.configLikeFiles.length ? `- config-like files: ${index.configLikeFiles.join(", ")}` : undefined,
-    index.testLikeFiles.length ? `- test-like files: ${index.testLikeFiles.join(", ")}` : undefined,
-    files.length ? `- sampled files: ${files.join(", ")}` : undefined,
-    "Guidance: treat this as an index only. For repositories with AGENTS.md/CONTEXT.md/JIT files, read the root instruction file and relevant package instruction files before broad code reads; then verify claims with the smallest evidence set.",
+    entries.length ? "- entries:\n" + entries.map((entry) => `  - ${entry}`).join("\n") : undefined,
+    "Guidance: treat this as an inventory only. It does not infer stack, entrypoints, tests, commands, or importance. Use LLM judgment to choose follow-up reads/searches and verify claims from exact files.",
   ].filter((line): line is string => Boolean(line)).join("\n");
 }
 
@@ -170,21 +157,13 @@ function extensionHistogram(files: DiscoveryEntry[]): Record<string, number> {
   return result;
 }
 
-function isConfigLike(filePath: string): boolean {
-  const base = path.basename(filePath).toLowerCase();
-  return /(^|[.-])(config|rc|lock|workspace|manifest|project|settings|schema)([.-]|$)/.test(base)
-    || ["makefile", "dockerfile", "readme.md", "agents.md", "package.json", "go.mod", "cargo.toml", "pyproject.toml", "pom.xml", "build.gradle", "composer.json", "gemfile"].includes(base)
-    || /\.(ya?ml|toml|json|ini|env|properties)$/i.test(base);
-}
-
-function isInstructionLike(filePath: string): boolean {
-  const base = path.basename(filePath).toLowerCase();
-  return ["agents.md", "claude.md", "context.md"].includes(base)
-    || /(^|\/)(docs\/adr|adr)\//i.test(filePath)
-    || /(^|\/)\.agents\/skills\/readme\.md$/i.test(filePath);
-}
-
-function isTestLike(filePath: string): boolean {
-  return /(^|\/)(test|tests|spec|__tests__|e2e)(\/|$)/i.test(filePath)
-    || /(?:^|[._-])(test|spec)\.[a-z0-9]+$/i.test(path.basename(filePath));
+function formatDiscoveryEntry(entry: DiscoveryEntry): string {
+  const details = [
+    entry.type,
+    `depth=${entry.depth}`,
+    entry.type === "dir" && typeof entry.childCount === "number" ? `children=${entry.childCount}` : undefined,
+    entry.type === "file" && typeof entry.sizeBytes === "number" ? `bytes=${entry.sizeBytes}` : undefined,
+    entry.type === "file" && entry.ext ? `ext=${entry.ext}` : undefined,
+  ].filter((item): item is string => Boolean(item));
+  return `${entry.path} (${details.join(", ")})`;
 }

@@ -58,21 +58,26 @@ export function finalAnswerMaterial(run: RunState | undefined): string | undefin
     return material ? truncate(material, finalAnswerMaterialBudget(run)) : undefined;
   }
   const primary = completeSteps.at(-1) ?? run.steps.at(-1);
-  const output = primary ? stepOutput(primary) : undefined;
+  const output = primary ? primaryFinalOutput(run, primary) : undefined;
   return output ? truncate(output, finalAnswerMaterialBudget(run)) : undefined;
 }
 
 function shouldAggregateFinalMaterial(run: RunState, completeSteps: RunState["steps"]): boolean {
   if (completeSteps.length <= 1) return false;
   if (run.route.kind === "multi-agent-dag") return true;
-  return /\b(deep|in[- ]depth|profundidad|profundo|an[aá]lisis|project analysis|Coverage Matrix|Evidence Table)\b/i.test(run.route.reason);
+  const agents = new Set(completeSteps.map((step) => step.agent));
+  const hasWriter = agents.has("worker");
+  const hasEvidenceBuilder = agents.has("scout") || agents.has("context-builder");
+  const hasSynthesis = agents.has("reviewer") || agents.has("context-builder");
+  return !hasWriter && hasEvidenceBuilder && hasSynthesis;
 }
 
 function finalAnswerMaterialBudget(run: RunState): number {
   const parsed = Number(process.env.PI_CHALIN_FINAL_MATERIAL_CHARS);
   if (Number.isFinite(parsed) && parsed > 500) return Math.floor(parsed);
   if (run.route.kind === "multi-agent-dag") return 12000;
-  if (/\b(deep|in[- ]depth|profundidad|profundo|an[aá]lisis|project analysis|Coverage Matrix|Evidence Table)\b/i.test(run.route.reason)) return 10000;
+  if (run.steps.length > 1 && !run.steps.some((step) => step.agent === "worker")) return 10000;
+  if (run.steps.length === 1 && !run.steps.some((step) => step.agent === "worker")) return 6000;
   return 1200;
 }
 
@@ -90,6 +95,13 @@ function stepOutput(step: RunState["steps"][number]): string | undefined {
   return step.output?.handoff || step.output?.text || step.output?.raw || step.error;
 }
 
+function primaryFinalOutput(run: RunState, step: RunState["steps"][number]): string | undefined {
+  if (run.steps.length === 1 && step.agent !== "worker" && step.agent !== "conflict-resolver") {
+    return stepFullOutput(step);
+  }
+  return stepOutput(step);
+}
+
 function stepFullOutput(step: RunState["steps"][number]): string | undefined {
   return step.output?.text || step.output?.raw || step.output?.handoff || step.error;
 }
@@ -100,16 +112,6 @@ export function outcomeForResult(result: ChalinHandleResult): ChalinRouteOutcome
   if (result.run?.status === "failed") return "failed";
   if (result.run?.status === "paused") return "paused";
   return "complete";
-}
-
-export function formatDirectRecommendation(route: RouteDecision, reason: string): string {
-  return [
-    "pi-chalin direct execution recommended",
-    "status: direct-recommended",
-    reason,
-    `Original route: ${route.kind} · ${route.agents.join(" → ") || "none"}`,
-    "Instruction for the primary Pi agent: do not claim completion from this tool result. Continue now with native tools and complete the bounded edit directly.",
-  ].join("\n");
 }
 
 function formatStep(step: RunState["steps"][number]): string {

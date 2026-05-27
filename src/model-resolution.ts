@@ -9,10 +9,19 @@ interface ModelResolutionContext {
   extensionContext?: ExtensionContext;
 }
 
-export function resolveAgentModel(agent: AgentDefinition | undefined, agentName: string, context: ModelResolutionContext): { model: ExtensionContext["model"]; label: string; resolution: ModelResolutionLog; warnings: string[] } {
+export interface ResolvedAgentModel {
+  model: ExtensionContext["model"];
+  label: string;
+  resolution: ModelResolutionLog;
+  warnings: string[];
+}
+
+export function resolveAgentModel(agent: AgentDefinition | undefined, agentName: string, context: ModelResolutionContext): ResolvedAgentModel {
   const fallback = context.extensionContext?.model;
   const tier = agentTier(agentName);
+  const forcedModel = process.env.PI_CHALIN_EVAL_AGENT_MODEL;
   const candidates: Array<{ source: ModelResolutionAttempt["source"]; ref?: string }> = [
+    { source: "session-override", ref: forcedModel },
     { source: "session-override", ref: context.modelOverrides?.[`${agent?.scope ?? "built-in"}/${agentName}`] ?? context.modelOverrides?.[agentName] },
     { source: "agent", ref: agent?.model && agent.model !== "inherit" ? agent.model : undefined },
     { source: "tier", ref: context.modelOverrides?.[`tier/${tier}`] ?? process.env[`PI_CHALIN_${tier.toUpperCase()}_MODEL`] },
@@ -41,6 +50,46 @@ export function resolveAgentModel(agent: AgentDefinition | undefined, agentName:
     label: fallback ? `${inherited} (${tier}:inherit)` : `inherit (${tier})`,
     resolution: { selected: inherited, tier, attempts },
     warnings: fallbackWarnings(agentName, attempts, inherited),
+  };
+}
+
+export function resolveInheritedModelFallback(
+  previous: ResolvedAgentModel,
+  agentName: string,
+  context: ModelResolutionContext,
+  reason: string,
+): ResolvedAgentModel | undefined {
+  const fallback = context.extensionContext?.model;
+  if (!fallback) return undefined;
+  const inherited = `${fallback.provider}/${fallback.id}`;
+  if (previous.resolution.selected === inherited) return undefined;
+
+  let selectedMarked = false;
+  const attempts = previous.resolution.attempts.map((attempt) => {
+    if (selectedMarked || attempt.status !== "selected" || attempt.model !== previous.resolution.selected) return attempt;
+    selectedMarked = true;
+    return { ...attempt, status: "runtime-error" as const, reason: compactRuntimeReason(reason) };
+  });
+  if (!selectedMarked) {
+    attempts.push({
+      source: "agent",
+      status: "runtime-error",
+      model: previous.resolution.selected,
+      reason: compactRuntimeReason(reason),
+    });
+  }
+  attempts.push({
+    source: "inherit",
+    status: "selected",
+    model: inherited,
+    reason: `runtime fallback after ${previous.resolution.selected} failed`,
+  });
+
+  return {
+    model: fallback,
+    label: `${inherited} (${previous.resolution.tier}:inherit-runtime-fallback)`,
+    resolution: { selected: inherited, tier: previous.resolution.tier, attempts },
+    warnings: [`Model runtime fallback for ${agentName}: ${previous.resolution.selected} failed (${compactRuntimeReason(reason)}); selected ${inherited}.`],
   };
 }
 
@@ -99,8 +148,12 @@ function agentTier(agentName: string): "fast" | "balanced" | "strong" {
 }
 
 function fallbackWarnings(agentName: string, attempts: ModelResolutionAttempt[], selected: string): string[] {
-  const failed = attempts.filter((attempt) => ["invalid", "unavailable", "unauthenticated", "fallback"].includes(attempt.status) && attempt.source !== "inherit");
+  const failed = attempts.filter((attempt) => ["invalid", "unavailable", "unauthenticated", "fallback", "runtime-error"].includes(attempt.status) && attempt.source !== "inherit");
   if (failed.length === 0) return [];
   const refs = failed.map((attempt) => `${attempt.ref ?? attempt.source} ${attempt.status}`).join("; ");
   return [`Model fallback for ${agentName}: ${refs}; selected ${selected}.`];
+}
+
+function compactRuntimeReason(reason: string): string {
+  return reason.replace(/\s+/g, " ").trim().slice(0, 180) || "provider/model runtime error";
 }

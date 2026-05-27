@@ -6,6 +6,7 @@ import { afterEach, test } from "bun:test";
 import { ChalinKernel, routeFromPlan } from "../src/kernel.ts";
 import { createMemoryCandidate, MemoryStore } from "../src/memory.ts";
 import type { WorkerRunner, WorkerRunnerContext } from "../src/runner.ts";
+import { createRunState } from "../src/runner-state.ts";
 import type { RouteDecision, RunState } from "../src/schemas.ts";
 
 const tempDirs: string[] = [];
@@ -86,6 +87,47 @@ test("ChalinKernel executes an LLM-planned mock route", async () => {
   assert.equal(result.approval.action, "allow");
   assert.equal(result.run?.status, "complete");
   assert.equal(result.run?.steps[0]?.agent, "reviewer");
+});
+
+test("ChalinKernel resumes an already-started non-critical run without a second approval prompt", async () => {
+  const cwd = tempDir("pi-chalin-kernel-resume-");
+  const route = routeFromPlan({
+    topology: "chain",
+    risk: "medium",
+    needsArtifacts: true,
+    steps: [
+      { agent: "scout", task: "Inspect the PR comments." },
+      { agent: "worker", task: "Apply the requested fixes." },
+    ],
+  });
+  const run = createRunState(route, cwd);
+  run.status = "paused";
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.output = { agent: "scout", text: "Found one requested change.", handoff: "One requested change remains.", memoryCandidates: [], raw: "Found one requested change.", warnings: [] };
+  run.steps[1]!.status = "paused";
+  run.steps[1]!.error = "pi-chalin run stopped by user.";
+
+  let resumeCalled = false;
+  const runner: WorkerRunner = {
+    async run(): Promise<RunState> {
+      throw new Error("resumeRun should call runner.resume for a paused run");
+    },
+    async resume(inputRun: RunState): Promise<RunState> {
+      resumeCalled = true;
+      inputRun.status = "complete";
+      inputRun.steps[1]!.status = "complete";
+      inputRun.steps[1]!.output = { agent: "worker", text: "Applied the requested fixes.", handoff: "Fixes applied.", memoryCandidates: [], raw: "Applied the requested fixes.", warnings: [] };
+      return inputRun;
+    },
+  };
+
+  const result = await new ChalinKernel({ cwd, runner }).resumeRun(run, { cwd });
+
+  assert.equal(result.approval.action, "allow");
+  assert.match(result.approval.reason, /start-time approval gate/);
+  assert.equal(resumeCalled, true);
+  assert.equal(result.run?.status, "complete");
+  assert.deepEqual(result.run?.steps.map((step) => step.status), ["complete", "complete"]);
 });
 
 test("ChalinKernel does not block SDK tool results on memory persistence", async () => {

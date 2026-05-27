@@ -6,9 +6,10 @@ import { spawnSync } from "node:child_process";
 import { afterEach, test } from "bun:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { chalinChildSessionDir, createChalinChildSessionManager, hideLegacyTopLevelChildSessions } from "../src/child-sessions.ts";
-import { resolveAgentModel, resolveAgentThinking } from "../src/model-resolution.ts";
+import { policyForStep } from "../src/budget.ts";
+import { resolveAgentModel, resolveAgentThinking, resolveInheritedModelFallback } from "../src/model-resolution.ts";
 import { buildSdkPrompt, childToolNames, resolveStepCompletionStatus, toolBudgetForStep } from "../src/runner-prompt.ts";
-import { MockWorkerRunner, buildConflictResolverTask, hasUnrecoverableFailedSteps, parseAgentOutput, shouldStopAfterDagStage, withIdleTimeout } from "../src/runner.ts";
+import { DEFAULT_SDK_STEP_IDLE_STALL_MS, MockWorkerRunner, budgetPolicyForSdkStep, buildConflictResolverTask, extractAssistantRuntimeError, hasUnrecoverableFailedSteps, normalizeThinkingForBudget, parseAgentOutput, runWithIdleStallMonitor, sdkStepIdleStallMs, shouldStopAfterDagStage } from "../src/runner.ts";
 import { createRunState, loadResumableRunState, prepareRunForResume } from "../src/runner-state.ts";
 import type { AgentDefinition, RouteDecision, RunState } from "../src/schemas.ts";
 
@@ -70,7 +71,7 @@ test("buildConflictResolverTask creates a bounded surgical conflict task", () =>
   assert.match(task, /patch would not apply/);
   assert.match(task, /surgical/i);
   assert.match(task, /isolated writer change/);
-  assert.match(task, /do not rewrite whole/i);
+  assert.match(task, /precise evidence and diffs/i);
 });
 
 test("MockWorkerRunner runs chain plans in order", async () => {
@@ -293,6 +294,23 @@ test("MockWorkerRunner runs staged DAGs with parallel fan-out and downstream syn
   assert.match(run.steps[3]?.output?.raw ?? "", /context-builder/);
 });
 
+test("createRunState preserves single-plan budget metadata", () => {
+  const route: RouteDecision = {
+    kind: "single-agent",
+    agents: ["scout"],
+    risk: "low",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: false,
+    reason: "deep recon",
+    plan: { kind: "single", agent: "scout", task: "Map project.", budget: "deep" },
+  };
+
+  const run = createRunState(route, tempDir("pi-chalin-single-budget-"));
+
+  assert.equal(run.steps[0]?.budget, "deep");
+});
+
 test("MockWorkerRunner resumes paused DAG runs without rerunning completed steps", async () => {
   const cwd = tempDir("pi-chalin-runner-resume-dag-");
   const route: RouteDecision = {
@@ -410,14 +428,14 @@ test("prepareRunForResume resets interrupted work but keeps completed handoffs",
   assert.equal(run.steps[1]?.error, undefined);
 });
 
-test("SDK DAG can continue synthesis after a partial read-only fan-out timeout", () => {
+test("SDK DAG can continue synthesis after a partial read-only fan-out idle stall", () => {
   const agents = new Map([
     ["context-builder", readOnlyAgent("context-builder")],
     ["reviewer", readOnlyAgent("reviewer", "review")],
   ]);
 
   const shouldStop = shouldStopAfterDagStage([
-    { agent: "context-builder", status: "failed", error: "SDK runner timed out for context-builder after 180000ms" },
+    { agent: "context-builder", status: "failed", error: "SDK runner idle stalled for context-builder after 90000ms without activity" },
     {
       agent: "context-builder",
       status: "complete",
@@ -433,15 +451,15 @@ test("SDK DAG can continue synthesis after a partial read-only fan-out timeout",
   assert.equal(shouldStop, false);
 });
 
-test("SDK child timeout is based on idle time, not total wall-clock while a tool is active", async () => {
+test("SDK child idle guard is based on idle time, not total wall-clock while a tool is active", async () => {
   let active = 1;
-  const result = await withIdleTimeout(
+  const result = await runWithIdleStallMonitor(
     new Promise<string>((resolve) => setTimeout(() => {
       active = 0;
       resolve("finished");
     }, 55)),
     {
-      idleTimeoutMs: 20,
+      idleStallMs: 20,
       pollMs: 5,
       message: "idle guard",
       activeOperations: () => active,
@@ -453,14 +471,28 @@ test("SDK child timeout is based on idle time, not total wall-clock while a tool
 
 test("SDK child idle guard rejects when no tool or message activity occurs", async () => {
   await assert.rejects(
-    withIdleTimeout(new Promise(() => undefined), {
-      idleTimeoutMs: 20,
+    runWithIdleStallMonitor(new Promise(() => undefined), {
+      idleStallMs: 20,
       pollMs: 5,
       message: "idle guard",
       activeOperations: () => 0,
     }),
     /idle guard after 20ms without activity/,
   );
+});
+
+test("SDK child idle stall window defaults to 90s and uses only the idle-stall env knob", () => {
+  const previousStall = process.env.PI_CHALIN_SDK_STEP_IDLE_STALL_MS;
+  try {
+    delete process.env.PI_CHALIN_SDK_STEP_IDLE_STALL_MS;
+    assert.equal(sdkStepIdleStallMs(), DEFAULT_SDK_STEP_IDLE_STALL_MS);
+
+    process.env.PI_CHALIN_SDK_STEP_IDLE_STALL_MS = "45000";
+    assert.equal(sdkStepIdleStallMs(), 45_000);
+  } finally {
+    if (previousStall === undefined) delete process.env.PI_CHALIN_SDK_STEP_IDLE_STALL_MS;
+    else process.env.PI_CHALIN_SDK_STEP_IDLE_STALL_MS = previousStall;
+  }
 });
 
 test("SDK DAG stops after writer failures to avoid unsafe partial merges", () => {
@@ -489,7 +521,7 @@ test("recovered read-only DAG failures do not poison the final run status", () =
   const run: Pick<RunState, "steps"> = {
     steps: [
       { id: "discover:step-1", agent: "context-builder", task: "Map project.", status: "complete", output: { agent: "context-builder", text: "map", handoff: "map", memoryCandidates: [], raw: "", warnings: [] } },
-      { id: "fanout:step-1", agent: "context-builder", task: "Analyze backend.", status: "failed", error: "SDK runner timed out for context-builder after 180000ms" },
+      { id: "fanout:step-1", agent: "context-builder", task: "Analyze backend.", status: "failed", error: "SDK runner idle stalled for context-builder after 90000ms without activity" },
       { id: "fanout:step-2", agent: "context-builder", task: "Analyze UI.", status: "complete", output: { agent: "context-builder", text: "ui", handoff: "ui", memoryCandidates: [], raw: "", warnings: [] } },
       { id: "synthesis:step-1", agent: "context-builder", task: "Synthesize.", status: "complete", output: { agent: "context-builder", text: "final", handoff: "final", memoryCandidates: [], raw: "", warnings: [] } },
     ],
@@ -503,7 +535,7 @@ test("unrecovered read-only DAG failures remain failed until a downstream stage 
   const run: Pick<RunState, "steps"> = {
     steps: [
       { id: "discover:step-1", agent: "context-builder", task: "Map project.", status: "complete", output: { agent: "context-builder", text: "map", handoff: "map", memoryCandidates: [], raw: "", warnings: [] } },
-      { id: "fanout:step-1", agent: "context-builder", task: "Analyze backend.", status: "failed", error: "SDK runner timed out for context-builder after 180000ms" },
+      { id: "fanout:step-1", agent: "context-builder", task: "Analyze backend.", status: "failed", error: "SDK runner idle stalled for context-builder after 90000ms without activity" },
       { id: "fanout:step-2", agent: "context-builder", task: "Analyze UI.", status: "complete", output: { agent: "context-builder", text: "ui", handoff: "ui", memoryCandidates: [], raw: "", warnings: [] } },
     ],
   };
@@ -570,8 +602,72 @@ test("buildSdkPrompt injects compact memory context without bloating discovery",
 
   assert.match(prompt, /autonomous memory policy/i);
   assert.match(prompt, /Compact Memory Context/);
+  assert.match(prompt, /Changed:/);
+  assert.match(prompt, /Verification:/);
+  assert.match(prompt, /exact implementation and test\/evidence source paths/i);
+  assert.match(prompt, /Never write only local\/existing tests/i);
+  assert.match(prompt, /derive the contract from prompt\+repo evidence/i);
+  assert.match(prompt, /Tests are contract oracles/i);
+  assert.match(prompt, /one boundary\/counterexample/i);
+  assert.match(prompt, /preservation\/no-op\/composition paths/i);
+  assert.match(prompt, /Preserve public compatibility/i);
+  assert.match(prompt, /capture normalized config/i);
+  assert.match(prompt, /caller-side object mutation/i);
+  assert.match(prompt, /internal test seams or runner-native fake timers/i);
+  assert.match(prompt, /without expanding public APIs/i);
+  assert.match(prompt, /global monkeypatches/i);
+  assert.match(prompt, /wall-clock sleeps/i);
+  assert.match(prompt, /Code behavior changes update nearest tests/i);
+  assert.match(prompt, /evidence-only tests/i);
+  assert.match(prompt, /runner-discoverable cases/i);
+  assert.match(prompt, /zero-test assertion scripts/i);
+  assert.match(prompt, /runner's discoverable API/i);
+  assert.match(prompt, /real command path/i);
+  assert.match(prompt, /args\/no-input/i);
+  assert.match(prompt, /Parser\/scanner\/state-machine\/normalization changes follow repo grammar evidence/i);
+  assert.match(prompt, /EOF\/error behavior/i);
+  assert.match(prompt, /docs\/plans tie validation to evidence/i);
+  assert.match(prompt, /responsibility\/ownership maps/i);
+  assert.match(prompt, /resource escape hatches/i);
+  assert.match(prompt, /arbitrary fixed caps/i);
+  assert.match(prompt, /small evidence/i);
+  assert.match(prompt, /one impl\/test edit/i);
+  assert.match(prompt, /avoid micro-edits/i);
+  assert.match(prompt, /smallest exact block/i);
+  assert.match(prompt, /one corrective edit\/fail/i);
+  assert.match(prompt, /After pass, one readback/i);
+  assert.match(prompt, /exact named command/i);
   assert.match(prompt, /Project tests use Bun/);
   assert.ok(prompt.length < 7000, `prompt should stay compact, got ${prompt.length}`);
+});
+
+test("buildSdkPrompt preserves the original user goal across routed step prompts", () => {
+  const agent: AgentDefinition = {
+    name: "worker",
+    scope: "built-in",
+    concern: "implementation",
+    capabilities: ["inspect-files", "search-files", "edit-files"],
+    description: "Implements scoped changes.",
+    model: "inherit",
+    tools: [],
+    memory: { read: false, write: "never", categories: [] },
+    systemPrompt: "",
+    diagnostics: [],
+  };
+  const prompt = buildSdkPrompt(
+    agent,
+    "Update the docs artifact with the requested fields.",
+    tempDir("pi-chalin-root-task-prompt-"),
+    "Scout found a neighboring identity issue.",
+    25,
+    "tight",
+    { rootTask: "Analyze duplicate packages when workspace paths mix Windows/POSIX separators. Do not change code." },
+  );
+
+  assert.match(prompt, /Original User Goal/);
+  assert.match(prompt, /workspace paths mix Windows\/POSIX separators/i);
+  assert.match(prompt, /Original User Goal below is the contract/i);
+  assert.match(prompt, /preserve the user's exact failure trigger/i);
 });
 
 test("buildSdkPrompt puts context-builder into handoff-first gap-read mode", () => {
@@ -681,7 +777,7 @@ test("childToolNames removes inspection tools for handoff-only synthesis steps",
   };
 
   assert.deepEqual(childToolNames(agent, "Synthesize scout findings into final answer material.", true, true), []);
-  assert.ok(childToolNames(agent, "Save a checkpoint for this long-running feature.", true, true).includes("chalin_artifact_write"));
+  assert.ok(childToolNames(agent, "Save a checkpoint for this long-running feature.", true, true, { budgetProfile: "extended" }).includes("chalin_artifact_write"));
 });
 
 test("childToolNames keeps inspection tools for deep synthesis with possible coverage gaps", () => {
@@ -698,7 +794,7 @@ test("childToolNames keeps inspection tools for deep synthesis with possible cov
     diagnostics: [],
   };
 
-  const tools = childToolNames(agent, "Synthesize deep project analysis in-depth into final answer material.", true, true);
+  const tools = childToolNames(agent, "Synthesize deep project analysis in-depth into final answer material.", true, true, { budgetProfile: "deep" });
 
   assert.ok(tools.includes("read"));
   assert.ok(tools.includes("grep"));
@@ -728,7 +824,48 @@ test("childToolNames exposes autonomous memory tools only to memory-capable agen
   assert.equal(childToolNames(noMemoryAgent, "Implement feature.", true, false).some((tool) => tool.startsWith("chalin_memory_")), false);
 });
 
-test("childToolNames uses discovery plus snapshot mode for branch reconnaissance", () => {
+test("childToolNames exposes nested delegation only to coordinating subagents below depth limit", () => {
+  const worker: AgentDefinition = {
+    name: "worker",
+    scope: "built-in",
+    concern: "implementation",
+    capabilities: ["inspect-files", "search-files", "edit-files", "coordinate"],
+    description: "Coordinating worker.",
+    model: "inherit",
+    tools: [],
+    memory: { read: false, write: "never", categories: [] },
+    systemPrompt: "",
+    diagnostics: [],
+  };
+  const noCoordinate: AgentDefinition = { ...worker, capabilities: ["inspect-files", "search-files", "edit-files"] };
+
+  assert.ok(childToolNames(worker, "Implement broad change.", true, false, { delegationDepth: 1, maxDelegationDepth: 2 }).includes("chalin_delegate"));
+  assert.equal(childToolNames(worker, "Implement broad change.", true, false, { delegationDepth: 2, maxDelegationDepth: 2 }).includes("chalin_delegate"), false);
+  assert.equal(childToolNames(worker, "Synthesize previous handoff.", true, true, { delegationDepth: 1, maxDelegationDepth: 2 }).includes("chalin_delegate"), false);
+  assert.equal(childToolNames(noCoordinate, "Implement broad change.", true, false, { delegationDepth: 1, maxDelegationDepth: 2 }).includes("chalin_delegate"), false);
+});
+
+test("childToolNames respects route-level memory gating", () => {
+  const memoryAgent: AgentDefinition = {
+    name: "scout",
+    scope: "built-in",
+    concern: "recon",
+    capabilities: ["inspect-files", "search-files", "memory-read", "memory-write"],
+    description: "Memory capable scout.",
+    model: "inherit",
+    tools: [],
+    memory: { read: true, write: "candidate", categories: [] },
+    systemPrompt: "",
+    diagnostics: [],
+  };
+
+  const tools = childToolNames(memoryAgent, "Map project.", false, false, { memoryEnabled: false });
+
+  assert.equal(tools.some((tool) => tool.startsWith("chalin_memory_")), false);
+  assert.ok(tools.includes("chalin_project_discovery"));
+});
+
+test("childToolNames exposes discovery plus snapshot for recon without semantic branch classification", () => {
   const agent: AgentDefinition = {
     name: "scout",
     scope: "built-in",
@@ -742,7 +879,11 @@ test("childToolNames uses discovery plus snapshot mode for branch reconnaissance
     diagnostics: [],
   };
 
-  assert.deepEqual(childToolNames(agent, "Inspect current git branch, status, recent commits, and diff against base.", false, false), ["chalin_project_discovery", "chalin_project_snapshot"]);
+  const tools = childToolNames(agent, "Inspect current git branch, status, recent commits, and diff against base.", false, false);
+  assert.ok(tools.includes("chalin_project_discovery"));
+  assert.ok(tools.includes("chalin_project_snapshot"));
+  assert.ok(tools.includes("read"));
+  assert.ok(tools.includes("grep"));
 });
 
 
@@ -773,6 +914,81 @@ test("resolveAgentModel records fallback attempts and selects next configured ca
   assert.ok(resolved.warnings.some((warning) => /model fallback/i.test(warning)));
 });
 
+test("resolveAgentModel lets evals force child agent model over local overrides", () => {
+  const forced = { provider: "openai-codex", id: "gpt-5.5" };
+  const registry = {
+    find(provider: string, id: string) {
+      if (provider === forced.provider && id === forced.id) return forced;
+      return undefined;
+    },
+    hasConfiguredAuth(model: { provider: string; id: string }) {
+      return model.id === forced.id;
+    },
+  };
+  const previous = process.env.PI_CHALIN_EVAL_AGENT_MODEL;
+  process.env.PI_CHALIN_EVAL_AGENT_MODEL = "openai-codex/gpt-5.5";
+  try {
+    const resolved = resolveAgentModel(agent("worker", ["inspect-files"]), "worker", {
+      cwd: tempDir("pi-chalin-model-force-"),
+      agents: new Map(),
+      modelOverrides: { worker: "opencode/kimi-k2.6" },
+      extensionContext: { model: { provider: "openai", id: "fallback-active" }, modelRegistry: registry } as never,
+    });
+
+    assert.equal(resolved.label, "openai-codex/gpt-5.5");
+    assert.equal(resolved.resolution.attempts[0]?.ref, "openai-codex/gpt-5.5");
+  } finally {
+    if (previous === undefined) delete process.env.PI_CHALIN_EVAL_AGENT_MODEL;
+    else process.env.PI_CHALIN_EVAL_AGENT_MODEL = previous;
+  }
+});
+
+test("resolveInheritedModelFallback switches any subagent runtime provider failure to active inherited model", () => {
+  const active = { provider: "openai", id: "gpt-5.5" };
+  const override = { provider: "opencode", id: "kimi-k2.6" };
+  const registry = {
+    find(provider: string, id: string) {
+      if (provider === active.provider && id === active.id) return active;
+      if (provider === override.provider && id === override.id) return override;
+      return undefined;
+    },
+    hasConfiguredAuth() {
+      return true;
+    },
+  };
+
+  for (const agentName of ["scout", "reviewer", "worker"]) {
+    const resolved = resolveAgentModel(agent(agentName, ["inspect-files"]), agentName, {
+      cwd: tempDir(`pi-chalin-runtime-model-fallback-${agentName}-`),
+      agents: new Map(),
+      modelOverrides: { [agentName]: "opencode/kimi-k2.6" },
+      extensionContext: { model: active, modelRegistry: registry } as never,
+    });
+
+    const fallback = resolveInheritedModelFallback(resolved, agentName, {
+      cwd: tempDir(`pi-chalin-runtime-model-fallback-inherit-${agentName}-`),
+      agents: new Map(),
+      extensionContext: { model: active, modelRegistry: registry } as never,
+    }, "401 Insufficient balance");
+
+    assert.ok(fallback);
+    assert.equal(fallback.model, active);
+    assert.equal(fallback.resolution.selected, "openai/gpt-5.5");
+    assert.ok(fallback.resolution.attempts.some((attempt) => attempt.status === "runtime-error" && attempt.model === "opencode/kimi-k2.6"));
+    assert.equal(fallback.resolution.attempts.at(-1)?.source, "inherit");
+    assert.match(fallback.warnings.join("\n"), new RegExp(`runtime fallback for ${agentName}`, "i"));
+  }
+});
+
+test("extractAssistantRuntimeError detects structural SDK provider errors", () => {
+  const error = extractAssistantRuntimeError([
+    { role: "user", content: "Task" },
+    { role: "assistant", content: [], stopReason: "error", errorMessage: "401 Insufficient balance" },
+  ]);
+
+  assert.equal(error, "401 Insufficient balance");
+});
+
 test("resolveAgentThinking uses overrides, agent defaults, and model suffixes", () => {
   const agentDef = agent("reviewer", ["inspect-files"]);
   agentDef.model = "openai/gpt-5-mini:high";
@@ -798,6 +1014,50 @@ test("resolveAgentThinking uses overrides, agent defaults, and model suffixes", 
   assert.equal(override.level, "xhigh");
 });
 
+test("normalizeThinkingForBudget avoids upward SDK clamps for efficient evidence work", () => {
+  const deepseekLikeModel = {
+    reasoning: true,
+    thinkingLevelMap: { minimal: null, low: null, medium: null, high: "high", xhigh: "max" },
+  };
+  const scout = agent("scout", ["inspect-files"]);
+  scout.concern = "recon";
+  const contextBuilder = agent("context-builder", ["inspect-files"]);
+  contextBuilder.concern = "context-building";
+  const worker = agent("worker", ["edit-files"]);
+  worker.concern = "implementation";
+
+  const scoutThinking = normalizeThinkingForBudget({ level: "low", label: "low" }, "normal", {
+    agent: scout,
+    model: deepseekLikeModel as never,
+  });
+  const synthesisThinking = normalizeThinkingForBudget({ level: "medium", label: "medium" }, "deep", {
+    agent: contextBuilder,
+    hasPrevious: true,
+    model: deepseekLikeModel as never,
+  });
+  const implementationThinking = normalizeThinkingForBudget({ level: "high", label: "high" }, "deep", {
+    agent: worker,
+    model: deepseekLikeModel as never,
+  });
+  const normalWorkerThinking = normalizeThinkingForBudget({ level: "high", label: "high" }, "normal", {
+    agent: worker,
+    model: {
+      reasoning: true,
+      thinkingLevelMap: { minimal: null, low: null, medium: "medium", high: "high", xhigh: "max" },
+    } as never,
+  });
+  const unsupportedNormalWorkerThinking = normalizeThinkingForBudget({ level: "high", label: "high" }, "normal", {
+    agent: worker,
+    model: deepseekLikeModel as never,
+  });
+
+  assert.equal(scoutThinking.level, "off");
+  assert.equal(synthesisThinking.level, "off");
+  assert.equal(implementationThinking.level, "high");
+  assert.equal(normalWorkerThinking.level, "medium");
+  assert.equal(unsupportedNormalWorkerThinking.level, "high");
+});
+
 
 test("toolBudgetForStep supports LLM-chosen profiles and deep DAG defaults", () => {
   const contextAgent: AgentDefinition = {
@@ -817,6 +1077,30 @@ test("toolBudgetForStep supports LLM-chosen profiles and deep DAG defaults", () 
   assert.equal(toolBudgetForStep(contextAgent, { agent: "context-builder", task: "Analyze one module." }, "multi-agent-chain"), 60);
   assert.equal(toolBudgetForStep(contextAgent, { agent: "context-builder", task: "Analyze folder deeply." }, "multi-agent-dag"), 120);
   assert.equal(toolBudgetForStep(contextAgent, { agent: "context-builder", task: "Long autonomous stage with checkpoints.", budget: "extended" }, "multi-agent-dag"), 240);
+});
+
+test("budgetPolicyForSdkStep keeps deep recon surface-complete instead of file-exhaustive", () => {
+  const scout = readOnlyAgent("scout", "recon");
+  const base = policyForStep(scout, { agent: "scout", task: "Map the whole project.", budget: "deep" }, "single-agent", "low");
+  const sdk = budgetPolicyForSdkStep(base, scout);
+
+  assert.equal(base.caps.maxToolCalls, 80);
+  assert.equal(sdk.caps.maxToolCalls, 12);
+  assert.equal(sdk.caps.maxTurns, 5);
+  assert.equal(sdk.caps.maxReadBytes, 260_000);
+  assert.match(sdk.id, /surface-recon/);
+});
+
+test("buildSdkPrompt tells deep recon to cover surfaces without exhaustive crawling", () => {
+  const scout = readOnlyAgent("scout", "recon");
+  const policy = budgetPolicyForSdkStep(policyForStep(scout, { agent: "scout", task: "Map the project.", budget: "deep" }, "single-agent", "low"), scout);
+  const prompt = buildSdkPrompt(scout, "Map the project.", tempDir("prompt-recon-"), undefined, policy);
+
+  assert.match(prompt, /Deep recon is surface-complete, not file-exhaustive/);
+  assert.match(prompt, /Coverage means representative evidence per surface/);
+  assert.match(prompt, /cite full relative paths from the repo root/);
+  assert.match(prompt, /preserve exact runnable commands discovered in README/);
+  assert.match(prompt, /report them as runnable invocations/);
 });
 
 test("resolveStepCompletionStatus treats useful budget handoffs as complete", () => {
@@ -851,4 +1135,19 @@ test("resolveStepCompletionStatus treats useful budget handoffs as complete", ()
 
   assert.equal(useful, "complete");
   assert.equal(empty, "budget-capped");
+});
+
+test("resolveStepCompletionStatus fails errored child steps even without budget caps", () => {
+  const status = resolveStepCompletionStatus({
+    error: "SDK runner failed for worker: 401 Insufficient balance",
+    metrics: {
+      durationMs: 1,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      toolCalls: 0,
+      toolCallsByName: {},
+    },
+    output: undefined,
+  });
+
+  assert.equal(status, "failed");
 });

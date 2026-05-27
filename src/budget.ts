@@ -1,5 +1,7 @@
 import type { ArtifactCheckpoint, ArtifactStore } from "./artifacts.ts";
-import type { AgentDefinition, RouteKind, RouteRisk, RunStepState, ToolBudgetProfile } from "./schemas.ts";
+import type { AgentDefinition, BudgetCapHit, BudgetCapName, RouteKind, RouteRisk, RunStepState, ToolBudgetProfile } from "./schemas.ts";
+
+export type { BudgetCapHit } from "./schemas.ts";
 
 export type BudgetTaskKind = "recon" | "review" | "implementation" | "migration" | "long-autonomous" | "research" | "planning" | "synthesis";
 export type BudgetHealthStatus = "ok" | "warn" | "budget-capped";
@@ -57,12 +59,6 @@ export interface BudgetUsage {
   retriesByTool: Record<string, number>;
 }
 
-export interface BudgetCapHit {
-  name: "max_tool_calls" | "max_seconds" | "max_usd" | "max_turns" | "max_output_chars" | "max_read_bytes" | "max_files_touched" | "max_retries_per_tool";
-  used: number;
-  limit: number;
-}
-
 export interface BudgetHealth {
   status: BudgetHealthStatus;
   caps: BudgetCapHit[];
@@ -95,7 +91,7 @@ export function policyForStep(
   risk: RouteRisk = "low",
 ): BudgetPolicy {
   const profile = step.budget ?? inferredBudgetProfile(agent, step, routeKind);
-  const taskKind = taskKindForAgent(agent, step.task);
+  const taskKind = taskKindForStep(agent, { ...step, budget: profile }, routeKind);
   const caps = scaleCaps(baseCapsForTask(taskKind, agent?.name ?? step.agent), profile, risk);
   return {
     id: `${taskKind}:${profile}:${risk}`,
@@ -109,9 +105,9 @@ export function policyForStep(
 }
 
 export function estimateBudgetPreflight(input: BudgetPreflightInput): BudgetPreflight {
-  const taskKind = inferTaskKind(input.task, input.steps);
-  const risk = input.risk ?? inferRisk(input.task, input.steps);
-  const budgetProfile = inferPreflightProfile(input.task, taskKind, input.steps, input.routeKind);
+  const budgetProfile = inferPreflightProfile(input.steps, input.routeKind, input.needsArtifacts);
+  const taskKind = inferTaskKind(input.steps, budgetProfile, input.needsArtifacts);
+  const risk = input.risk ?? inferRisk(input.steps);
   const representativeStep = input.steps?.[0] ?? { agent: "delegate", task: input.task, budget: budgetProfile };
   const policy = policyForStep(undefined, { ...representativeStep, budget: budgetProfile }, input.routeKind, risk);
   const expectedStages = input.routeKind === "multi-agent-dag"
@@ -149,7 +145,7 @@ export function evaluateBudgetUsage(policy: BudgetPolicy, usage: BudgetUsage): B
   compare(caps, "max_retries_per_tool", maxRetries, policy.caps.maxRetriesPerTool);
 
   if (caps.length === 0) return { status: "ok", caps, warnings: [], next: "continue" };
-  const hard = caps.some((cap) => ["max_seconds", "max_usd", "max_turns"].includes(cap.name));
+  const hard = caps.some((cap) => cap.severity === "hard");
   const status: BudgetHealthStatus = hard ? "budget-capped" : "warn";
   return {
     status,
@@ -193,9 +189,18 @@ export async function recordBudgetCheckpoint(store: ArtifactStore, featureId: st
   });
 }
 
-function compare(caps: BudgetCapHit[], name: BudgetCapHit["name"], used: number, limit: number): void {
-  if (Number.isFinite(limit) && used >= limit) caps.push({ name, used, limit });
+function compare(caps: BudgetCapHit[], name: BudgetCapName, used: number, limit: number): void {
+  if (!Number.isFinite(limit) || used < limit) return;
+  caps.push({
+    name,
+    used,
+    limit,
+    severity: hardBudgetCapNames.has(name) ? "hard" : "soft",
+    phase: "post-step",
+  });
 }
+
+const hardBudgetCapNames = new Set<BudgetCapName>(["max_seconds", "max_usd", "max_turns"]);
 
 function baseCapsForTask(taskKind: BudgetTaskKind, agentName: string): BudgetCaps {
   const baseToolCalls = baseToolCallsFor(taskKind, agentName);
@@ -246,49 +251,47 @@ function scaleCaps(caps: BudgetCaps, profile: ToolBudgetProfile, risk: RouteRisk
   };
 }
 
-function taskKindForAgent(agent: AgentDefinition | undefined, task: string): BudgetTaskKind {
+function taskKindForStep(agent: AgentDefinition | undefined, step: Pick<RunStepState, "agent" | "budget">, routeKind: RouteKind): BudgetTaskKind {
+  if (step.budget === "extended") return "long-autonomous";
   if (agent?.concern === "implementation") return "implementation";
-  if (/\b(long[- ]running|hours?|days?|checkpoint|resume|migration|migrate)\b/i.test(task)) {
-    return /\b(long[- ]running|hours?|days?|checkpoint|resume)\b/i.test(task) ? "long-autonomous" : "migration";
-  }
-  if (/\b(implement|fix|edit|modify|write)\b/i.test(task)) return "implementation";
-  if (agent?.concern === "review" || /\b(review|audit|validate)\b/i.test(task)) return "review";
+  if (step.agent === "worker") return "implementation";
   if (agent?.concern === "research") return "research";
   if (agent?.concern === "planning") return "planning";
-  if (agent?.concern === "context-building" && /\b(synthesize|summarize|final)\b/i.test(task)) return "synthesis";
+  if (agent?.concern === "review") return "review";
+  if (step.agent === "researcher") return "research";
+  if (step.agent === "planner") return "planning";
+  if (step.agent === "reviewer") return "review";
+  if (routeKind === "multi-agent-dag" && step.budget === "deep" && step.agent === "worker") return "migration";
   return "recon";
 }
 
-function inferTaskKind(task: string, steps: BudgetPreflightInput["steps"]): BudgetTaskKind {
-  const combined = [task, ...(steps ?? []).flatMap((step) => [step.agent, step.task])].join(" ");
-  if (/\b(long[- ]running|hours?|days?|checkpoint|resume|autonomous)\b/i.test(combined)) return "long-autonomous";
-  if (/\b(migrate|migration|codemod|vue3|rewrite across|all components)\b/i.test(combined)) return "migration";
-  if (/\b(implement|fix|edit|modify|worker)\b/i.test(combined)) return "implementation";
-  if (/\b(review|audit|security|validate)\b/i.test(combined)) return "review";
-  if (/\b(web|internet|docs?|source)\b/i.test(combined)) return "research";
-  if (/\b(plan|roadmap|design)\b/i.test(combined)) return "planning";
+function inferTaskKind(steps: BudgetPreflightInput["steps"], profile: ToolBudgetProfile, needsArtifacts?: boolean): BudgetTaskKind {
+  if (needsArtifacts && profile === "extended") return "long-autonomous";
+  if ((steps ?? []).some((step) => step.budget === "extended")) return "long-autonomous";
+  if ((steps ?? []).some((step) => step.agent === "worker" && step.budget === "deep")) return "migration";
+  if ((steps ?? []).some((step) => step.agent === "worker")) return "implementation";
+  if ((steps ?? []).some((step) => step.agent === "researcher")) return "research";
+  if ((steps ?? []).some((step) => step.agent === "planner")) return "planning";
+  if ((steps ?? []).some((step) => step.agent === "reviewer")) return "review";
   return "recon";
 }
 
-function inferRisk(task: string, steps: BudgetPreflightInput["steps"]): RouteRisk {
-  const combined = [task, ...(steps ?? []).map((step) => step.task)].join(" ");
-  if (/\b(delete|security|auth|payment|database|migration|production|write|modify|edit)\b/i.test(combined)) return "high";
+function inferRisk(steps: BudgetPreflightInput["steps"]): RouteRisk {
   if ((steps ?? []).some((step) => step.agent === "worker")) return "medium";
   return "low";
 }
 
-function inferPreflightProfile(task: string, taskKind: BudgetTaskKind, steps: BudgetPreflightInput["steps"], routeKind: RouteKind): ToolBudgetProfile {
+function inferPreflightProfile(steps: BudgetPreflightInput["steps"], routeKind: RouteKind, needsArtifacts?: boolean): ToolBudgetProfile {
   const explicit = steps?.map((step) => step.budget).filter(Boolean).at(-1);
   if (explicit) return explicit;
-  if (taskKind === "long-autonomous") return "extended";
-  if (taskKind === "migration" || routeKind === "multi-agent-dag") return "deep";
-  if (taskKind === "planning" || /\b(simple|quick|small)\b/i.test(task)) return "tight";
+  if (needsArtifacts) return "extended";
+  if (routeKind === "multi-agent-dag") return "deep";
+  if ((steps ?? []).length === 1 && steps?.[0]?.agent === "planner") return "tight";
   return "normal";
 }
 
 function inferredBudgetProfile(agent: AgentDefinition | undefined, step: Pick<RunStepState, "agent" | "task" | "budget">, routeKind: RouteKind): ToolBudgetProfile {
   if (step.budget) return step.budget;
-  if (/\b(long[- ]running|hours?|days?|checkpoint|resume|autonomous)\b/i.test(step.task)) return "extended";
   if (routeKind === "multi-agent-dag" && ["recon", "context-building", "review", "research"].includes(agent?.concern ?? "")) return "deep";
   if (agent?.concern === "planning") return "tight";
   return "normal";
@@ -305,7 +308,7 @@ function recommendationFor(taskKind: BudgetTaskKind, profile: ToolBudgetProfile,
   if (taskKind === "long-autonomous") return "Use staged DAG execution with checkpoint → validate → memory → next-stage continuation.";
   if (artifacts || profile === "extended") return "Write checkpoint artifacts at every handoff and split work before budget caps are hit.";
   if (taskKind === "migration") return "Prefer DAG fan-out by module with reviewer synthesis and validation contracts.";
-  return "Use the smallest bounded agent workflow and stop after high-signal evidence.";
+  return "Use the smallest bounded agent workflow and stop after enough exact evidence to state remaining uncertainty.";
 }
 
 function memoryQualityScore(candidate: { content: string; category?: string; confidence?: number }): number {
