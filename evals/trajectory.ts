@@ -49,16 +49,13 @@ export function analyzeTrajectory(run: RunState): TrajectoryReport {
   const allMetrics = steps.map((step) => step.metrics).filter((metrics): metrics is RunStepMetrics => Boolean(metrics));
   const policyViolations = allMetrics.flatMap((metrics) => metrics.policyViolations ?? []);
   if (policyViolations.length > 0) {
-    findings.toolMisuse = finding("tool_misuse", false, "critical", "A child attempted a tool or command blocked by policy.", policyViolations.slice(0, 6));
+    findings.toolMisuse = finding("tool_misuse", false, "critical", "A child attempted a tool action blocked by policy.", policyViolations.slice(0, 6));
   }
 
   const mutated = allMetrics.some((metrics) => (metrics.toolCallsByName.edit ?? 0) > 0 || (metrics.toolCallsByName.write ?? 0) > 0);
-  const verified = allMetrics.some((metrics) => {
-    const bashWasBlocked = (metrics.policyViolations ?? []).some((violation) => violation.startsWith("bash_policy"));
-    return Boolean(metrics.utility?.verificationDone) || ((metrics.toolCallsByName.bash ?? 0) > 0 && !bashWasBlocked);
-  });
+  const verified = allMetrics.some((metrics) => Boolean(metrics.utility?.verificationDone) || (metrics.successfulPostMutationShellCommands ?? metrics.postMutationShellCommands ?? 0) > 0);
   if (mutated && !verified) {
-    findings.verificationSkipped = finding("verification_skipped", false, "warning", "A mutation trajectory completed without validation evidence.", ["edit/write happened but no bash/verification utility was recorded"]);
+    findings.verificationSkipped = finding("verification_skipped", false, "warning", "A mutation trajectory completed without validation evidence.", ["edit/write happened but no successful post-mutation shell command or verification utility was recorded"]);
   }
 
   const weakComplete = steps.filter((step) => step.status === "complete" && !hasEvidence(step.output?.text) && !hasEvidence(step.output?.handoff));
@@ -88,7 +85,9 @@ export function analyzeTrajectory(run: RunState): TrajectoryReport {
     const resumableCap = step.status === "budget-capped" && hasEvidence(step.output?.handoff) && (metrics.utility?.findingsPerTool ?? 0) >= 0.08;
     if (resumableCap) return false;
     const utility = metrics.utility;
-    return (metrics.budgetStopCount ?? 0) > 0 || (utility && utility.findingsPerTool < 0.08 && metrics.toolCalls >= 10);
+    const hardBudgetStops = (metrics.budgetCapHits ?? []).some((hit) => hit.severity === "hard") || (metrics.budgetStopCount ?? 0) > 0;
+    const softBudgetLowSignal = (metrics.budgetCapHits ?? []).some((hit) => hit.severity === "soft") && utility !== undefined && utility.findingsPerTool < 0.08 && metrics.toolCalls >= 10;
+    return hardBudgetStops || softBudgetLowSignal || (utility && utility.findingsPerTool < 0.08 && metrics.toolCalls >= 10);
   });
   if (wasteEvidence.length > 0) {
     findings.budgetWaste = finding("budget_waste", false, "warning", "Budget was consumed with low signal or hit a cap without a useful checkpoint.", wasteEvidence.map((step) => describeMetric(step.metrics!)).slice(0, 4));

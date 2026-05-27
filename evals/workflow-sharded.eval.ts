@@ -141,7 +141,7 @@ function runShardAttempt(shard: WorkflowMatrixShard, options: ShardRunOptions, a
     workflowEvalPath,
     "--mode=sdk",
     `--case=${shard.caseIds.join(",")}`,
-    `--variant=${options.variants.join("+") === "simple+chalin" ? "both" : options.variants.join(",")}`,
+    `--variant=${variantArgForShard(options.variants)}`,
     `--runs=${options.runs}`,
     `--timeoutMs=${options.timeoutMs}`,
     `--matrixPath=${matrixPath}`,
@@ -152,6 +152,11 @@ function runShardAttempt(shard: WorkflowMatrixShard, options: ShardRunOptions, a
     `--thinking=${options.extraArgs.thinking ?? process.env.PI_CHALIN_WORKFLOW_THINKING ?? "low"}`,
   ];
   if (options.extraArgs.judge) childArgs.push(`--judge=${options.extraArgs.judge}`);
+  const comparativeJudge = options.extraArgs.comparativeJudge ?? options.extraArgs.comparisonJudge;
+  if (comparativeJudge) childArgs.push(`--comparativeJudge=${comparativeJudge}`);
+  if (options.extraArgs.judgeModel) childArgs.push(`--judgeModel=${options.extraArgs.judgeModel}`);
+  if (options.extraArgs.judgeTimeoutMs) childArgs.push(`--judgeTimeoutMs=${options.extraArgs.judgeTimeoutMs}`);
+  if (options.extraArgs.gentleRoot) childArgs.push(`--gentleRoot=${options.extraArgs.gentleRoot}`);
   console.log(`shard ${shard.index}/${shard.total} attempt ${attempt}: ${shard.caseIds.join(",")}`);
   const child = spawn(process.execPath, childArgs, {
     cwd: repoRoot,
@@ -165,6 +170,14 @@ function runShardAttempt(shard: WorkflowMatrixShard, options: ShardRunOptions, a
   return new Promise((resolve) => {
     child.on("close", (status, signal) => resolve({ shardIndex: shard.index, caseIds: shard.caseIds, attempts: attempt, status, signal, durationMs: Date.now() - started, matrixPath }));
   });
+}
+
+function variantArgForShard(variants: string[]): string {
+  const key = variants.join("+");
+  if (key === "simple+chalin") return "both";
+  if (key === "simple+chalin+gentle") return "all-harnesses";
+  if (key === "chalin+gentle") return "harnesses";
+  return variants.join(",");
 }
 
 function prefixWrite(prefix: string, chunk: string, stderr: boolean): void {

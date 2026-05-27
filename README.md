@@ -247,9 +247,11 @@ bun run eval
 bun run eval:memory
 bun run eval:trace
 bun run eval:workflow
+bun run eval:workflow:harness
+bun run eval:workflow:complex
 ```
 
-Use the broader evaluator path when changing routing policy, runner behavior, child-tool budgets, memory semantics, or workflow scoring.
+Use the broader evaluator path when changing routing policy, runner behavior, child-tool budgets, memory semantics, or workflow scoring. `eval:workflow:harness` compares simple, Chalin, and Gentle harnesses on the standard suite; `eval:workflow:complex` runs the expanded real-OSS-inspired suite across Zig/Rust, Rust, C, and C++ planning/implementation cases.
 
 ## Design Principles
 

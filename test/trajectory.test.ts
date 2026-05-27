@@ -35,7 +35,7 @@ function run(overrides: Partial<RunState> = {}): RunState {
         task: "edit",
         status: "complete",
         output: { agent: "worker", text: "Changed one line.", handoff: "Changed one line.", raw: "Changed one line.", warnings: [], memoryCandidates: [] },
-        metrics: { durationMs: 10, usage: emptyUsage(), toolCalls: 3, toolCallsByName: { read: 1, edit: 1, bash: 1 }, filesRead: ["src/index.ts"] },
+        metrics: { durationMs: 10, usage: emptyUsage(), toolCalls: 3, toolCallsByName: { read: 1, edit: 1, bash: 1 }, filesRead: ["src/index.ts"], postMutationShellCommands: 1, successfulPostMutationShellCommands: 1 },
       },
       {
         id: "step-3",
@@ -73,8 +73,8 @@ test("analyzeTrajectory detects tool misuse, skipped verification, loops, large 
           usage: emptyUsage(),
           toolCalls: 30,
           maxToolCalls: 24,
-          toolCallsByName: { bash: 3, read: 20, write: 1 },
-          policyViolations: ["bash_policy:python scan.py"],
+          toolCallsByName: { read: 20, write: 1, grep: 9 },
+          policyViolations: ["write_existing_file:a.ts"],
           filesRead: ["a.ts", "a.ts", "a.ts", "b.ts", "b.ts", "c.ts"],
           duplicateReadCount: 3,
           budgetStopCount: 2,
@@ -89,7 +89,7 @@ test("analyzeTrajectory detects tool misuse, skipped verification, loops, large 
         },
       },
     ],
-    metrics: { durationMs: 20, usage: emptyUsage(), toolCalls: 30, toolCallsByName: { bash: 3, read: 20, write: 1 }, policyViolations: ["bash_policy:python scan.py"], budgetStopCount: 2, duplicateReadCount: 3 },
+    metrics: { durationMs: 20, usage: emptyUsage(), toolCalls: 30, toolCallsByName: { read: 20, write: 1, grep: 9 }, policyViolations: ["write_existing_file:a.ts"], budgetStopCount: 2, duplicateReadCount: 3 },
   });
 
   const report = analyzeTrajectory(bad);

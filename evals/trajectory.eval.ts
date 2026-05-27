@@ -25,7 +25,7 @@ const cases = [
     run: healthyRun(),
   },
   {
-    id: "blocked-script-no-verification-budget-waste",
+    id: "blocked-write-no-verification-budget-waste",
     expectedPass: false,
     run: badRun(),
   },
@@ -78,11 +78,11 @@ function healthyRun(): RunState {
 
 function badRun(): RunState {
   return baseRun("complete", [
-    step("worker", "complete", { bash: 2, read: 18, write: 1 }, {
+    step("worker", "complete", { read: 18, write: 1, grep: 2 }, {
       text: "Done.",
       filesRead: ["a.ts", "a.ts", "a.ts", "b.ts", "b.ts", "c.ts"],
       filesTouched: ["a.ts"],
-      policyViolations: ["bash_policy:python scan.py", "write_existing_file:a.ts"],
+      policyViolations: ["write_existing_file:a.ts"],
       duplicateReadCount: 3,
       budgetStopCount: 2,
       findingsPerTool: 0,

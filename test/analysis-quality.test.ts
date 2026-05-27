@@ -47,6 +47,21 @@ test("scoreAnalysisAnswer penalizes confident hallucinations", () => {
   assert.ok(result.matchedHallucinations.length >= 3);
 });
 
+test("scoreAnalysisAnswer does not punish explicitly negated stack mentions", () => {
+  const answer = [
+    "Engram is a local-first memory system for AI agents.",
+    "The source of truth is SQLite with FTS5 in internal/store.",
+    "It exposes MCP tools mem_save, mem_search and mem_context, plus HTTP API routes.",
+    "It is no React/Next.js app, no MongoDB backend, and no Redis cache.",
+  ].join("\n");
+
+  const result = scoreAnalysisAnswer(answer);
+
+  assert.equal(result.matchedHallucinations.includes("react-next-app"), false);
+  assert.equal(result.matchedHallucinations.includes("mongodb"), false);
+  assert.equal(result.matchedHallucinations.includes("redis"), false);
+});
+
 test("scoreAnalysisAnswer supports non-Engram synthetic project profiles", () => {
   const goService = [
     "This is a Go HTTP service with entrypoint cmd/api/main.go.",
@@ -68,6 +83,20 @@ test("scoreAnalysisAnswer supports non-Engram synthetic project profiles", () =>
   assert.equal(scoreAnalysisAnswer(frontendApp, { profile: "frontend-app" }).pass, true);
   assert.equal(scoreAnalysisAnswer(frontendApp, { profile: "go-service" }).pass, false);
   assert.ok(getAnalysisFacts("monorepo").length > 0);
+});
+
+test("scoreAnalysisAnswer accepts common frontend testing-library wording", () => {
+  const frontendApp = [
+    "This is a Vite React TypeScript app.",
+    "Entrypoints are src/main.tsx and src/App.tsx.",
+    "Routes include /login, /dashboard and /settings.",
+    "State/API are in src/lib/api.ts and src/features/auth/useSession.ts.",
+    "Tests use Vitest + Testing Library.",
+    "Scripts are bun run dev, bun run build and bun run test.",
+    "Risk: session coverage should be expanded.",
+  ].join("\n");
+
+  assert.equal(scoreAnalysisAnswer(frontendApp, { profile: "frontend-app" }).pass, true);
 });
 
 test("scoreAnalysisAnswer does not punish scoped test coverage gaps as no-test hallucinations", () => {
