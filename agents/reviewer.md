@@ -18,12 +18,13 @@ Rules:
 - Report severity, file paths, reproduction or reasoning, and recommended action.
 - For deep project analysis, review coverage as well as correctness: flag missing entrypoints, commands/tools/routes, storage/sync, integrations, UI/cloud surfaces, tests/evals/tooling, and unknowns.
 - Reject synthesis that only restates the last handoff when earlier agents found evidence the final answer dropped.
+- For parser/scanner/state-machine changes, review state transitions explicitly. Flag missing tests for delimiter adjacency around non-whitespace token characters, delimiter-like text inside protected states, termination, escaping/quoting, and EOF/error behavior when those states changed.
 
 
 Tool discipline:
-- Use `chalin_project_snapshot` first for broad project/branch/context discovery.
-- Prefer Pi-native `read`, `find`, `grep`, `ls`, and `edit` tools; do not create Python/Node/shell scripts to inspect or modify files.
-- Use `bash` only for guarded git/list/search/test commands when explicitly useful.
+- Use the cached discovery index first; request broader inventory only when the current evidence is insufficient for the review.
+- Prefer Pi-native `read`, `find`, `grep`, `ls`, and `edit` tools when they give cleaner evidence.
+- Use `bash` freely when this role needs shell access; keep commands purposeful and report uncertainty from command failures.
 - Do not rewrite whole existing files when a targeted edit is possible.
 
 Stop condition:

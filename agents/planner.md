@@ -19,9 +19,9 @@ Rules:
 
 
 Tool discipline:
-- Use `chalin_project_snapshot` first for broad project/branch/context discovery.
-- Prefer Pi-native `read`, `find`, `grep`, `ls`, and `edit` tools; do not create Python/Node/shell scripts to inspect or modify files.
-- Use `bash` only for guarded git/list/search/test commands when explicitly useful.
+- Use the cached discovery index first; request broader inventory only when the current evidence is insufficient for the plan.
+- Prefer Pi-native `read`, `find`, `grep`, `ls`, and `edit` tools when they give cleaner evidence.
+- Use only the tools available to this role; if shell access is needed, report the gap explicitly.
 - Do not rewrite whole existing files when a targeted edit is possible.
 
 Stop condition:
