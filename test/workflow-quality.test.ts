@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { setDefaultTimeout, test } from "bun:test";
 import { WORKFLOW_ORACLE_DIR, createWorkflowFixture, getWorkflowEvalCase, listWorkflowCommunityCases, listWorkflowComplexCases, listWorkflowEvalCases, listWorkflowHoldoutCases, selectWorkflowPrompt } from "../evals/workflow-cases.ts";
 import { buildWorkflowShardChildArgs, resolveWorkflowShardArgs } from "../evals/workflow-sharded.eval.ts";
-import { appendWorkflowTail, assertSdkRunBudget, auditWorkflowProductionFastPaths, auditWorkflowTraceForCheating, buildWorkflowComparativeJudgeInfrastructureSkip, buildWorkflowComparativeJudgePrompt, buildWorkflowContentOnlyComparativeJudgePrompt, buildWorkflowJudgePrompt, collectWorkflowEvidence, detectWorkflowInfrastructureFailure, detectWorkflowVerification, effectiveWorkflowFinalText, enforceWorkflowImplementationComparativeWinner, evaluateWorkflowRegressionGates, extractFinalText, extractTokenTotal, extractWorkflowUsage, observeTerminalAssistantAnswer, parseJsonObjectFromText, resolveCaseIds, resolveComparativeJudgeMode, resolveGentleCompanionRoot, resolveGentlePiRoot, resolveVariants, resolveWorkflowArgs, resolveWorkflowIdleTimeoutMs, resolveWorkflowInfraRetries, resolveWorkflowOutputStoragePolicy, resolveWorkflowRunCount, resolveWorkflowThinking, resolveWorkflowTimeoutMs, shouldRequireChalinRoute, shouldRequireGentleSubagent, shouldRetainWorkflowFixture, shouldRetryWorkflowRun, shouldRunWorkflowJudge, shouldStoreFullWorkflowOutput, summarizeComparison, summarizeWorkflowBlindJudgeStability, summarizeWorkflowFailures, toolsForWorkflowVariant, workflowAgentHistory, workflowDiagnostics, workflowFixtureFingerprint, workflowPromptVariantIndexForRun, workflowRegressionGatesEnabled, workflowReportFilename, workflowToolHistory, writeWorkflowReport, DEFAULT_WORKFLOW_IDLE_TIMEOUT_MS, MAX_WORKFLOW_RUNS, MAX_WORKFLOW_TIMEOUT_MS } from "../evals/workflow-quality.eval.ts";
+import { appendWorkflowTail, assertSdkRunBudget, auditWorkflowProductionFastPaths, auditWorkflowTraceForCheating, buildWorkflowComparativeJudgeInfrastructureSkip, buildWorkflowComparativeJudgePrompt, buildWorkflowContentOnlyComparativeJudgePrompt, buildWorkflowJudgePrompt, collectWorkflowEvidence, detectWorkflowInfrastructureFailure, detectWorkflowVerification, effectiveWorkflowFinalText, enforceWorkflowImplementationComparativeWinner, evaluateWorkflowRegressionGates, extractFinalText, extractTokenTotal, extractWorkflowUsage, observeTerminalAssistantAnswer, parseJsonObjectFromText, resolveCaseIds, resolveComparativeJudgeMode, resolveGentleCompanionRoot, resolveGentlePiRoot, resolveVariants, resolveWorkflowArgs, resolveWorkflowIdleTimeoutMs, resolveWorkflowInfraRetries, resolveWorkflowOutputStoragePolicy, resolveWorkflowRunCount, resolveWorkflowThinking, resolveWorkflowTimeoutMs, shouldRequireChalinRoute, shouldRequireGentleSubagent, shouldRetainWorkflowFixture, shouldRetryWorkflowRun, shouldRunWorkflowJudge, shouldStoreFullWorkflowOutput, summarizeComparison, summarizeWorkflowBlindJudgeStability, summarizeWorkflowFailures, toolsForWorkflowVariant, workflowAgentHistory, workflowChalinRouteAgentMetrics, workflowDiagnostics, workflowFixtureFingerprint, workflowPromptVariantIndexForRun, workflowRegressionGatesEnabled, workflowReportFilename, workflowToolHistory, writeWorkflowReport, DEFAULT_WORKFLOW_IDLE_TIMEOUT_MS, MAX_WORKFLOW_RUNS, MAX_WORKFLOW_TIMEOUT_MS } from "../evals/workflow-quality.eval.ts";
 import { scoreWorkflowWorkspace } from "../evals/workflow-quality-lib.ts";
 
 setDefaultTimeout(60_000);
@@ -1421,18 +1421,27 @@ test("workflow regression gates require routed tools for route-required harness 
       objectiveStopReason: undefined,
       duplicateToolCalls: 0,
       chalinRouteCalls: 0,
+      chalinRouteAgentSteps: 0,
       subagentCalls: 0,
       verificationPassed: true,
     },
     judge: undefined,
   };
   const chalinMissingRoute = baseOutput as never;
+  const chalinMissingRouteSteps = {
+    ...baseOutput,
+    diagnostics: {
+      ...baseOutput.diagnostics,
+      chalinRouteCalls: 1,
+      chalinRouteAgentSteps: 0,
+    },
+  } as never;
   const gentleMissingSubagent = {
     ...baseOutput,
     variant: "gentle",
   } as never;
 
-  const gates = evaluateWorkflowRegressionGates([chalinMissingRoute, gentleMissingSubagent], [{
+  const gates = evaluateWorkflowRegressionGates([chalinMissingRoute, chalinMissingRouteSteps, gentleMissingSubagent], [{
     caseId: "complex-bun-zig-runtime-plan",
     pass: true,
     reason: "ok",
@@ -1441,6 +1450,7 @@ test("workflow regression gates require routed tools for route-required harness 
 
   assert.equal(gates.pass, false);
   assert.ok(gates.failures.some((item) => /route-required case did not call chalin_route/.test(item)));
+  assert.ok(gates.failures.some((item) => /route-required case called chalin_route but did not execute Chalin subagent steps/.test(item)));
   assert.ok(gates.failures.some((item) => /route-required case did not call Gentle subagent/.test(item)));
 });
 
@@ -3237,6 +3247,9 @@ test("workflow gates report late provider errors as infra warnings when output i
       verificationPassed: false,
       duplicateToolCalls: 0,
       chalinRouteCalls: 1,
+      chalinRouteAgentRuns: 1,
+      chalinRouteAgentSteps: 3,
+      chalinRouteAgents: ["scout", "planner", "worker"],
       subagentCalls: 0,
       chalinRouteValidationErrors: 0,
       antiCheat: { pass: true, critical: [], warnings: [], accessed: [] },
@@ -3544,11 +3557,23 @@ test("workflow eval uses executable chalin_route material as effective final ans
 });
 
 test("workflow diagnostics count tool execution updates as progress, not duplicate calls", () => {
+  const chalinRouteDetails = {
+    route: { kind: "multi-agent-chain", agents: ["scout", "planner", "worker"] },
+    run: {
+      id: "chalin-test-run",
+      status: "complete",
+      steps: [
+        { agent: "scout", status: "complete", output: { text: "evidence" } },
+        { agent: "planner", status: "complete", output: { text: "plan" } },
+        { agent: "worker", status: "complete", output: { text: "artifact" } },
+      ],
+    },
+  };
   const stdout = [
     JSON.stringify({ type: "tool_execution_start", toolName: "chalin_route", args: { topology: "chain", task: "docs" } }),
     JSON.stringify({ type: "tool_execution_update", toolName: "chalin_route", args: { topology: "chain", task: "docs" } }),
     JSON.stringify({ type: "tool_execution_update", toolName: "chalin_route", args: { topology: "chain", task: "docs" } }),
-    JSON.stringify({ type: "tool_execution_end", toolName: "chalin_route", isError: false, result: { content: [{ type: "text", text: "Final answer material: done" }] } }),
+    JSON.stringify({ type: "tool_execution_end", toolName: "chalin_route", isError: false, result: { content: [{ type: "text", text: "Final answer material: done" }], details: chalinRouteDetails } }),
     JSON.stringify({ type: "tool_execution_start", toolName: "subagent", args: { description: "analyze docs" } }),
     JSON.stringify({ type: "tool_execution_end", toolName: "subagent", isError: false, result: { content: [{ type: "text", text: "done" }] } }),
   ].join("\n");
@@ -3556,7 +3581,38 @@ test("workflow diagnostics count tool execution updates as progress, not duplica
   const diagnostics = workflowDiagnostics(getWorkflowEvalCase("complex-bun-zig-rust-lockfile-triage"), stdout, "", undefined, undefined, undefined, false);
   assert.equal(diagnostics.chalinRouteCalls, 1);
   assert.equal(diagnostics.subagentCalls, 1);
+  assert.equal(diagnostics.chalinRouteAgentRuns, 1);
+  assert.equal(diagnostics.chalinRouteAgentSteps, 3);
+  assert.deepEqual(diagnostics.chalinRouteAgents, ["scout", "planner", "worker"]);
   assert.equal(diagnostics.duplicateToolCalls, 0);
+});
+
+test("workflow chalin route agent metrics deduplicate progress and completion events", () => {
+  const route = { kind: "multi-agent-chain", agents: ["scout", "planner", "worker"] };
+  const partialRun = {
+    id: "chalin-dedup-run",
+    status: "running",
+    steps: [{ agent: "scout", status: "complete", output: { text: "evidence" } }],
+  };
+  const completeRun = {
+    id: "chalin-dedup-run",
+    status: "complete",
+    steps: [
+      { agent: "scout", status: "complete", output: { text: "evidence" } },
+      { agent: "planner", status: "complete", output: { text: "plan" } },
+      { agent: "worker", status: "complete", output: { text: "artifact" } },
+    ],
+  };
+  const stdout = [
+    JSON.stringify({ type: "tool_execution_update", toolName: "chalin_route", result: { details: { route, run: partialRun } } }),
+    JSON.stringify({ type: "tool_execution_end", toolName: "chalin_route", result: { details: { route, run: completeRun } } }),
+  ].join("\n");
+
+  assert.deepEqual(workflowChalinRouteAgentMetrics(stdout), {
+    runs: 1,
+    steps: 3,
+    agents: ["scout", "planner", "worker"],
+  });
 });
 
 test("workflow diagnostics summarize post-verification exploration waste", () => {

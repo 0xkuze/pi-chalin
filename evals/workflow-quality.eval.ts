@@ -40,6 +40,9 @@ interface WorkflowEfficiencyDiagnostics {
   toolEvents: number;
   toolCallsByName: Record<string, number>;
   chalinRouteCalls: number;
+  chalinRouteAgentRuns: number;
+  chalinRouteAgentSteps: number;
+  chalinRouteAgents: string[];
   subagentCalls: number;
   chalinRouteNonExecutable: number;
   chalinRouteValidationErrors: number;
@@ -227,6 +230,8 @@ interface VariantStats {
   avgInfraRetries: number;
   avgAntiCheatCriticals: number;
   avgChalinRouteCalls: number;
+  avgChalinRouteAgentRuns: number;
+  avgChalinRouteAgentSteps: number;
   avgSubagentCalls: number;
   avgChalinRouteNonExecutable: number;
   avgChalinRouteValidationErrors: number;
@@ -899,6 +904,9 @@ export function evaluateWorkflowRegressionGates(outputs: WorkflowRunOutput[], gr
     if (output.variant === "chalin" && shouldRequireChalinRoute(evalCase) && (output.diagnostics.chalinRouteCalls ?? 0) < 1) {
       failures.push(`${label}: route-required case did not call chalin_route`);
     }
+    if (output.variant === "chalin" && shouldRequireChalinRoute(evalCase) && (output.diagnostics.chalinRouteCalls ?? 0) > 0 && (output.diagnostics.chalinRouteAgentSteps ?? 0) < 1) {
+      failures.push(`${label}: route-required case called chalin_route but did not execute Chalin subagent steps`);
+    }
     if (output.variant === "gentle" && shouldRequireGentleSubagent(evalCase) && (output.diagnostics.subagentCalls ?? 0) < 1) {
       failures.push(`${label}: route-required case did not call Gentle subagent`);
     }
@@ -1390,6 +1398,8 @@ function summarizeVariant(items: WorkflowRunOutput[]): VariantStats | undefined 
     avgInfraRetries: avg(items.map((item) => item.diagnostics.infraRetries)),
     avgAntiCheatCriticals: avg(items.map((item) => item.diagnostics.antiCheat?.critical.length ?? 0)),
     avgChalinRouteCalls: avg(items.map((item) => item.diagnostics.chalinRouteCalls)),
+    avgChalinRouteAgentRuns: avg(items.map((item) => item.diagnostics.chalinRouteAgentRuns ?? 0)),
+    avgChalinRouteAgentSteps: avg(items.map((item) => item.diagnostics.chalinRouteAgentSteps ?? 0)),
     avgSubagentCalls: avg(items.map((item) => item.diagnostics.subagentCalls ?? 0)),
     avgChalinRouteNonExecutable: avg(items.map((item) => item.diagnostics.chalinRouteNonExecutable)),
     avgChalinRouteValidationErrors: avg(items.map((item) => item.diagnostics.chalinRouteValidationErrors)),
@@ -2087,11 +2097,15 @@ export function workflowDiagnostics(evalCase: WorkflowEvalCase, stdout: string, 
   const usage = extractWorkflowUsage(stdout);
   const toolValidationErrors = parsed.toolEvents.filter((item) => item.phase === "end" && item.isError && item.resultText.includes("Validation failed for tool")).length;
   const chalinRouteValidationErrors = parsed.toolEvents.filter((item) => item.name === "chalin_route" && item.phase === "end" && item.isError && item.resultText.includes("Validation failed for tool")).length;
+  const chalinRouteAgentMetrics = workflowChalinRouteAgentMetrics(stdout);
   return {
     jsonEvents: parsed.jsonEvents,
     toolEvents: parsed.toolEvents.length,
     toolCallsByName,
     chalinRouteCalls: toolCallsByName.chalin_route ?? 0,
+    chalinRouteAgentRuns: chalinRouteAgentMetrics.runs,
+    chalinRouteAgentSteps: chalinRouteAgentMetrics.steps,
+    chalinRouteAgents: chalinRouteAgentMetrics.agents,
     subagentCalls: toolCallsByName.subagent ?? 0,
     chalinRouteNonExecutable: parsed.toolEvents.filter((item) => item.name === "chalin_route" && item.phase === "end" && /approval is required|status:\s*(ask|block)|Approval:\s*(ask|block)/i.test(item.resultText)).length,
     chalinRouteValidationErrors,
@@ -2387,6 +2401,8 @@ function syntheticPassingSummary(evalCase: WorkflowEvalCase): string {
 
 function compactOutput(item: WorkflowRunOutput, policy: WorkflowOutputStoragePolicy): object {
   const includeFullOutput = shouldStoreFullWorkflowOutputWithPolicy(item, policy);
+  const evalCase = getWorkflowEvalCase(item.workspace.caseId);
+  const includeRoutedHistory = shouldRequireChalinRoute(evalCase) || shouldRequireGentleSubagent(evalCase);
   return {
     variant: item.variant,
     runIndex: item.runIndex,
@@ -2406,7 +2422,8 @@ function compactOutput(item: WorkflowRunOutput, policy: WorkflowOutputStoragePol
     judge: item.judge,
     finalTextSnippet: snippet(item.finalText, 1200),
     stderrSnippet: snippet(item.stderr, 800),
-    ...(includeFullOutput ? { stdout: item.stdout, stderr: item.stderr, finalText: item.finalText, toolHistory: workflowToolHistory(item.stdout), agentHistory: workflowAgentHistory(item.stdout) } : {}),
+    ...(includeRoutedHistory || includeFullOutput ? { toolHistory: workflowToolHistory(item.stdout), agentHistory: workflowAgentHistory(item.stdout) } : {}),
+    ...(includeFullOutput ? { stdout: item.stdout, stderr: item.stderr, finalText: item.finalText } : {}),
   };
 }
 
@@ -2468,6 +2485,39 @@ export function workflowAgentHistory(stdout: string, options: { maxRuns?: number
     totalRuns,
     omittedRuns: Math.max(0, totalRuns - runs.length),
     runs,
+  };
+}
+
+export function workflowChalinRouteAgentMetrics(stdout: string): { runs: number; steps: number; agents: string[] } {
+  const history = workflowAgentHistory(stdout, { maxRuns: 500, maxSteps: 500, maxTextChars: 120 });
+  const byRun = new Map<string, WorkflowAgentRunHistory>();
+
+  for (const run of history.runs) {
+    const looksLikeChalinRoute = run.toolName === "chalin_route"
+      || (run.runId ? /^chalin-/.test(run.runId) : false)
+      || /\b(?:multi-agent|single-agent|memory-only)\b/i.test(run.routeKind ?? "");
+    if (!looksLikeChalinRoute) continue;
+    const key = run.runId ?? JSON.stringify({ routeKind: run.routeKind, agents: run.agents, steps: run.steps.map((step) => step.agent) });
+    const existing = byRun.get(key);
+    if (!existing || run.totalSteps > existing.totalSteps || (run.status === "complete" && existing.status !== "complete")) {
+      byRun.set(key, run);
+    }
+  }
+
+  const uniqueAgents = new Set<string>();
+  let steps = 0;
+  for (const run of byRun.values()) {
+    steps += run.totalSteps;
+    for (const agent of run.agents) uniqueAgents.add(agent);
+    for (const step of run.steps) {
+      if (step.agent) uniqueAgents.add(step.agent);
+    }
+  }
+
+  return {
+    runs: byRun.size,
+    steps,
+    agents: [...uniqueAgents],
   };
 }
 
@@ -3038,7 +3088,7 @@ export function resolveComparativeJudgeMode(value: string): WorkflowComparativeJ
 }
 
 function emptyDiagnostics(): WorkflowEfficiencyDiagnostics {
-  return { jsonEvents: 0, toolEvents: 0, toolCallsByName: {}, chalinRouteCalls: 0, subagentCalls: 0, chalinRouteNonExecutable: 0, chalinRouteValidationErrors: 0, toolValidationErrors: 0, duplicateToolCalls: 0, readCalls: 0, writeCalls: 0, editCalls: 0, retries: 0, agentRetries: 0, infraRetries: 0, usage: emptyUsage(), tokenTotal: 0, verificationPassed: false, verificationToolCalls: 0, traceSummary: { directEligible: true, postVerificationExplorationCalls: 0, postVerificationShellCalls: 0, postVerificationToolCallsByName: {}, toolCallSequence: [] }, finalAnswerMissing: false, antiCheat: { pass: true, critical: [], warnings: [], accessed: [] } };
+  return { jsonEvents: 0, toolEvents: 0, toolCallsByName: {}, chalinRouteCalls: 0, chalinRouteAgentRuns: 0, chalinRouteAgentSteps: 0, chalinRouteAgents: [], subagentCalls: 0, chalinRouteNonExecutable: 0, chalinRouteValidationErrors: 0, toolValidationErrors: 0, duplicateToolCalls: 0, readCalls: 0, writeCalls: 0, editCalls: 0, retries: 0, agentRetries: 0, infraRetries: 0, usage: emptyUsage(), tokenTotal: 0, verificationPassed: false, verificationToolCalls: 0, traceSummary: { directEligible: true, postVerificationExplorationCalls: 0, postVerificationShellCalls: 0, postVerificationToolCallsByName: {}, toolCallSequence: [] }, finalAnswerMissing: false, antiCheat: { pass: true, critical: [], warnings: [], accessed: [] } };
 }
 
 export function extractWorkflowUsage(stdout: string): WorkflowUsageTotals {

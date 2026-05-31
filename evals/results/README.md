@@ -34,4 +34,6 @@ bun run eval:workflow:routed
 
 That preset selects route-required cases only and uses a longer timeout for multi-agent work. Chalin must call `chalin_route`; Gentle must call its `subagent` tool from the companion bundle. Override the companion bundle with `--gentleCompanionRoot=/path/to/node_modules` or `PI_CHALIN_GENTLE_COMPANIONS_ROOT`.
 
+Route-required reports also keep bounded `toolHistory` and `agentHistory` even when full stdout storage is disabled. For Chalin, the routed gate requires internal `chalin_route` agent steps; a router call without executed subagent steps is not counted as real orchestration.
+
 Keep only compact release evidence JSONL/JSON files in this directory. Temporary shard folders (`.workflow-shards-*`) and ad-hoc exploratory JSONL files should be cleaned before commit.

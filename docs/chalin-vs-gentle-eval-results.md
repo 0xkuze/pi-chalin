@@ -31,9 +31,11 @@ Se agrego un preset route-required: `bun run eval:workflow:routed`.
 Que valida ahora:
 
 - Chalin debe llamar `chalin_route` en casos complejos de arquitectura/docs.
+- Chalin debe ejecutar pasos internos de agentes dentro de `chalin_route`; no basta con una llamada superficial al router.
 - Gentle debe llamar `subagent` cuando corre con el companion bundle.
 - El gate falla si cualquiera de los dos resuelve directo en esos casos.
 - El evaluador acepta `Final answer material` de `chalin_route` como respuesta efectiva, aunque el parent no escriba una segunda respuesta.
+- Los reportes route-required preservan `toolHistory` y `agentHistory` acotados para auditar la trayectoria sin guardar stdout completo por defecto.
 
 Smoke real en `complex-bun-zig-runtime-plan`:
 
@@ -42,8 +44,9 @@ Smoke real en `complex-bun-zig-runtime-plan`:
 | Primer routed smoke | Chalin `chalin_route=0`; Gentle `subagent=0`; ambos fallaron el gate. |
 | Despues del route-required scope/topologia docs | Chalin `chalin_route=1`, trace `100`, tokens `166,370`, duracion `267,137ms`; el artefacto pasa con scorer corregido (`score=84`) pero excede presupuesto de tiempo. |
 | Gentle en las corridas routed | Gentle siguio con `subagent=0`; no hay evidencia todavia de Gentle full usando `pi-subagents` en esta matriz. |
+| Routed smoke con metricas internas de agentes | Mismo fixture `abe818fb23c6`; Chalin paso (`workspace=84`, `quality=100`) con `chalin_route=1`, `agentRuns=1`, `agentSteps=3`, agentes `scout/planner/worker`, `208,776` tokens y `342,110ms`. Gentle fallo (`workspace=45`, `quality=55`) con `subagent=0`, `314,902` tokens y `144,243ms`. Reporte: `.pi-chalin/evals/workflow-quality-2026-05-31T14-54-05-084Z-sdk-complex-bun-zig-runtime-plan-chalin-gentle-r1-78009-2949c2e2.json`. |
 
-Conclusion honesta actualizada: Chalin ya entra por `chalin_route` en el caso routed probado y produce output correcto, pero el modo subagentes es bastante mas lento/caro que direct-mode en ese caso. Gentle full no activo `subagent` en los routed smoke runs observados, asi que todavia no hay una comparacion blind completa de Chalin-route vs Gentle-subagent. Lo correcto es reportar direct-mode como ganado y routed-mode como instrumentado/con Chalin funcionando en smoke, pero pendiente de una matriz completa con Gentle subagents efectivamente activos.
+Conclusion honesta actualizada: Chalin ya entra por `chalin_route`, ejecuta subagentes internos reales en el caso routed probado y produce output correcto con menos tokens que Gentle full. La deuda real no es calidad ni costo frente a Gentle en este smoke, sino latencia: Chalin excedio el budget del caso. Gentle full no activo `subagent` en los routed smoke runs observados aunque el companion bundle estaba cargado y el tool fue verificado por separado, asi que todavia no hay una comparacion blind completa de Chalin-route vs Gentle-subagent. Lo correcto es reportar direct-mode como ganado y routed-mode como instrumentado/con Chalin funcionando en smoke, pero pendiente de una matriz completa donde Gentle subagents efectivamente se activen.
 
 ## Resultado ejecutivo
 
