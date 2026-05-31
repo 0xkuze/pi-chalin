@@ -79,6 +79,23 @@ test("routeFromPlan builds staged DAG workflows chosen by the primary Pi agent",
   assert.deepEqual(dag.plan?.stages.map((stage) => stage.id), ["discover", "fanout", "review"]);
 });
 
+test("memory-only inventory route enumerates visible records instead of search-only recall", async () => {
+  const cwd = tempDir("pi-chalin-kernel-memory-inventory-");
+  const memory = new MemoryStore({ cwd });
+  await memory.submitCandidates([
+    createMemoryCandidate({ category: "pattern", content: "Alpha telemetry pipelines prefer bounded retries before alerts because transient provider boot can delay local readiness.", sourceAgent: "scout", confidence: 0.95, scope: "project" }),
+    createMemoryCandidate({ category: "tooling", content: "Bench harness adapters should keep task fixtures self contained so runner comparisons remain deterministic.", sourceAgent: "scout", confidence: 0.95, scope: "project" }),
+    createMemoryCandidate({ category: "testing", content: "Regression checks should use fake timers or explicit barriers instead of wall clock sleeps in async suites.", sourceAgent: "reviewer", confidence: 0.95, scope: "project" }),
+    createMemoryCandidate({ category: "workflow", content: "Long analyses should preserve compact handoffs after each phase so later resumptions avoid restarting exploration.", sourceAgent: "planner", confidence: 0.95, scope: "project" }),
+  ]);
+  const route = routeFromPlan({ topology: "memory-only", risk: "low", reason: "inventory" });
+  const result = await new ChalinKernel({ cwd, memory }).handleRoute(route, "what elements you have in memory how much of thems", { cwd });
+
+  assert.equal(result.approval.action, "allow");
+  assert.equal(result.route.kind, "memory-only");
+  assert.equal(result.memories.length, 4);
+});
+
 test("ChalinKernel executes an LLM-planned mock route", async () => {
   const cwd = tempDir("pi-chalin-kernel-");
   const route = routeFromPlan({ topology: "single", steps: [{ agent: "reviewer", task: "Review this diff for bugs." }] });

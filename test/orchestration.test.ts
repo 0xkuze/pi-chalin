@@ -78,7 +78,8 @@ test("orchestrator prompt teaches LLM-first routing without prompt keyword class
   assert.match(prompt, /executable metadata/i);
   assert.match(prompt, /no unrequested deps/i);
   assert.doesNotMatch(prompt, /bun test|dependency-free TypeScript|Bun CLI|tsx|vitest|jest/i);
-  assert.match(prompt, /Explicit recall/i);
+  assert.match(prompt, /explicit memory recall\/remembrance or memory inventory\/counts/i);
+  assert.match(prompt, /call `chalin_memory_search` first/i);
   assert.match(prompt, /Default recipes/i);
   assert.match(prompt, /single` scout/i);
   assert.match(prompt, /scout → parallel folder agents → reviewer/i);

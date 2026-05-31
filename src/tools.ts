@@ -15,7 +15,7 @@ import { openSafetyApproval } from "./ui.ts";
 import { clearLegacyChalinControlWidget, setChalinStatus } from "./ui-status.ts";
 import { chalinRouteUpdateDetails, colorizeChalinWidget, footerStateForRun, formatChalinRoutePlanWidget, formatChalinRunWidget, formatChalinRunWidgetFromDetails, isUsableStepStatus, plannedWidgetRun, routeIntent, type ChalinRouteWidgetDetails } from "./route-widget.ts";
 import { fetchWebUrls, formatWebBundle, searchWeb } from "./webfetch.ts";
-import type { RouteDecision, RunState } from "./schemas.ts";
+import type { MemoryRecord, RouteDecision, RunState } from "./schemas.ts";
 import { collapseReadOnlyScoutContextRoute, ensureMutationRouteHasWorker } from "./route-guards.ts";
 import { compactRouteDetails, finalAnswerMaterial, formatRoute, outcomeForResult } from "./route-format.ts";
 import { buildProjectDiscoveryIndex, formatProjectDiscoveryIndex } from "./discovery.ts";
@@ -115,8 +115,21 @@ const ChalinWebSearchParams = Type.Object({
 });
 
 const ChalinMemorySearchParams = Type.Object({
-  query: Type.String({ description: "Compact local memory search query." }),
-  limit: Type.Optional(Type.Number({ description: "Maximum memories to return. Default 6, max 10." })),
+  query: Type.Optional(Type.String({ description: "Compact local memory search query. Required for search mode; optional for list mode." })),
+  mode: Type.Optional(Type.Union([
+    Type.Literal("search", { description: "Semantic search over memory using query." }),
+    Type.Literal("list", { description: "Enumerate visible memory records for inventory/count requests." }),
+  ], { description: "Use list for questions like how many memory records exist or what memory elements are visible." })),
+  status: Type.Optional(Type.Union([
+    Type.Literal("all"),
+    Type.Literal("active"),
+    Type.Literal("pending"),
+    Type.Literal("quarantined"),
+    Type.Literal("stale"),
+    Type.Literal("superseded"),
+    Type.Literal("rejected"),
+  ], { description: "Optional status filter for list mode. Default all visible records." })),
+  limit: Type.Optional(Type.Number({ description: "Maximum memories to return. Default 6/max 10 for search; default 20/max 100 for list." })),
   tokenBudget: Type.Optional(Type.Number({ description: "Approximate token budget for returned context. Default 700, max 1600." })),
   includeEvidence: Type.Optional(Type.Boolean({ description: "Include evidence when checking contradictions or reviewing memory quality." })),
 });
@@ -165,7 +178,9 @@ type ChalinWebSearchToolParams = {
 };
 
 type ChalinMemorySearchToolParams = {
-  query: string;
+  query?: string;
+  mode?: "search" | "list";
+  status?: "all" | MemoryRecord["status"];
   limit?: number;
   tokenBudget?: number;
   includeEvidence?: boolean;
@@ -441,9 +456,11 @@ export function registerChalinTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "chalin_memory_search",
     label: "Chalin Memory Search",
-    description: "Search compact durable pi-chalin memory from the primary Pi agent, including direct-mode work. Use without waiting for an explicit memory request when prior decisions, project facts, workflows, or preferences can reduce rediscovery.",
-    promptSnippet: "chalin_memory_search: recall compact durable memory during direct or routed work when prior context may help.",
+    description: "Search or list compact durable pi-chalin memory from the primary Pi agent, including direct-mode work. Use without waiting for an explicit memory request when prior decisions, project facts, workflows, preferences, or memory inventory/counts matter.",
+    promptSnippet: "chalin_memory_search: recall or list compact durable memory during direct work when prior context or memory inventory may help.",
     promptGuidelines: [
+      "Use this as the first tool for explicit memory/recall questions instead of routing through chalin_route.",
+      "Use mode `list` for memory inventory/count questions such as what memory elements exist or how many records are visible.",
       "Use this proactively for repeated project conventions, prior decisions, user preferences, workflows, and suspected stale assumptions.",
       "Keep queries short and tokenBudget small. Current repository evidence and explicit user instructions override memory.",
       "Ask for evidence only when checking contradictions, reviewing memory, or deciding whether to revise a memory.",
@@ -451,8 +468,23 @@ export function registerChalinTools(pi: ExtensionAPI): void {
     parameters: ChalinMemorySearchParams,
     async execute(_toolCallId, params: ChalinMemorySearchToolParams, _signal, _onUpdate, ctx) {
       const memory = createConfiguredMemoryStore({ cwd: ctx.cwd });
+      const query = params.query?.trim() ?? "";
+      const mode = params.mode ?? (isMemoryInventoryQuery(query) ? "list" : "search");
+      if (mode === "list") {
+        const allRecords = await memory.list(params.status && params.status !== "all" ? params.status : undefined);
+        const limit = clampInteger(params.limit ?? 20, 1, 100);
+        const records = allRecords.slice(0, limit);
+        const text = formatMemoryInventory(records, {
+          total: allRecords.length,
+          omitted: Math.max(0, allRecords.length - records.length),
+          status: params.status ?? "all",
+          includeEvidence: Boolean(params.includeEvidence),
+        });
+        return textResult(text, { mode, records, total: allRecords.length, omitted: Math.max(0, allRecords.length - records.length) });
+      }
+      if (!query) return textResult("No memory query provided.", { mode, results: [] });
       const bundle = await memory.retrieve({
-        query: params.query,
+        query,
         sourceAgent: "primary-pi",
         limit: clampInteger(params.limit ?? 6, 1, 10),
         tokenBudget: clampInteger(params.tokenBudget ?? 700, 80, 1600),
@@ -569,6 +601,57 @@ function clampNumber(value: number, min: number, max: number): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return min;
   return Math.min(max, Math.max(min, parsed));
+}
+
+function isMemoryInventoryQuery(query: string): boolean {
+  const normalized = query.toLowerCase();
+  if (!normalized.trim()) return false;
+  return [
+    "how many",
+    "how much",
+    "memory count",
+    "count memory",
+    "list memory",
+    "memory elements",
+    "memory records",
+    "what elements",
+    "what do you have in memory",
+    "what is in memory",
+    "what's in memory",
+  ].some((phrase) => normalized.includes(phrase));
+}
+
+function formatMemoryInventory(
+  records: MemoryRecord[],
+  options: { total: number; omitted: number; status: string; includeEvidence: boolean },
+): string {
+  const header = `Memory inventory (${records.length}/${options.total} records${options.status !== "all" ? `, status=${options.status}` : ""}). Treat as guidance; current repo evidence wins.`;
+  if (options.total === 0) return `${header}\nNo visible memory records found.`;
+  return [
+    header,
+    ...records.map((record) => `- ${formatMemoryInventoryLine(record, options.includeEvidence)}`),
+    options.omitted > 0 ? `- ${options.omitted} more record${options.omitted === 1 ? "" : "s"} omitted by limit.` : undefined,
+  ].filter((line): line is string => Boolean(line)).join("\n");
+}
+
+function formatMemoryInventoryLine(record: MemoryRecord, includeEvidence: boolean): string {
+  const meta = [
+    record.id,
+    record.status,
+    record.category,
+    record.scope,
+    record.sourceAgent ? `source=${record.sourceAgent}` : undefined,
+    record.topicKey ? `topic=${record.topicKey}` : undefined,
+    record.revisionCount > 1 ? `rev=${record.revisionCount}` : undefined,
+  ].filter(Boolean).join(" · ");
+  const evidence = includeEvidence && record.evidence ? ` evidence=${truncateForTool(record.evidence, 120)}` : "";
+  return `[${meta}] ${truncateForTool(record.content, 260)}${evidence}`;
+}
+
+function truncateForTool(text: string, maxChars: number): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
 }
 
 function textResult(text: string, details: unknown) {

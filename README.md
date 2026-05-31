@@ -105,7 +105,7 @@ The extension registers Pi tools for the primary agent. The primary agent stays 
 | `chalin_route` | Run a selected workflow with concrete agents, topology, risk, memory, and artifact needs. |
 | `chalin_resume` | Resume the latest paused or stale Chalin run. |
 | `chalin_interview` | Ask blocking clarification questions before planning or execution. |
-| `chalin_memory_search` | Retrieve compact durable memory during direct or routed work. |
+| `chalin_memory_search` | Retrieve or list compact durable memory during direct or routed work. |
 | `chalin_memory_write` | Save durable project or user knowledge through WriteGuard. |
 | `chalin_memory_revise` | Correct stale or inaccurate memory with evidence. |
 | `chalin_artifact_resume` | Load resumable task context from stored artifacts. |

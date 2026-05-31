@@ -80,7 +80,7 @@ export class ChalinKernel {
   async handleRoute(route: RouteDecision, prompt: string, context: Omit<WorkerRunnerContext, "agents" | "modelOverrides"> = { cwd: this.cwd }, approvalOverride?: ApprovalDecision): Promise<ChalinHandleResult> {
     const approval = approvalOverride ?? approvalDecision(this.config, route);
     const diagnostics = [...this.catalog.diagnostics.warnings, ...this.catalog.diagnostics.errors];
-    const memories = route.needsMemory ? (await this.memory.retrieve({ query: prompt, sourceAgent: "primary-pi", limit: 5, tokenBudget: 900 })).results.map((result) => result.record) : [];
+    const memories = route.needsMemory ? await this.retrieveRouteMemories(route, prompt) : [];
     if (approval.action !== "allow" || !route.plan) return { route, approval, memories, diagnostics };
 
     const agents = this.resolvePlanAgents(route);
@@ -128,6 +128,11 @@ export class ChalinKernel {
 
   async approvalFor(route: RouteDecision): Promise<ApprovalDecision> {
     return approvalDecision(this.config, route);
+  }
+
+  private async retrieveRouteMemories(route: RouteDecision, prompt: string): Promise<MemoryRecord[]> {
+    if (route.kind === "memory-only" && isMemoryInventoryPrompt(prompt)) return this.memory.list();
+    return (await this.memory.retrieve({ query: prompt, sourceAgent: "primary-pi", limit: 5, tokenBudget: 900 })).results.map((result) => result.record);
   }
 
   resolvePlanAgents(route: RouteDecision): Map<string, AgentDefinition> {
@@ -253,4 +258,21 @@ function sanitizeBudget(value: AgentStep["budget"]): AgentStep["budget"] | undef
 function riskFromPlan(steps: Array<{ agent: string }>): RouteDecision["risk"] {
   if (steps.some((step) => step.agent === "worker")) return "medium";
   return "low";
+}
+
+function isMemoryInventoryPrompt(prompt: string): boolean {
+  const normalized = prompt.toLowerCase();
+  return [
+    "how many",
+    "how much",
+    "memory count",
+    "count memory",
+    "list memory",
+    "memory elements",
+    "memory records",
+    "what elements",
+    "what do you have in memory",
+    "what is in memory",
+    "what's in memory",
+  ].some((phrase) => normalized.includes(phrase));
 }
