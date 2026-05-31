@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "bun:test";
 import { buildTraceJudgePrompt, gradePiTrace, parsePiJsonTrace, parseTraceJudgeVerdict } from "../evals/trace-quality.ts";
-import { MAX_JUDGE_TIMEOUT_MS, resolveJudgeTimeoutMs } from "../evals/trace-quality.eval.ts";
+import { MAX_JUDGE_TIMEOUT_MS, parseTraceQualityArgs, resolveJudgeTimeoutMs } from "../evals/trace-quality.eval.ts";
 
 function event(value: unknown): string {
   return JSON.stringify(value);
@@ -132,4 +132,19 @@ test("buildTraceJudgePrompt includes deterministic report and strict JSON contra
 test("resolveJudgeTimeoutMs caps optional LLM judge", () => {
   assert.equal(resolveJudgeTimeoutMs("999999"), MAX_JUDGE_TIMEOUT_MS);
   assert.equal(resolveJudgeTimeoutMs("1500"), 1500);
+});
+
+test("parseTraceQualityArgs exposes generic trace grading knobs", () => {
+  const args = parseTraceQualityArgs([
+    "--report=workflow.json",
+    "--promptKind=generic",
+    "--requireChalinRoute=0",
+    "--minAnswerChars",
+    "20",
+  ]);
+
+  assert.equal(args.report, "workflow.json");
+  assert.equal(args.promptKind, "generic");
+  assert.equal(args.requireChalinRoute, "0");
+  assert.equal(args.minAnswerChars, "20");
 });

@@ -21,7 +21,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 if (isMain()) await main();
 
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
+  const args = parseTraceQualityArgs(process.argv.slice(2));
   const startedAt = new Date().toISOString();
   const traceInput = readTraceInput(args);
   const stdout = traceInput.stdout;
@@ -29,12 +29,15 @@ async function main(): Promise<void> {
   const finalText = args.final ? fs.readFileSync(path.resolve(args.final), "utf-8") : args.finalText ?? traceInput.finalText;
   const report = gradePiTrace(stdout, {
     variant,
+    promptKind: args.promptKind === "generic" ? "generic" : args.promptKind === "deep-project-analysis" ? "deep-project-analysis" : undefined,
     finalText,
     status: args.status === undefined ? undefined : Number(args.status),
     signal: args.signal ?? null,
     timeoutReason: args.timeoutReason,
     durationMs: args.durationMs ? Number(args.durationMs) : undefined,
     maxDurationMs: args.maxDurationMs ? Number(args.maxDurationMs) : undefined,
+    minAnswerChars: args.minAnswerChars ? Number(args.minAnswerChars) : undefined,
+    requireChalinRoute: args.requireChalinRoute === undefined ? undefined : args.requireChalinRoute !== "0" && args.requireChalinRoute !== "false",
   });
 
   const judgeMode = args.judge ?? "none";
@@ -178,11 +181,24 @@ function parseVariant(value: string): TraceVariant {
   throw new Error(`Unsupported trace variant: ${value}`);
 }
 
-function parseArgs(items: string[]): Record<string, string> {
+export function parseTraceQualityArgs(items: string[]): Record<string, string> {
   const result: Record<string, string> = {};
-  for (const item of items) {
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index]!;
     const match = item.match(/^--([^=]+)=(.*)$/);
-    if (match?.[1] !== undefined && match[2] !== undefined) result[match[1]] = match[2];
+    if (match?.[1] !== undefined && match[2] !== undefined) {
+      result[match[1]] = match[2];
+      continue;
+    }
+    const key = item.match(/^--(.+)$/)?.[1];
+    if (!key) continue;
+    const next = items[index + 1];
+    if (next !== undefined && !next.startsWith("--")) {
+      result[key] = next;
+      index += 1;
+    } else {
+      result[key] = "1";
+    }
   }
   return result;
 }

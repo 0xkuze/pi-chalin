@@ -2,7 +2,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { Context, Effect, Layer } from "effect";
 import type { AgentDefinition, AgentThinkingLevel } from "./schemas.ts";
-import { evaluateBudgetUsage, policyForStep, recordBudgetCheckpoint, summarizeToolUtility } from "./budget.ts";
+import { evaluateBudgetUsage, policyForStep, recordBudgetCheckpoint, scoreProgress, summarizeToolUtility } from "./budget.ts";
 import type { ChalinPathsOptions } from "./paths.ts";
 import { createMemoryCandidate } from "./memory.ts";
 import { createConfiguredMemoryStore } from "./memory-provider.ts";
@@ -11,6 +11,7 @@ import { createChildToolPolicy, createChildTools, type ChalinDelegateParamsShape
 import { createChalinChildSessionManager } from "./child-sessions.ts";
 import { buildProjectSnapshot, formatProjectSnapshot } from "./snapshot.ts";
 import { ArtifactStore } from "./artifacts.ts";
+import { buildPromptTokenomics, createStructuredSpan, mergeTraceSpans, type StructuredTraceSpan, type TokenomicsSummary } from "./observability.ts";
 import { resolveAgentModel, resolveAgentThinking, resolveInheritedModelFallback, type ResolvedAgentModel } from "./model-resolution.ts";
 import { buildSdkPrompt, childToolNames, handoffReviewToolCallLimit, isHandoffGapReadMode, resolveStepCompletionStatus, synthesisCrossStepDuplicateReadLimit, synthesisGapReadLimit, synthesisToolCallLimit, type SdkPromptOptions } from "./runner-prompt.ts";
 import { createRunState, isUsableStepHandoff, persistRun, prepareRunForResume } from "./runner-state.ts";
@@ -715,6 +716,11 @@ async function runSdkStep(
       maxDelegationDepth: maxSubagentDepth(),
     });
     const prompt = buildSdkPrompt(agent, step.task, options.cwd, options.previous, budgetPolicy, "normal", promptOptions);
+    const tokenomics = buildPromptTokenomics({
+      childPrompt: prompt,
+      memory: promptOptions.memoryContext ?? "",
+      handoff: options.previous ?? "",
+    });
     let fallbackAttempted = false;
     let accumulatedMetrics: RunStepMetrics | undefined;
     for (;;) {
@@ -741,6 +747,7 @@ async function runSdkStep(
         budgetPolicy,
         promptOptions,
         agent,
+        tokenomics,
       });
       accumulatedMetrics = mergeAttemptMetrics(accumulatedMetrics, attempt.metrics);
       if (attempt.runtimeError) {
@@ -826,9 +833,47 @@ async function runSdkSessionAttempt(input: {
   budgetPolicy: ReturnType<typeof policyForStep>;
   promptOptions: SdkPromptOptions;
   agent?: AgentDefinition;
+  tokenomics: TokenomicsSummary;
 }): Promise<{ text: string; metrics: RunStepMetrics; runtimeError?: string }> {
   const stepStartedAtMs = Date.now();
   const activity = createStepActivityMonitor(input.step, input.run, input.context);
+  const spanIdPrefix = `${input.run.id}:${input.step.id}`;
+  const toolSpans: StructuredTraceSpan[] = [];
+  const activeToolStarts = new Map<string, Array<{ at: number; index: number }>>();
+  let toolSpanIndex = 0;
+  const recordToolActivity = (toolActivity: ChildToolActivity) => {
+    activity.onToolActivity(toolActivity);
+    if (toolActivity.phase === "start") {
+      const starts = activeToolStarts.get(toolActivity.toolName) ?? [];
+      starts.push({ at: toolActivity.at, index: toolSpanIndex++ });
+      activeToolStarts.set(toolActivity.toolName, starts);
+      return;
+    }
+    if (toolActivity.phase === "blocked") {
+      toolSpans.push(createStructuredSpan({
+        id: `${spanIdPrefix}:tool:${toolSpanIndex++}`,
+        parentId: `${spanIdPrefix}:step`,
+        name: toolActivity.toolName,
+        kind: "tool-call",
+        startedAt: toolActivity.at,
+        endedAt: toolActivity.at,
+        attributes: { toolName: toolActivity.toolName, blocked: true },
+      }));
+      return;
+    }
+    const starts = activeToolStarts.get(toolActivity.toolName) ?? [];
+    const start = starts.shift();
+    if (starts.length === 0) activeToolStarts.delete(toolActivity.toolName);
+    toolSpans.push(createStructuredSpan({
+      id: `${spanIdPrefix}:tool:${start?.index ?? toolSpanIndex++}`,
+      parentId: `${spanIdPrefix}:step`,
+      name: toolActivity.toolName,
+      kind: "tool-call",
+      startedAt: start?.at ?? toolActivity.at,
+      endedAt: toolActivity.at,
+      attributes: { toolName: toolActivity.toolName },
+    }));
+  };
   const childPolicy = createChildToolPolicy({
     cwd: input.cwd,
     maxToolCalls: input.maxToolCalls,
@@ -843,9 +888,13 @@ async function runSdkSessionAttempt(input: {
       maxDepth: maxSubagentDepth(),
       execute: (params) => runNestedDelegation(params, input),
     },
-    onActivity: activity.onToolActivity,
+    onActivity: recordToolActivity,
   });
-  const attemptMetrics = (messages: unknown[] = []) => mergePolicyMetrics(extractSessionMetrics(messages, stepStartedAtMs), childPolicy);
+  const attemptMetrics = (messages: unknown[] = []) => ({
+    ...mergePolicyMetrics(extractSessionMetrics(messages, stepStartedAtMs), childPolicy),
+    tokenomics: input.tokenomics,
+    spans: mergeTraceSpans(baseStepSpans(spanIdPrefix, input.step, stepStartedAtMs, Date.now(), input.tokenomics, input.promptOptions), toolSpans),
+  });
   const { createAgentSession } = await import("@earendil-works/pi-coding-agent");
   const sessionManager = createChalinChildSessionManager({ cwd: input.cwd, runId: input.run.id, step: input.step, extensionContext: input.extensionContext });
   const releaseChildEnv = enterChildEnv();
@@ -1737,6 +1786,8 @@ function mergeAttemptMetrics(previous: RunStepMetrics | undefined, next: RunStep
     postMutationShellCommands: (previous.postMutationShellCommands ?? 0) + (next.postMutationShellCommands ?? 0) || undefined,
     successfulPostMutationShellCommands: (previous.successfulPostMutationShellCommands ?? 0) + (next.successfulPostMutationShellCommands ?? 0) || undefined,
     retriesByTool: { ...(previous.retriesByTool ?? {}), ...(next.retriesByTool ?? {}) },
+    tokenomics: mergeTokenomics(previous.tokenomics, next.tokenomics),
+    spans: mergeTraceSpans(previous.spans, next.spans),
   };
 }
 
@@ -1778,14 +1829,16 @@ function mergePolicyMetrics(metrics: RunStepMetrics, policy: ChildToolPolicy): R
 function finalizeStepMetrics(metrics: RunStepMetrics, step: RunStepState, budgetPolicy: ReturnType<typeof policyForStep>, priorFilesRead: string[] = []): RunStepMetrics {
   const mutated = (metrics.toolCallsByName.edit ?? 0) > 0 || (metrics.toolCallsByName.write ?? 0) > 0;
   const verificationDone = mutated ? (metrics.successfulPostMutationShellCommands ?? metrics.postMutationShellCommands ?? 0) > 0 : false;
-  const utility = summarizeToolUtility({
+  const progressInput = {
     findings: extractFindingLines(step.output?.text ?? ""),
     toolCalls: metrics.toolCalls,
     filesRead: metrics.filesRead ?? [],
     firstSignalToolCall: firstSignalToolCall(metrics),
     verificationDone,
     memoryCandidates: (step.output?.memoryCandidates ?? []).map((candidate) => ({ content: candidate.content, category: candidate.category, confidence: candidate.confidence })),
-  });
+  };
+  const utility = summarizeToolUtility(progressInput);
+  const progress = scoreProgress(progressInput);
   const health = evaluateBudgetUsage(budgetPolicy, {
     elapsedMs: metrics.durationMs,
     toolCalls: metrics.toolCalls,
@@ -1795,7 +1848,7 @@ function finalizeStepMetrics(metrics: RunStepMetrics, step: RunStepState, budget
     readBytes: metrics.readBytes ?? 0,
     filesTouched: metrics.filesTouched?.length ?? 0,
     retriesByTool: metrics.retriesByTool ?? {},
-  });
+  }, progress);
   const prior = new Set(priorFilesRead);
   const crossStepDuplicateReads = [...new Set((metrics.filesRead ?? []).filter((file) => prior.has(file)))];
   const budgetCapHits = mergeBudgetCapHits(metrics.budgetCapHits, health.caps);
@@ -1803,6 +1856,7 @@ function finalizeStepMetrics(metrics: RunStepMetrics, step: RunStepState, budget
   return {
     ...metrics,
     utility,
+    progress,
     ...(budgetCapHits.length ? { budgetCapHits } : {}),
     ...(crossStepDuplicateReads.length ? {
       crossStepDuplicateReadCount: crossStepDuplicateReads.length,
@@ -1810,6 +1864,47 @@ function finalizeStepMetrics(metrics: RunStepMetrics, step: RunStepState, budget
     } : {}),
     ...(budgetStopCount > 0 ? { budgetStopCount } : {}),
   };
+}
+
+function baseStepSpans(
+  prefix: string,
+  step: RunStepState,
+  startedAt: number,
+  endedAt: number,
+  tokenomics: TokenomicsSummary,
+  promptOptions: SdkPromptOptions,
+): StructuredTraceSpan[] {
+  const spans = [
+    createStructuredSpan({
+      id: `${prefix}:step`,
+      name: `${step.agent}:${step.id}`,
+      kind: "step",
+      startedAt,
+      endedAt,
+      attributes: { agent: step.agent, status: step.status, estimatedTokens: tokenomics.totalEstimatedTokens },
+    }),
+    createStructuredSpan({
+      id: `${prefix}:prompt-build`,
+      parentId: `${prefix}:step`,
+      name: "build child prompt",
+      kind: "prompt-build",
+      startedAt,
+      endedAt: startedAt,
+      attributes: { estimatedTokens: tokenomics.totalEstimatedTokens, childPromptTokens: tokenomics.phases.childPrompt.estimatedTokens },
+    }),
+  ];
+  if (promptOptions.memoryContext?.trim()) {
+    spans.push(createStructuredSpan({
+      id: `${prefix}:memory-read`,
+      parentId: `${prefix}:step`,
+      name: "compact memory context",
+      kind: "memory-read",
+      startedAt,
+      endedAt: startedAt,
+      attributes: { estimatedTokens: tokenomics.phases.memory.estimatedTokens },
+    }));
+  }
+  return spans;
 }
 
 function extractFindingLines(text: string): string[] {
@@ -1852,6 +1947,8 @@ function summarizeRunMetrics(run: RunState): RunState["metrics"] {
   const budgetCapHits: BudgetCapHit[] = [];
   const filesRead: string[] = [];
   const crossStepDuplicateReads: string[] = [];
+  const spans: StructuredTraceSpan[] = [];
+  let tokenomics: TokenomicsSummary | undefined;
   let toolCalls = 0;
   let duplicateReadCount = 0;
   let crossStepDuplicateReadCount = 0;
@@ -1867,6 +1964,8 @@ function summarizeRunMetrics(run: RunState): RunState["metrics"] {
     budgetCapHits.push(...(step.metrics.budgetCapHits ?? []));
     filesRead.push(...(step.metrics.filesRead ?? []));
     crossStepDuplicateReads.push(...(step.metrics.crossStepDuplicateReads ?? []));
+    spans.push(...(step.metrics.spans ?? []));
+    tokenomics = mergeTokenomics(tokenomics, step.metrics.tokenomics);
     for (const [name, count] of Object.entries(step.metrics.toolCallsByName)) {
       toolCallsByName[name] = (toolCallsByName[name] ?? 0) + count;
     }
@@ -1882,6 +1981,25 @@ function summarizeRunMetrics(run: RunState): RunState["metrics"] {
     ...(duplicateReadCount > 0 ? { duplicateReadCount } : {}),
     ...(crossStepDuplicateReadCount > 0 ? { crossStepDuplicateReadCount, crossStepDuplicateReads: [...new Set(crossStepDuplicateReads)].slice(0, 50) } : {}),
     ...(filesRead.length ? { filesRead: [...new Set(filesRead)].slice(0, 50) } : {}),
+    ...(tokenomics ? { tokenomics } : {}),
+    ...(spans.length ? { spans: mergeTraceSpans(spans) } : {}),
+  };
+}
+
+function mergeTokenomics(previous: TokenomicsSummary | undefined, next: TokenomicsSummary | undefined): TokenomicsSummary | undefined {
+  if (!previous) return next;
+  if (!next) return previous;
+  const phases = { ...previous.phases };
+  for (const [phase, estimate] of Object.entries(next.phases) as Array<[keyof TokenomicsSummary["phases"], TokenomicsSummary["phases"][keyof TokenomicsSummary["phases"]]]>) {
+    phases[phase] = {
+      estimatedChars: phases[phase].estimatedChars + estimate.estimatedChars,
+      estimatedTokens: phases[phase].estimatedTokens + estimate.estimatedTokens,
+    };
+  }
+  return {
+    phases,
+    totalEstimatedChars: previous.totalEstimatedChars + next.totalEstimatedChars,
+    totalEstimatedTokens: previous.totalEstimatedTokens + next.totalEstimatedTokens,
   };
 }
 

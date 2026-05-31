@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "bun:test";
-import { evaluateBudgetUsage, estimateBudgetPreflight, policyForStep, recordBudgetCheckpoint, summarizeToolUtility } from "../src/budget.ts";
+import { evaluateBudgetUsage, estimateBudgetPreflight, policyForStep, recordBudgetCheckpoint, scoreProgress, summarizeToolUtility } from "../src/budget.ts";
 import { ArtifactStore } from "../src/artifacts.ts";
 import type { AgentDefinition, RunStepState } from "../src/schemas.ts";
 import * as fs from "node:fs";
@@ -124,6 +124,66 @@ test("summarizeToolUtility exposes waste and signal metrics", () => {
   assert.equal(utility.verificationDone, true);
   assert.ok(utility.memoryCandidatesQuality > 0);
   assert.ok(utility.memoryCandidatesQuality < 1);
+});
+
+test("scoreProgress turns utility signals into continuation gates", () => {
+  const positive = scoreProgress({
+    findings: [
+      "testing: Project uses bun:test.",
+      "validation: nearest verification command is bun run test.",
+    ],
+    toolCalls: 5,
+    filesRead: ["package.json", "test/budget.test.ts"],
+    firstSignalToolCall: 1,
+    verificationDone: true,
+    memoryCandidates: [
+      { content: "Project uses bun:test with isolated temp dirs.", category: "testing", confidence: 0.9 },
+    ],
+  });
+
+  assert.equal(positive.level, "high");
+  assert.equal(positive.gate, "continue");
+  assert.ok(positive.positiveSignals.includes("verification_done"));
+  assert.ok(positive.score > 0.5);
+
+  const lowSignal = scoreProgress({
+    findings: [],
+    toolCalls: 12,
+    filesRead: ["src/runner.ts", "src/runner.ts", "src/runner.ts"],
+    verificationDone: false,
+    memoryCandidates: [],
+  });
+
+  assert.equal(lowSignal.level, "low");
+  assert.equal(lowSignal.gate, "checkpoint-low-signal");
+  assert.ok(lowSignal.negativeSignals.includes("duplicate_reads"));
+  assert.ok(lowSignal.score < 0);
+});
+
+test("evaluateBudgetUsage keeps soft caps as explicit progress gates", () => {
+  const scout = agent("scout", "recon");
+  const policy = policyForStep(scout, { agent: "scout", task: "Map project", budget: "normal" }, "multi-agent-chain");
+  const health = evaluateBudgetUsage(policy, {
+    elapsedMs: 1000,
+    toolCalls: policy.caps.maxToolCalls,
+    totalCostUsd: 0,
+    turns: 1,
+    outputChars: 100,
+    readBytes: 200,
+    filesTouched: 0,
+    retriesByTool: {},
+  }, {
+    score: -0.25,
+    level: "low",
+    gate: "checkpoint-low-signal",
+    positiveSignals: [],
+    negativeSignals: ["duplicate_reads", "no_findings"],
+  });
+
+  assert.equal(health.status, "warn");
+  assert.equal(health.next, "checkpoint-low-signal");
+  assert.equal(health.checkpointStatus, "checkpointed-low-signal");
+  assert.ok(health.warnings.some((warning) => warning.includes("progress gate checkpoint-low-signal")));
 });
 
 test("recordBudgetCheckpoint persists partial handoff when a step is budget-capped", async () => {

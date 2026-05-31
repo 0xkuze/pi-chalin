@@ -1,3 +1,5 @@
+import type { StructuredTraceSpan, TokenomicsSummary } from "./observability.ts";
+
 export const AGENT_SCOPES = ["built-in", "project", "user"] as const;
 export type AgentScope = (typeof AGENT_SCOPES)[number];
 
@@ -245,6 +247,15 @@ export interface RunStepMetrics {
     verificationDone: boolean;
     memoryCandidatesQuality: number;
   };
+  progress?: {
+    score: number;
+    level: "low" | "medium" | "high";
+    gate: "continue" | "checkpoint-low-signal" | "checkpoint-needs-continuation" | "split";
+    positiveSignals: string[];
+    negativeSignals: string[];
+  };
+  tokenomics?: TokenomicsSummary;
+  spans?: StructuredTraceSpan[];
 }
 
 export type ModelResolutionSource = "session-override" | "agent" | "tier" | "inherit";
@@ -318,6 +329,8 @@ export interface RunState {
     crossStepDuplicateReadCount?: number;
     crossStepDuplicateReads?: string[];
     filesRead?: string[];
+    tokenomics?: TokenomicsSummary;
+    spans?: StructuredTraceSpan[];
   };
 }
 

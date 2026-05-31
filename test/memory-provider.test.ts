@@ -107,6 +107,37 @@ test("auto memory provider falls back to pi-chalin local storage when Engram is 
   assert.equal(status.engramAvailable, false);
 });
 
+test("auto memory provider caches Engram availability for a short session window", async () => {
+  const fake = await startFakeEngram();
+  const cwd = tempDir("pi-chalin-auto-memory-cache-");
+  fake.observations.push(fakeObservation({
+    id: 1,
+    type: "testing",
+    title: "Cached backend",
+    content: "Auto memory backend selection should avoid repeating Engram health probes on every memory operation.",
+  }));
+  const config: ChalinConfig = {
+    ...structuredClone(DEFAULT_CONFIG),
+    memory: {
+      provider: "auto",
+      engram: {
+        ...structuredClone(DEFAULT_CONFIG.memory.engram),
+        baseUrl: fake.url,
+        autoStart: false,
+        timeoutMs: 1_000,
+      },
+    },
+  };
+
+  const store = createConfiguredMemoryStore({ cwd }, config);
+  await store.list();
+  await store.search("cached backend");
+  await store.pendingCount();
+
+  const healthRequests = fake.requests.filter((request) => request.startsWith("GET /health"));
+  assert.equal(healthRequests.length, 1);
+});
+
 test("ChalinKernel uses Engram across a chained subagent route", async () => {
   const fake = await startFakeEngram();
   const cwd = tempDir("pi-chalin-engram-chain-");

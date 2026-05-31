@@ -278,7 +278,7 @@ function killProcessTree(pid: number | undefined, signal: NodeJS.Signals): void 
 }
 
 function detectDecision(stdout: string): "chalin" | "direct" {
-  return /"(?:name|toolName)":"chalin_route"|Chalin workflow:|Subagent results:/i.test(stdout) ? "chalin" : "direct";
+  return /"(?:name|toolName)":"(?:chalin_route|chalin_memory_search)"|Chalin workflow:|Subagent results:/i.test(stdout) ? "chalin" : "direct";
 }
 
 function detectTopology(stdout: string): string {
@@ -293,6 +293,8 @@ function detectTopology(stdout: string): string {
   if (topology === "parallel") return "multi-agent-parallel";
   if (topology === "dag") return "multi-agent-dag";
   if (topology === "memory-only") return "memory-only";
+
+  if (/"(?:name|toolName)":"chalin_memory_search"/i.test(stdout)) return "memory-only";
 
   const workflow = stdout.match(/Chalin workflow:\s*([^\\n"]+)/i)?.[1]?.trim();
   if (workflow) return workflow;
