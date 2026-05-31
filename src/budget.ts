@@ -63,7 +63,8 @@ export interface BudgetHealth {
   status: BudgetHealthStatus;
   caps: BudgetCapHit[];
   warnings: string[];
-  next: "continue" | "checkpoint-and-continue" | "split" | "escalate";
+  next: "continue" | "checkpoint-and-continue" | "checkpoint-low-signal" | "checkpoint-needs-continuation" | "split" | "escalate";
+  checkpointStatus?: "checkpointed-needs-continuation" | "checkpointed-low-signal" | "checkpointed-awaiting-review" | "checkpointed-split-recommended";
 }
 
 export interface ToolUtilityInput {
@@ -84,6 +85,13 @@ export interface ToolUtilityMetrics {
   memoryCandidatesQuality: number;
 }
 
+export interface ProgressScore {
+  score: number;
+  level: "low" | "medium" | "high";
+  gate: "continue" | "checkpoint-low-signal" | "checkpoint-needs-continuation" | "split";
+  positiveSignals: string[];
+  negativeSignals: string[];
+}
 export function policyForStep(
   agent: AgentDefinition | undefined,
   step: Pick<RunStepState, "agent" | "task" | "budget">,
@@ -132,7 +140,7 @@ export function estimateBudgetPreflight(input: BudgetPreflightInput): BudgetPref
   };
 }
 
-export function evaluateBudgetUsage(policy: BudgetPolicy, usage: BudgetUsage): BudgetHealth {
+export function evaluateBudgetUsage(policy: BudgetPolicy, usage: BudgetUsage, progress?: ProgressScore): BudgetHealth {
   const caps: BudgetCapHit[] = [];
   compare(caps, "max_tool_calls", usage.toolCalls, policy.caps.maxToolCalls);
   compare(caps, "max_seconds", Math.ceil(usage.elapsedMs / 1000), policy.caps.maxSeconds);
@@ -147,13 +155,19 @@ export function evaluateBudgetUsage(policy: BudgetPolicy, usage: BudgetUsage): B
   if (caps.length === 0) return { status: "ok", caps, warnings: [], next: "continue" };
   const hard = caps.some((cap) => cap.severity === "hard");
   const status: BudgetHealthStatus = hard ? "budget-capped" : "warn";
+  const progressGate = progress && progress.gate !== "continue" ? progress.gate : undefined;
+  const checkpointStatus = progressGate ? checkpointStatusForGate(progressGate) : undefined;
   return {
     status,
     caps,
-    warnings: caps.map((cap) => `${cap.name} used ${formatNumber(cap.used)} over limit ${formatNumber(cap.limit)}`),
-    next: status === "budget-capped"
+    warnings: [
+      ...caps.map((cap) => `${cap.name} used ${formatNumber(cap.used)} over limit ${formatNumber(cap.limit)}`),
+      ...(progressGate ? [`progress gate ${progressGate} from score ${formatNumber(progress?.score ?? 0)}`] : []),
+    ],
+    ...(checkpointStatus ? { checkpointStatus } : {}),
+    next: progressGate ?? (status === "budget-capped"
       ? policy.resumeStrategy === "stage-checkpoint-validate-memory-next" ? "split" : "checkpoint-and-continue"
-      : "continue",
+      : "continue"),
   };
 }
 
@@ -173,6 +187,36 @@ export function summarizeToolUtility(input: ToolUtilityInput): ToolUtilityMetric
   };
 }
 
+export function scoreProgress(input: ToolUtilityInput): ProgressScore {
+  const utility = summarizeToolUtility(input);
+  const positiveSignals: string[] = [];
+  const negativeSignals: string[] = [];
+  if (utility.findingsPerTool > 0) positiveSignals.push("new_evidence");
+  if (utility.toolCallsBeforeFirstSignal <= 2 && input.toolCalls > 0) positiveSignals.push("early_signal");
+  if (utility.verificationDone) positiveSignals.push("verification_done");
+  if (utility.memoryCandidatesQuality >= 0.45) positiveSignals.push("memory_quality");
+  if (utility.duplicateReads > 0) negativeSignals.push("duplicate_reads");
+  if (input.toolCalls >= 10 && utility.findingsPerTool < 0.08) negativeSignals.push("low_signal_tools");
+  if (input.findings.filter((item) => item.trim()).length === 0) negativeSignals.push("no_findings");
+
+  const score = round(
+    utility.findingsPerTool * 1.4
+    + (utility.verificationDone ? 0.3 : 0)
+    + Math.min(0.2, utility.memoryCandidatesQuality * 0.25)
+    + (positiveSignals.includes("early_signal") ? 0.12 : 0)
+    - utility.duplicateReads * 0.18
+    - (negativeSignals.includes("low_signal_tools") ? 0.32 : 0)
+    - (negativeSignals.includes("no_findings") ? 0.18 : 0),
+  );
+  const level: ProgressScore["level"] = score >= 0.5 ? "high" : score >= 0.15 ? "medium" : "low";
+  const gate: ProgressScore["gate"] = level !== "low"
+    ? "continue"
+    : utility.duplicateReads >= 2 || negativeSignals.includes("low_signal_tools")
+    ? "checkpoint-low-signal"
+    : "checkpoint-needs-continuation";
+  return { score, level, gate, positiveSignals, negativeSignals };
+}
+
 export async function recordBudgetCheckpoint(store: ArtifactStore, featureId: string, step: RunStepState, reason: string): Promise<ArtifactCheckpoint> {
   await store.initFeature({
     featureId,
@@ -187,6 +231,13 @@ export async function recordBudgetCheckpoint(store: ArtifactStore, featureId: st
     status: "paused",
     stage: step.id,
   });
+}
+
+function checkpointStatusForGate(gate: ProgressScore["gate"]): BudgetHealth["checkpointStatus"] | undefined {
+  if (gate === "checkpoint-low-signal") return "checkpointed-low-signal";
+  if (gate === "checkpoint-needs-continuation") return "checkpointed-needs-continuation";
+  if (gate === "split") return "checkpointed-split-recommended";
+  return undefined;
 }
 
 function compare(caps: BudgetCapHit[], name: BudgetCapName, used: number, limit: number): void {

@@ -61,52 +61,125 @@ interface EngramSyncStatus {
 const cloudSyncAttempts = new Map<string, { at: number; promise?: Promise<void> }>();
 
 class AutoMemoryStore implements MemoryStoreLike {
+  private cachedTarget?: { store: MemoryStoreLike; provider: "engram" | "local"; expiresAt: number; operationsLeft: number };
+
   constructor(private readonly engram: EngramMemoryStore, private readonly local: MemoryStoreLike) {}
 
   private async target(): Promise<MemoryStoreLike> {
-    return await this.engram.isAvailable(false) ? this.engram : this.local;
+    const now = Date.now();
+    if (this.cachedTarget && this.cachedTarget.expiresAt > now && this.cachedTarget.operationsLeft > 0) {
+      this.cachedTarget.operationsLeft -= 1;
+      return this.cachedTarget.store;
+    }
+    const engramAvailable = await this.engram.isAvailable(false);
+    const store = engramAvailable ? this.engram : this.local;
+    this.cachedTarget = {
+      store,
+      provider: engramAvailable ? "engram" : "local",
+      expiresAt: now + AUTO_MEMORY_TARGET_TTL_MS,
+      operationsLeft: AUTO_MEMORY_TARGET_MAX_OPERATIONS - 1,
+    };
+    return store;
+  }
+
+  private invalidateOnFailure(store: MemoryStoreLike, error: unknown): never {
+    if (this.cachedTarget?.store === store) this.cachedTarget = undefined;
+    throw error;
   }
 
   async submitCandidates(candidates: MemoryCandidate[]): Promise<MemoryRecord[]> {
-    return (await this.target()).submitCandidates(candidates);
+    const target = await this.target();
+    try {
+      return await target.submitCandidates(candidates);
+    } catch (error) {
+      this.invalidateOnFailure(target, error);
+    }
   }
 
   async list(status?: MemoryRecord["status"]): Promise<MemoryRecord[]> {
-    return (await this.target()).list(status);
+    const target = await this.target();
+    try {
+      return await target.list(status);
+    } catch (error) {
+      this.invalidateOnFailure(target, error);
+    }
   }
 
   async pendingCount(): Promise<number> {
-    return (await this.target()).pendingCount();
+    const target = await this.target();
+    try {
+      return await target.pendingCount();
+    } catch (error) {
+      this.invalidateOnFailure(target, error);
+    }
   }
 
   async approve(id: string): Promise<MemoryRecord | undefined> {
-    return (await this.target()).approve(id);
+    const target = await this.target();
+    try {
+      return await target.approve(id);
+    } catch (error) {
+      this.invalidateOnFailure(target, error);
+    }
   }
 
   async reject(id: string): Promise<MemoryRecord | undefined> {
-    return (await this.target()).reject(id);
+    const target = await this.target();
+    try {
+      return await target.reject(id);
+    } catch (error) {
+      this.invalidateOnFailure(target, error);
+    }
   }
 
   async delete(id: string): Promise<boolean> {
-    return (await this.target()).delete(id);
+    const target = await this.target();
+    try {
+      return await target.delete(id);
+    } catch (error) {
+      this.invalidateOnFailure(target, error);
+    }
   }
 
   async search(query: string, limit?: number): Promise<MemorySearchResult[]> {
-    return (await this.target()).search(query, limit);
+    const target = await this.target();
+    try {
+      return await target.search(query, limit);
+    } catch (error) {
+      this.invalidateOnFailure(target, error);
+    }
   }
 
   async retrieve(request: MemoryContextRequest): Promise<MemoryContextBundle> {
-    return (await this.target()).retrieve(request);
+    const target = await this.target();
+    try {
+      return await target.retrieve(request);
+    } catch (error) {
+      this.invalidateOnFailure(target, error);
+    }
   }
 
   async revise(id: string, input: MemoryRevisionInput): Promise<MemoryRecord | undefined> {
-    return (await this.target()).revise(id, input);
+    const target = await this.target();
+    try {
+      return await target.revise(id, input);
+    } catch (error) {
+      this.invalidateOnFailure(target, error);
+    }
   }
 
   async events(recordId?: string): Promise<MemoryAuditEvent[]> {
-    return (await this.target()).events(recordId);
+    const target = await this.target();
+    try {
+      return await target.events(recordId);
+    } catch (error) {
+      this.invalidateOnFailure(target, error);
+    }
   }
 }
+
+const AUTO_MEMORY_TARGET_TTL_MS = 30_000;
+const AUTO_MEMORY_TARGET_MAX_OPERATIONS = 10;
 
 export class EngramMemoryStore implements MemoryStoreLike {
   private readonly cwd: string;
@@ -121,6 +194,7 @@ export class EngramMemoryStore implements MemoryStoreLike {
   private readonly forceStart: boolean;
   private startAttempted = false;
   private projectCache?: string;
+  private availabilityCache?: { available: boolean; expiresAt: number; operationsLeft: number };
   private readonly knownSessions = new Set<string>();
 
   constructor(options: EngramStoreOptions) {
@@ -137,12 +211,19 @@ export class EngramMemoryStore implements MemoryStoreLike {
   }
 
   async isAvailable(allowStart = this.autoStart || this.forceStart): Promise<boolean> {
-    if (await this.health()) return true;
+    const cached = this.cachedAvailability();
+    if (cached !== undefined) return cached;
+    if (await this.health()) {
+      this.cacheAvailability(true);
+      return true;
+    }
     if (!allowStart || this.startAttempted || process.env.ENGRAM_URL?.trim()) return false;
     this.startAttempted = true;
     if (!await spawnDetached(this.command, ["serve"], this.cwd)) return false;
     await wait(650);
-    return this.health();
+    const available = await this.health();
+    this.cacheAvailability(available);
+    return available;
   }
 
   async submitCandidates(candidates: MemoryCandidate[]): Promise<MemoryRecord[]> {
@@ -307,12 +388,18 @@ export class EngramMemoryStore implements MemoryStoreLike {
   }
 
   private async request<T>(route: string, options: { method?: string; body?: unknown } = {}): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${route}`, {
-      method: options.method ?? "GET",
-      headers: options.body ? { "Content-Type": "application/json" } : undefined,
-      body: options.body ? JSON.stringify(removeUndefined(options.body)) : undefined,
-      signal: AbortSignal.timeout(this.timeoutMs),
-    });
+    let res: Response;
+    try {
+      res = await fetch(`${this.baseUrl}${route}`, {
+        method: options.method ?? "GET",
+        headers: options.body ? { "Content-Type": "application/json" } : undefined,
+        body: options.body ? JSON.stringify(removeUndefined(options.body)) : undefined,
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+    } catch (error) {
+      this.availabilityCache = undefined;
+      throw error;
+    }
     let data: unknown;
     try {
       data = await res.json();
@@ -320,10 +407,29 @@ export class EngramMemoryStore implements MemoryStoreLike {
       data = undefined;
     }
     if (!res.ok) {
+      if (res.status >= 500) this.availabilityCache = undefined;
       const message = isRecord(data) && typeof data.error === "string" ? data.error : `Engram HTTP ${res.status}`;
       throw new Error(message);
     }
     return data as T;
+  }
+
+  private cachedAvailability(): boolean | undefined {
+    if (!this.availabilityCache) return undefined;
+    if (this.availabilityCache.expiresAt <= Date.now() || this.availabilityCache.operationsLeft <= 0) {
+      this.availabilityCache = undefined;
+      return undefined;
+    }
+    this.availabilityCache.operationsLeft -= 1;
+    return this.availabilityCache.available;
+  }
+
+  private cacheAvailability(available: boolean): void {
+    this.availabilityCache = {
+      available,
+      expiresAt: Date.now() + AUTO_MEMORY_TARGET_TTL_MS,
+      operationsLeft: AUTO_MEMORY_TARGET_MAX_OPERATIONS - 1,
+    };
   }
 
   private async projectName(): Promise<string> {

@@ -271,6 +271,7 @@ test("compact global orchestration requires routing for broad analysis and keeps
   assert.match(promptResult?.message?.content ?? "", /deep project analysis/i);
   assert.match(promptResult?.message?.content ?? "", /independent option comparison/i);
   assert.match(promptResult?.message?.content ?? "", /explicit memory recall\/remembrance/i);
+  assert.match(promptResult?.message?.content ?? "", /Spanish prompts like recuerda\/recordar\/memoria\/decidimos/i);
   assert.match(promptResult?.message?.content ?? "", /chalin_memory_search/i);
   assert.match(promptResult?.message?.content ?? "", /mode=list/i);
   assert.match(promptResult?.message?.content ?? "", /auth\/security\/token\/session behavior with tests/i);

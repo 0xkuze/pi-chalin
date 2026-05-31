@@ -84,6 +84,10 @@ test("orchestrator prompt teaches LLM-first routing without prompt keyword class
   assert.match(prompt, /Use the available agent roster as tools/i);
   assert.match(prompt, /fixed recipe book/i);
   assert.match(prompt, /staged fan-out\/fan-in/i);
+  assert.match(prompt, /Topology defaults are defaults/i);
+  assert.match(prompt, /deep project analysis split by folders\/modules -> DAG/i);
+  assert.match(prompt, /independent writer slices -> DAG/i);
+  assert.match(prompt, /memory-only route if direct memory search is unavailable/i);
   assert.match(prompt, /Coverage Matrix/i);
   assert.match(prompt, /covered, not-present with evidence, or marked unknown\/gap/i);
   assert.match(prompt, /derive domain-critical surfaces/i);
