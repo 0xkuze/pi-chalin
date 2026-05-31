@@ -55,6 +55,19 @@ function comparativeJudgeVerdict(caseId: string, candidates: Array<{
   } as never;
 }
 
+function routedHarnessDiagnostics(variant: "simple" | "chalin" | "gentle", caseId: string) {
+  const evalCase = getWorkflowEvalCase(caseId);
+  const chalinRouted = variant === "chalin" && shouldRequireChalinRoute(evalCase);
+  const gentleRouted = variant === "gentle" && shouldRequireGentleSubagent(evalCase);
+  return {
+    chalinRouteCalls: chalinRouted ? 1 : 0,
+    chalinRouteAgentRuns: chalinRouted ? 1 : 0,
+    chalinRouteAgentSteps: chalinRouted ? 3 : 0,
+    chalinRouteAgents: chalinRouted ? ["scout", "planner", "worker"] : [],
+    subagentCalls: gentleRouted ? 1 : 0,
+  };
+}
+
 test("workflow eval case bank covers real task types", () => {
   const kinds = new Set(listWorkflowEvalCases().map((item) => item.kind));
   assert.deepEqual([...kinds].sort(), ["greenfield", "large-feature", "refactor", "scaffold", "small-feature", "test-writing"].sort());
@@ -127,6 +140,16 @@ test("workflow prompt variant selection is harness-invariant for the same case r
   assert.deepEqual(selected.map((item) => item.prompt.index), [1, 1, 1]);
   assert.equal(new Set(selected.map((item) => item.prompt.prompt)).size, 1);
   assert.equal(new Set(selected.map((item) => item.prompt.count)).size, 1);
+});
+
+test("workflow route-required prompts ask both harnesses to use their own orchestration without prescribing a chain", () => {
+  const routed = selectWorkflowPrompt(getWorkflowEvalCase("complex-sqlite-c-tokenizer-bugfix"), 0).prompt;
+  const direct = selectWorkflowPrompt(getWorkflowEvalCase("holdout-bugfix-date-parser"), 0).prompt;
+
+  assert.match(routed, /router, subagentes o delegacion especializada/i);
+  assert.match(routed, /Decide tu propia topologia y roles segun la evidencia/i);
+  assert.doesNotMatch(routed, /scout\s*[-→>]+\s*worker|planner\s*[-→>]+\s*worker/i);
+  assert.doesNotMatch(direct, /router, subagentes o delegacion especializada/i);
 });
 
 test("workflow fixture fingerprints verify identical initial projects across harnesses", () => {
@@ -1205,20 +1228,14 @@ test("workflow eval CLI helpers keep live runs bounded", () => {
   assert.deepEqual(resolveCaseIds("a,b"), ["a", "b"]);
 });
 
-test("workflow eval separates route-required broad work from bounded complex edits", () => {
-  assert.equal(shouldRequireChalinRoute(getWorkflowEvalCase("complex-llvm-cpp-diagnostic-plan")), true);
-  assert.equal(shouldRequireGentleSubagent(getWorkflowEvalCase("complex-llvm-cpp-diagnostic-plan")), true);
-  assert.equal(shouldRequireChalinRoute(getWorkflowEvalCase("complex-bun-zig-rust-lockfile-triage")), true);
-  assert.equal(shouldRequireGentleSubagent(getWorkflowEvalCase("complex-bun-zig-rust-lockfile-triage")), true);
-  assert.equal(shouldRequireChalinRoute(getWorkflowEvalCase("complex-bun-zig-runtime-plan")), true);
-  assert.equal(shouldRequireGentleSubagent(getWorkflowEvalCase("complex-bun-zig-runtime-plan")), true);
-  assert.equal(shouldRequireChalinRoute(getWorkflowEvalCase("complex-uv-rust-index-url-bugfix")), false);
-  assert.equal(shouldRequireChalinRoute(getWorkflowEvalCase("complex-sqlite-c-tokenizer-bugfix")), false);
-  assert.deepEqual(resolveCaseIds("route-required"), [
-    "complex-bun-zig-rust-lockfile-triage",
-    "complex-bun-zig-runtime-plan",
-    "complex-llvm-cpp-diagnostic-plan",
-  ]);
+test("workflow eval routes complex harness cases while keeping calibration cases direct", () => {
+  for (const evalCase of listWorkflowComplexCases()) {
+    assert.equal(shouldRequireChalinRoute(evalCase), true, evalCase.id);
+    assert.equal(shouldRequireGentleSubagent(evalCase), true, evalCase.id);
+  }
+  assert.equal(shouldRequireChalinRoute(getWorkflowEvalCase("refactor-pricing")), false);
+  assert.equal(shouldRequireChalinRoute(getWorkflowEvalCase("holdout-bugfix-date-parser")), false);
+  assert.deepEqual(resolveCaseIds("route-required"), listWorkflowComplexCases().map((item) => item.id));
 });
 
 test("workflow eval keeps bounded docs evidence shell available for chalin", () => {
@@ -1273,6 +1290,9 @@ test("workflow eval can load the full Gentle companion bundle explicitly", () =>
   assert.match(tools, /\bweb_search\b/);
   assert.match(tools, /\blsp_diagnostics\b/);
   assert.match(tools, /\btodo\b/);
+  const routedTools = toolsForWorkflowVariant("gentle", getWorkflowEvalCase("complex-sqlite-c-tokenizer-bugfix"), { gentleCompanionRoot: root });
+  assert.equal(routedTools, "subagent");
+  assert.throws(() => toolsForWorkflowVariant("gentle", getWorkflowEvalCase("complex-sqlite-c-tokenizer-bugfix"), { gentleCompanionRoot: path.join(root, "missing") }), /Gentle companion root does not exist|Route-required Gentle eval needs/);
 
   fs.rmSync(path.join(root, "pi-lens-3.8.46", "index.ts"));
   assert.throws(() => resolveGentleCompanionRoot(root), /Gentle companion root is not usable/);
@@ -1918,7 +1938,7 @@ test("workflow comparison requires quality dominance when blind judge is unavail
       finalAnswerMissing: false,
       verificationPassed: true,
       duplicateToolCalls: 0,
-      chalinRouteCalls: 0,
+      ...routedHarnessDiagnostics(variant, "complex-redis-c-expire-feature"),
       chalinRouteNonExecutable: 0,
       toolEvents: 1,
       readCalls: 0,
@@ -1953,7 +1973,7 @@ test("workflow comparison does not let failed simple baseline win on token cost"
       finalAnswerMissing: false,
       verificationPassed: pass,
       duplicateToolCalls: 0,
-      chalinRouteCalls: 0,
+      ...routedHarnessDiagnostics(variant, "complex-sqlite-c-tokenizer-bugfix"),
       chalinRouteNonExecutable: 0,
       toolEvents: 1,
       readCalls: 0,
@@ -2063,7 +2083,7 @@ test("workflow comparison allows quality gains over simple within a reasonable t
       finalAnswerMissing: false,
       verificationPassed: true,
       duplicateToolCalls: 0,
-      chalinRouteCalls: 0,
+      ...routedHarnessDiagnostics(variant, "complex-sqlite-c-tokenizer-bugfix"),
       chalinRouteNonExecutable: 0,
       toolEvents: 1,
       readCalls: 0,
@@ -2097,7 +2117,7 @@ test("workflow comparison accepts major token savings with comparable p95", () =
       finalAnswerMissing: false,
       verificationPassed: true,
       duplicateToolCalls: 0,
-      chalinRouteCalls: 0,
+      ...routedHarnessDiagnostics(variant, "complex-uv-rust-index-url-bugfix"),
       chalinRouteNonExecutable: 0,
       toolEvents: 1,
       readCalls: 0,
@@ -2134,7 +2154,7 @@ test("workflow comparison accepts strong token savings against gentle with reaso
       finalAnswerMissing: false,
       verificationPassed: true,
       duplicateToolCalls: 0,
-      chalinRouteCalls: 0,
+      ...routedHarnessDiagnostics(variant, "complex-uv-rust-index-url-bugfix"),
       chalinRouteNonExecutable: 0,
       toolEvents: 1,
       readCalls: 0,
@@ -2210,7 +2230,7 @@ test("workflow comparison accepts judge quality dominance with lower token cost"
       finalAnswerMissing: false,
       verificationPassed: true,
       duplicateToolCalls: 0,
-      chalinRouteCalls: 0,
+      ...routedHarnessDiagnostics(variant, "complex-uv-rust-index-url-bugfix"),
       chalinRouteNonExecutable: 0,
       toolEvents: 1,
       readCalls: 0,
@@ -2244,7 +2264,7 @@ test("workflow comparison accepts blind-judge quality lead with lower token cost
       finalAnswerMissing: false,
       verificationPassed: true,
       duplicateToolCalls: 0,
-      chalinRouteCalls: 0,
+      ...routedHarnessDiagnostics(variant, "complex-rust-workspace-cache-feature"),
       chalinRouteNonExecutable: 0,
       toolEvents: 1,
       readCalls: 0,
@@ -2557,7 +2577,7 @@ test("workflow comparison accepts pareto quality and cost lead over gentle", () 
       finalAnswerMissing: false,
       verificationPassed: true,
       duplicateToolCalls: 0,
-      chalinRouteCalls: 0,
+      ...routedHarnessDiagnostics(variant, "complex-cpython-c-unicode-regression"),
       chalinRouteNonExecutable: 0,
       toolEvents: 1,
       readCalls: 0,
@@ -2591,7 +2611,7 @@ test("workflow comparison does not let a failed gentle run win only by cheap tok
       finalAnswerMissing: false,
       verificationPassed: pass,
       duplicateToolCalls: 0,
-      chalinRouteCalls: 0,
+      ...routedHarnessDiagnostics(variant, "complex-sqlite-c-tokenizer-bugfix"),
       chalinRouteNonExecutable: 0,
       toolEvents: 1,
       readCalls: 0,
@@ -2630,7 +2650,7 @@ test("workflow comparison treats perfect workspace quality as dominant over sub-
       finalAnswerMissing: false,
       verificationPassed: true,
       duplicateToolCalls: 0,
-      chalinRouteCalls: 0,
+      ...routedHarnessDiagnostics(variant, "complex-redis-c-expire-feature"),
       chalinRouteNonExecutable: 0,
       toolEvents: 1,
       readCalls: 0,
@@ -3587,6 +3607,68 @@ test("workflow diagnostics count tool execution updates as progress, not duplica
   assert.equal(diagnostics.duplicateToolCalls, 0);
 });
 
+test("workflow diagnostics count routed subagent verification as passing verification", () => {
+  const chalinRouteDetails = {
+    route: { kind: "multi-agent-chain", agents: ["scout", "planner", "worker", "reviewer"] },
+    run: {
+      id: "chalin-verify-run",
+      status: "complete",
+      steps: [
+        { agent: "scout", status: "complete", output: { text: "target crates/cache-key/src/lib.rs; test command cargo test" } },
+        { agent: "planner", status: "complete", output: { text: "plan implementation and tests" } },
+        { agent: "worker", status: "complete", output: { text: "Changed crates/cache-key/src/lib.rs. Verification: `cargo test -p cache-key` — 11 passed, 0 failed." } },
+        { agent: "reviewer", status: "complete", output: { text: "PASS; no unrelated changes." } },
+      ],
+    },
+  };
+  const stdout = [
+    JSON.stringify({ type: "tool_execution_start", toolName: "chalin_route", args: { topology: "chain" } }),
+    JSON.stringify({ type: "tool_execution_end", toolName: "chalin_route", isError: false, result: { content: [{ type: "text", text: "Final answer material: done" }], details: chalinRouteDetails } }),
+  ].join("\n");
+
+  const diagnostics = workflowDiagnostics(getWorkflowEvalCase("complex-rust-workspace-cache-feature"), stdout, "", undefined, undefined, undefined, false);
+  assert.equal(detectWorkflowVerification(stdout).passed, false);
+  assert.equal(diagnostics.verificationPassed, true);
+  assert.equal(diagnostics.verificationToolCalls, 1);
+
+  const makeDetails = {
+    route: { kind: "multi-agent-chain", agents: ["scout", "worker", "reviewer"] },
+    run: {
+      id: "chalin-make-verify-run",
+      status: "complete",
+      steps: [
+        { agent: "worker", status: "complete", output: { text: "Verification: `make test` — compiles with -Werror and all 3 assertions pass (exit 0)." } },
+      ],
+    },
+  };
+  const makeStdout = [
+    JSON.stringify({ type: "tool_execution_start", toolName: "chalin_route", args: { topology: "chain" } }),
+    JSON.stringify({ type: "tool_execution_end", toolName: "chalin_route", isError: false, result: { content: [{ type: "text", text: "Final answer material: done" }], details: makeDetails } }),
+  ].join("\n");
+  const makeDiagnostics = workflowDiagnostics(getWorkflowEvalCase("complex-sqlite-c-tokenizer-bugfix"), makeStdout, "", undefined, undefined, undefined, false);
+  assert.equal(makeDiagnostics.verificationPassed, true);
+  assert.equal(makeDiagnostics.verificationToolCalls, 1);
+
+  const exitDetails = {
+    route: { kind: "multi-agent-chain", agents: ["scout", "worker", "reviewer"] },
+    run: {
+      id: "chalin-exit-verify-run",
+      status: "complete",
+      steps: [
+        { agent: "worker", status: "complete", output: { text: "Verification: `make test` — build + run clean, 25/25 assertions pass." } },
+        { agent: "reviewer", status: "complete", output: { text: "PASS. `make test` exits 0 — build + run clean." } },
+      ],
+    },
+  };
+  const exitStdout = [
+    JSON.stringify({ type: "tool_execution_start", toolName: "chalin_route", args: { topology: "chain" } }),
+    JSON.stringify({ type: "tool_execution_end", toolName: "chalin_route", isError: false, result: { content: [{ type: "text", text: "Final answer material: done" }], details: exitDetails } }),
+  ].join("\n");
+  const exitDiagnostics = workflowDiagnostics(getWorkflowEvalCase("complex-sqlite-c-tokenizer-bugfix"), exitStdout, "", undefined, undefined, undefined, false);
+  assert.equal(exitDiagnostics.verificationPassed, true);
+  assert.equal(exitDiagnostics.verificationToolCalls, 2);
+});
+
 test("workflow chalin route agent metrics deduplicate progress and completion events", () => {
   const route = { kind: "multi-agent-chain", agents: ["scout", "planner", "worker"] };
   const partialRun = {
@@ -3776,7 +3858,11 @@ int count_sql_tokens(const char *sql) {
         jsonEvents: 0,
         toolEvents: 0,
         toolCallsByName: {},
-        chalinRouteCalls: 0,
+        chalinRouteCalls: 1,
+        chalinRouteAgentRuns: 1,
+        chalinRouteAgentSteps: 3,
+        chalinRouteAgents: ["scout", "planner", "worker"],
+        subagentCalls: 0,
         chalinRouteNonExecutable: 0,
         chalinRouteValidationErrors: 0,
         toolValidationErrors: 0,

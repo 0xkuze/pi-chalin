@@ -686,17 +686,31 @@ export function resolveGentlePiRoot(value: string | undefined): string {
 }
 
 export function resolveGentleCompanionRoot(value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  const root = path.resolve(value);
+  const resolvedValue = value ?? findDefaultGentleCompanionRoot();
+  if (!resolvedValue) return undefined;
+  const root = path.resolve(resolvedValue);
   if (!fs.existsSync(root)) throw new Error(`Gentle companion root does not exist: ${root}`);
-  const missing = gentleCompanionPackages.flatMap((pkg) => {
+  const missing = missingGentleCompanionPackages(root);
+  if (missing.length > 0) throw new Error(`Gentle companion root is not usable: ${root}. Missing ${missing.join(", ")}`);
+  return root;
+}
+
+function findDefaultGentleCompanionRoot(): string | undefined {
+  const candidates = [
+    path.join(defaultGentleRoot, "node_modules"),
+    path.resolve(repoRoot, "..", "gentle-harness-runtime", "node_modules"),
+    path.join("/tmp", "gentle-harness-runtime", "node_modules"),
+  ];
+  return candidates.find((candidate) => fs.existsSync(candidate) && missingGentleCompanionPackages(candidate).length === 0);
+}
+
+function missingGentleCompanionPackages(root: string): string[] {
+  return gentleCompanionPackages.flatMap((pkg) => {
     const pkgDir = resolveGentleCompanionPackageDir(root, pkg.dirNames);
     if (!pkgDir) return [pkg.name];
     const extensionPath = path.join(pkgDir, ...pkg.extension);
     return fs.existsSync(extensionPath) ? [] : [`${path.relative(root, pkgDir)}/${pkg.extension.join("/")}`];
   });
-  if (missing.length > 0) throw new Error(`Gentle companion root is not usable: ${root}. Missing ${missing.join(", ")}`);
-  return root;
 }
 
 function resolveGentleCompanionPackageDir(root: string, dirNames: readonly string[]): string | undefined {
@@ -1517,8 +1531,13 @@ export function toolsForWorkflowVariant(variant: WorkflowVariant, evalCase: Work
   if (variant === "chalin" && evalCase.kind === "review-only") {
     return `${tools},chalin_project_discovery,chalin_project_snapshot,chalin_route`;
   }
-  if (variant === "gentle" && resolveGentleCompanionRoot(options.gentleCompanionRoot)) {
-    return `${tools},${gentleCompanionTools.join(",")}`;
+  if (variant === "gentle") {
+    const companionRoot = resolveGentleCompanionRoot(options.gentleCompanionRoot);
+    if (shouldRequireGentleSubagent(evalCase)) {
+      if (!companionRoot) throw new Error("Route-required Gentle eval needs a usable Gentle companion root with pi-subagents.");
+      return "subagent";
+    }
+    if (companionRoot) return `${tools},${gentleCompanionTools.join(",")}`;
   }
   return variant === "chalin" ? `${tools},chalin_project_discovery,chalin_project_snapshot,chalin_route` : tools;
 }
@@ -2083,6 +2102,7 @@ function runPi(args: string[], cwd: string, timeoutMs: number, options: { observ
 export function workflowDiagnostics(evalCase: WorkflowEvalCase, stdout: string, stderr: string, timeToWorkspaceValidMs: number | undefined, timeToVerificationPassMs: number | undefined, timeToFinalAnswerMs: number | undefined, finalAnswerMissing: boolean, objectiveStopReason?: string, timeoutReason?: string): WorkflowEfficiencyDiagnostics {
   const parsed = parsePiJsonTrace(stdout);
   const verification = detectWorkflowVerification(stdout);
+  const routedVerification = detectRoutedWorkflowVerification(stdout);
   const traceSummary = summarizeWorkflowRunTrace(evalCase, parsed);
   const toolCallsByName: Record<string, number> = {};
   let duplicateToolCalls = 0;
@@ -2123,8 +2143,8 @@ export function workflowDiagnostics(evalCase: WorkflowEvalCase, stdout: string, 
     timeToWorkspaceValidMs,
     timeToVerificationPassMs,
     timeToFinalAnswerMs,
-    verificationPassed: verification.passed,
-    verificationToolCalls: verification.calls,
+    verificationPassed: verification.passed || routedVerification.passed,
+    verificationToolCalls: verification.calls + routedVerification.calls,
     traceSummary,
     finalAnswerMissing,
     objectiveStopReason,
@@ -2393,6 +2413,41 @@ export function detectWorkflowVerification(stdout: string): { passed: boolean; c
     }
   }
   return { passed, calls };
+}
+
+function detectRoutedWorkflowVerification(stdout: string): { passed: boolean; calls: number } {
+  const history = workflowAgentHistory(stdout, { maxRuns: 500, maxSteps: 500, maxTextChars: 1200 });
+  const byRun = new Map<string, WorkflowAgentRunHistory>();
+  let calls = 0;
+  let passed = false;
+
+  for (const run of history.runs) {
+    const looksLikeChalinRoute = run.toolName === "chalin_route"
+      || (run.runId ? /^chalin-/.test(run.runId) : false)
+      || /\b(?:multi-agent|single-agent|memory-only)\b/i.test(run.routeKind ?? "");
+    if (!looksLikeChalinRoute) continue;
+    const key = run.runId ?? JSON.stringify({ routeKind: run.routeKind, agents: run.agents, steps: run.steps.map((step) => step.agent) });
+    const existing = byRun.get(key);
+    if (!existing || run.totalSteps > existing.totalSteps || (run.status === "complete" && existing.status !== "complete")) {
+      byRun.set(key, run);
+    }
+  }
+
+  for (const run of byRun.values()) {
+    for (const step of run.steps) {
+      const text = `${step.handoffSnippet ?? ""}\n${step.errorSnippet ?? ""}`;
+      if (!routedVerificationTextLooksExecuted(text)) continue;
+      calls += 1;
+      passed = true;
+    }
+  }
+
+  return { passed, calls };
+}
+
+function routedVerificationTextLooksExecuted(text: string): boolean {
+  if (!isVerificationCommand(text)) return false;
+  return /\b(?:\d+\s+passed|0\s+failed|all\s+(?:tests?|assertions?)\s+(?:pass|passed|passing)|(?:all\s+\d+|\d+\s*\/\s*\d+)\s+assertions?\s+(?:pass|passed|passing)|tests?\s+(?:pass|passed|passing|verdes)|verification:\s*`?[^`\n]*(?:test|typecheck|tsc|eslint)[^`\n]*`?\s*[—:-]\s*(?:pass|passed|\d+\s+passed|ok)|(?:exits?|exit(?:ed)?)\s+0|exit:\s*0|passed,\s*0\s+failed)\b/i.test(text);
 }
 
 function syntheticPassingSummary(evalCase: WorkflowEvalCase): string {

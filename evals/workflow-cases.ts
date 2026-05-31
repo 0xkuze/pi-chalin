@@ -174,7 +174,7 @@ export function getWorkflowEvalCase(id: string): WorkflowEvalCase {
 export function selectWorkflowPrompt(evalCase: WorkflowEvalCase, variantIndex = 0): { prompt: string; index: number; count: number } {
   const prompts = evalCase.promptVariants?.length ? evalCase.promptVariants : autoPromptVariants(evalCase.prompt);
   const index = ((Math.floor(variantIndex) % prompts.length) + prompts.length) % prompts.length;
-  return { prompt: prompts[index]!, index, count: prompts.length };
+  return { prompt: workflowPromptWithHarnessOrchestration(evalCase, prompts[index]!), index, count: prompts.length };
 }
 
 function autoPromptVariants(prompt: string): string[] {
@@ -183,6 +183,16 @@ function autoPromptVariants(prompt: string): string[] {
     `Necesito una solución acotada, verificable y sin atajos. ${prompt} Si se piden tests, deben probar el comportamiento solicitado con asserts no triviales. Al final reporta archivos cambiados y verificación ejecutada.`,
     `Trabaja como en un cambio real de producción pero mantén el scope mínimo. ${prompt} Si se piden tests, actualízalos con casos de comportamiento/edge case y ejecútalos.`,
   ];
+}
+
+function workflowPromptWithHarnessOrchestration(evalCase: WorkflowEvalCase, prompt: string): string {
+  const orchestration = evalCase.expected.orchestration;
+  if (!orchestration?.requireChalinRoute && !orchestration?.requireGentleSubagent) return prompt;
+  return [
+    prompt,
+    "",
+    "Esta es una tarea compleja de harness: si tu entorno tiene router, subagentes o delegacion especializada disponible, usalo para aislar contexto, ejecutar/revisar el trabajo y entregar evidencia. Decide tu propia topologia y roles segun la evidencia; no uses una cadena prehecha.",
+  ].join("\n");
 }
 
 export function createWorkflowFixture(id: string, options: { promptVariantIndex?: number } = {}): WorkflowFixture {
@@ -1457,6 +1467,11 @@ fn preserves_non_simple_path_query_without_adding_slash() {
 `);
         },
       },
+      orchestration: {
+        requireChalinRoute: true,
+        requireGentleSubagent: true,
+        rationale: "Rust workspace URL normalization combines package-index semantics, hidden behavioral edges, and verification, so both harnesses should exercise routed implementation planning/review.",
+      },
     },
     setup(cwd) {
       write(cwd, "Cargo.toml", `[workspace]\nmembers = ["crates/index-url"]\nresolver = "2"\n`);
@@ -1507,6 +1522,11 @@ fn keeps_duplicate_markers_without_lowercasing() {
 `);
         },
       },
+      orchestration: {
+        requireChalinRoute: true,
+        requireGentleSubagent: true,
+        rationale: "Rust workspace cache-key work combines canonicalization rules, marker ordering, and hidden contract validation, so both harnesses should use their routed/subagent path.",
+      },
     },
     setup(cwd) {
       write(cwd, "Cargo.toml", `[workspace]\nmembers = ["crates/cache-key"]\nresolver = "2"\n`);
@@ -1553,6 +1573,11 @@ int main(void) {
 `);
         },
       },
+      orchestration: {
+        requireChalinRoute: true,
+        requireGentleSubagent: true,
+        rationale: "C tokenizer changes alter state transitions with hidden grammar-edge validation, so both harnesses should use subagent-backed review instead of parent-only direct work.",
+      },
     },
     authoringReview: {
       oracleSolution: "Treat single-quoted strings as separate tokens with doubled quote escapes even when adjacent to normal token characters, skip any -- line comment until newline/EOF, and keep whitespace-only token boundaries intact.",
@@ -1592,6 +1617,11 @@ function complexRedisCExpireFeatureCase(): WorkflowEvalCase {
       maxFiles: 8,
       maxDurationMs: 75_000,
       validation: { runTests: true, allowSkip: false },
+      orchestration: {
+        requireChalinRoute: true,
+        requireGentleSubagent: true,
+        rationale: "C TTL table work is stateful and memory-sensitive enough to require routed implementation plus review in both harnesses.",
+      },
     },
     setup(cwd) {
       writeCMakeProject(cwd, "test_expire_table", "src/expire_table.c tests/test_expire_table.c");
@@ -1620,6 +1650,11 @@ function complexCpythonCUnicodeRegressionCase(): WorkflowEvalCase {
       maxFiles: 8,
       maxDurationMs: 75_000,
       validation: { runTests: true, allowSkip: false },
+      orchestration: {
+        requireChalinRoute: true,
+        requireGentleSubagent: true,
+        rationale: "C byte-level unicode trimming is a risky low-level regression surface, so both harnesses should exercise subagent-backed implementation and review.",
+      },
     },
     setup(cwd) {
       writeCMakeProject(cwd, "test_ascii_trim", "src/ascii_trim.c tests/test_ascii_trim.c");
