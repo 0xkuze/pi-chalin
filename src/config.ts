@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { Context, Effect, Layer } from "effect";
 import { resolveChalinPaths, type ChalinPathsOptions } from "./paths.ts";
 import { isAgentThinkingLevel, riskRank, type AgentScope, type AgentThinkingLevel, type ApprovalDecision, type RouteDecision, type RouteRisk } from "./schemas.ts";
 
@@ -44,6 +45,12 @@ export interface LoadedChalinConfig {
   diagnostics: string[];
   paths: ReturnType<typeof resolveChalinPaths>;
 }
+
+interface ConfigServiceShape {
+  readonly loaded: LoadedChalinConfig;
+}
+
+class ConfigService extends Context.Tag("pi-chalin/Config")<ConfigService, ConfigServiceShape>() {}
 
 export const DEFAULT_CONFIG: ChalinConfig = {
   enabled: true,
@@ -184,12 +191,22 @@ function coerceConfig(input: ChalinConfig, diagnostics: string[]): ChalinConfig 
 }
 
 export function loadEffectiveConfig(options: ChalinPathsOptions): LoadedChalinConfig {
-  const paths = resolveChalinPaths(options);
-  const diagnostics: string[] = [];
-  const projectConfig = readJsonObject(paths.projectConfigPath, diagnostics);
-  const userConfig = readJsonObject(paths.userConfigPath, diagnostics);
-  const merged = deepMerge(deepMerge(DEFAULT_CONFIG, projectConfig), userConfig);
-  return { config: coerceConfig(merged, diagnostics), diagnostics, paths };
+  return Effect.runSync(loadEffectiveConfigEffect(options));
+}
+
+export function configLayer(options: ChalinPathsOptions): Layer.Layer<ConfigService> {
+  return Layer.effect(ConfigService, Effect.map(loadEffectiveConfigEffect(options), (loaded) => ({ loaded })));
+}
+
+export function loadEffectiveConfigEffect(options: ChalinPathsOptions): Effect.Effect<LoadedChalinConfig> {
+  return Effect.sync(() => {
+    const paths = resolveChalinPaths(options);
+    const diagnostics: string[] = [];
+    const projectConfig = readJsonObject(paths.projectConfigPath, diagnostics);
+    const userConfig = readJsonObject(paths.userConfigPath, diagnostics);
+    const merged = deepMerge(deepMerge(DEFAULT_CONFIG, projectConfig), userConfig);
+    return { config: coerceConfig(merged, diagnostics), diagnostics, paths };
+  }).pipe(Effect.withSpan("config.loadEffective"));
 }
 
 export function writeProjectConfig(options: ChalinPathsOptions, configPatch: Partial<ChalinConfig>): LoadedChalinConfig {

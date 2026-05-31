@@ -1,5 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import { Context, Effect, Layer } from "effect";
 import type { AgentDefinition, AgentThinkingLevel } from "./schemas.ts";
 import { evaluateBudgetUsage, policyForStep, recordBudgetCheckpoint, summarizeToolUtility } from "./budget.ts";
 import type { ChalinPathsOptions } from "./paths.ts";
@@ -34,6 +35,51 @@ export interface WorkerRunner {
   resume?(run: RunState, context: WorkerRunnerContext): Promise<RunState>;
 }
 
+interface WorkerRunnerServiceShape {
+  readonly run: (route: RouteDecision, context: WorkerRunnerContext) => Effect.Effect<RunState, unknown>;
+  readonly resume: (run: RunState, context: WorkerRunnerContext) => Effect.Effect<RunState, unknown>;
+}
+
+class WorkerRunnerService extends Context.Tag("pi-chalin/Runner")<WorkerRunnerService, WorkerRunnerServiceShape>() {}
+
+export function runnerLayer(runner: WorkerRunner): Layer.Layer<WorkerRunnerService> {
+  return Layer.succeed(WorkerRunnerService, {
+    run: (route, context) => Effect.tryPromise(() => runner.run(route, context)),
+    resume: (run, context) => Effect.tryPromise(() => runner.resume ? runner.resume(run, context) : runner.run(run.route, context)),
+  });
+}
+
+export function runWorkerRunnerEffect(runner: WorkerRunner, route: RouteDecision, context: WorkerRunnerContext): Effect.Effect<RunState, unknown> {
+  return Effect.gen(function* () {
+    const service = yield* WorkerRunnerService;
+    return yield* service.run(route, context);
+  }).pipe(Effect.provide(runnerLayer(runner)), Effect.withSpan("runner.service.run"));
+}
+
+export function resumeWorkerRunnerEffect(runner: WorkerRunner, run: RunState, context: WorkerRunnerContext): Effect.Effect<RunState, unknown> {
+  return Effect.gen(function* () {
+    const service = yield* WorkerRunnerService;
+    return yield* service.resume(run, context);
+  }).pipe(Effect.provide(runnerLayer(runner)), Effect.withSpan("runner.service.resume"));
+}
+
+class RunnerAbortError {
+  readonly _tag = "AbortError";
+  constructor(readonly message: string) {}
+}
+
+class BudgetExceededError {
+  readonly _tag = "BudgetExceeded";
+  constructor(readonly message: string) {}
+}
+
+class StepFailedError {
+  readonly _tag = "StepFailed";
+  constructor(readonly message: string) {}
+}
+
+type RunnerError = RunnerAbortError | BudgetExceededError | StepFailedError;
+
 export class MockWorkerRunner implements WorkerRunner {
   async run(route: RouteDecision, context: WorkerRunnerContext): Promise<RunState> {
     const run = createRunState(route, context.cwd, context.rootTask, {
@@ -56,28 +102,7 @@ export class MockWorkerRunner implements WorkerRunner {
       }
     }
 
-    try {
-      throwIfAborted(context.signal);
-      if (plan.kind === "single") {
-        await runStep(run.steps[0]!, context, undefined, run);
-      } else if (plan.kind === "chain") {
-        let previous = "";
-        for (let index = 0; index < run.steps.length; index += 1) {
-          const step = run.steps[index]!;
-          throwIfAborted(context.signal);
-          const output = await runStep(step, context, previous, run);
-          previous = output.handoff ?? output.text;
-          maybeAppendImplementationReviewRepair(run, step);
-        }
-      } else if (plan.kind === "parallel") {
-        await Promise.all(run.steps.map((step) => runStep(step, context, undefined, run)));
-      } else {
-        await runMockDag(run, plan.stages, context);
-      }
-    } catch (error) {
-      if (!isAbortError(error)) throw error;
-      markRunAborted(run, context, errorMessage(error));
-    }
+    await runMockPlan(run, plan, context);
 
     return completeRun(run, context);
   }
@@ -87,33 +112,47 @@ export class MockWorkerRunner implements WorkerRunner {
     context.onUpdate?.(run);
     const plan = run.route.plan;
     if (!plan) return completeRun(run, context);
-    try {
-      throwIfAborted(context.signal);
-      if (plan.kind === "single" || plan.kind === "chain") {
-        let previous = aggregateCompletedHandoffBefore(run.steps, run.steps.length);
-        for (let index = 0; index < run.steps.length; index += 1) {
-          const step = run.steps[index]!;
-          if (isUsableStepHandoff(step)) {
-            previous = aggregateHandoff([{ agent: step.agent, text: step.output?.handoff ?? step.output?.text ?? previous }]);
-            maybeAppendImplementationReviewRepair(run, step);
-            continue;
-          }
-          throwIfAborted(context.signal);
-          const output = await runStep(step, context, previous, run);
-          previous = output.handoff ?? output.text;
-          maybeAppendImplementationReviewRepair(run, step);
-        }
-      } else if (plan.kind === "parallel") {
-        await Promise.all(run.steps.filter((step) => !isUsableStepHandoff(step)).map((step) => runStep(step, context, undefined, run)));
-      } else {
-        await resumeMockDag(run, plan.stages, context);
-      }
-    } catch (error) {
-      if (!isAbortError(error)) throw error;
-      markRunAborted(run, context, errorMessage(error));
-    }
+    await resumeMockPlan(run, plan, context);
     return completeRun(run, context);
   }
+}
+
+function runMockPlan(run: RunState, plan: RoutePlan, context: WorkerRunnerContext): Promise<void> {
+  return Effect.runPromise(Effect.gen(function* () {
+    yield* checkAbortEffect(context.signal);
+    if (plan.kind === "single") {
+      yield* runChainEffect(run, [run.steps[0]!], context, {});
+    } else if (plan.kind === "chain") {
+      yield* runChainEffect(run, run.steps, context, {});
+    } else if (plan.kind === "parallel") {
+      yield* runParallelEffect(run.steps, context, undefined, run, "runner.mock.parallel");
+    } else {
+      yield* runnerTryPromise(() => runMockDag(run, plan.stages, context));
+    }
+  }).pipe(
+    Effect.catchTag("AbortError", (error) => Effect.sync(() => markRunAborted(run, context, error.message))),
+    Effect.catchTag("BudgetExceeded", (error) => Effect.fail(new Error(error.message))),
+    Effect.catchTag("StepFailed", (error) => Effect.fail(new Error(error.message))),
+    Effect.withSpan("runner.mock.plan"),
+  ));
+}
+
+function resumeMockPlan(run: RunState, plan: RoutePlan, context: WorkerRunnerContext): Promise<void> {
+  return Effect.runPromise(Effect.gen(function* () {
+    yield* checkAbortEffect(context.signal);
+    if (plan.kind === "single" || plan.kind === "chain") {
+      yield* runChainEffect(run, run.steps, context, { resume: true, initialPrevious: aggregateCompletedHandoffBefore(run.steps, run.steps.length) });
+    } else if (plan.kind === "parallel") {
+      yield* runParallelEffect(run.steps.filter((step) => !isUsableStepHandoff(step)), context, undefined, run, "runner.mock.resumeParallel");
+    } else {
+      yield* runnerTryPromise(() => resumeMockDag(run, plan.stages, context));
+    }
+  }).pipe(
+    Effect.catchTag("AbortError", (error) => Effect.sync(() => markRunAborted(run, context, error.message))),
+    Effect.catchTag("BudgetExceeded", (error) => Effect.fail(new Error(error.message))),
+    Effect.catchTag("StepFailed", (error) => Effect.fail(new Error(error.message))),
+    Effect.withSpan("runner.mock.resumePlan"),
+  ));
 }
 
 export class SdkWorkerRunner implements WorkerRunner {
@@ -200,7 +239,7 @@ async function runMockDag(run: RunState, stages: Extract<RoutePlan, { kind: "dag
     const stage = stages[stageIndex]!;
     throwIfAborted(context.signal);
     const stageSteps = run.steps.filter((step) => step.id.startsWith(`${stage.id}:`));
-    const outputs = await Promise.all(stageSteps.map((step) => runStep(step, context, previous, run)));
+    const outputs = await runParallel(stageSteps, context, previous, run, `mock-dag:${stage.id}`);
     for (const step of stageSteps) maybeAppendImplementationReviewRepair(run, step);
     previous = aggregateHandoff(outputs.map((output) => ({ agent: output.agent, text: output.handoff ?? output.text })));
   }
@@ -217,9 +256,13 @@ async function resumeMockDag(run: RunState, stages: Extract<RoutePlan, { kind: "
       for (const step of stageSteps) maybeAppendImplementationReviewRepair(run, step);
       continue;
     }
-    const outputs = await Promise.all(stageSteps
-      .filter((step) => !isUsableStepHandoff(step))
-      .map((step) => runStep(step, context, previous, run)));
+    const outputs = await runParallel(
+      stageSteps.filter((step) => !isUsableStepHandoff(step)),
+      context,
+      previous,
+      run,
+      `mock-dag-resume:${stage.id}`,
+    );
     const completedOutputs = stageSteps
       .filter((step) => isUsableStepHandoff(step))
       .map((step) => ({ agent: step.agent, text: step.output?.handoff ?? step.output?.text ?? "" }));
@@ -254,10 +297,14 @@ async function runSdkParallelSteps(
   }
 
   try {
-    await Promise.all(run.steps.map((step) => {
-      const worktree = isolation?.worktrees.find((item) => item.stepId === step.id);
-      return runSdkStep(step, context, extensionContext, run, { cwd: worktree?.path ?? context.cwd });
-    }));
+    await Effect.runPromise(Effect.forEach(
+      run.steps,
+      (step) => Effect.tryPromise(() => {
+        const worktree = isolation?.worktrees.find((item) => item.stepId === step.id);
+        return runSdkStep(step, context, extensionContext, run, { cwd: worktree?.path ?? context.cwd });
+      }),
+      { concurrency: "unbounded" },
+    ).pipe(Effect.withSpan("runner.sdk.parallel")));
 
     if (run.steps.some((step) => step.status === "paused")) {
       run.warnings.push(isolation?.enabled
@@ -608,11 +655,15 @@ async function runSdkStage(
   }
 
   try {
-    await Promise.all(runnableSteps.map((step) => {
-      const localStepId = step.id.split(":").at(-1) ?? step.id;
-      const worktree = isolation?.worktrees.find((item) => item.stepId === localStepId);
-      return runSdkStep(step, context, extensionContext, run, { cwd: worktree?.path ?? context.cwd, previous });
-    }));
+    await Effect.runPromise(Effect.forEach(
+      runnableSteps,
+      (step) => Effect.tryPromise(() => {
+        const localStepId = step.id.split(":").at(-1) ?? step.id;
+        const worktree = isolation?.worktrees.find((item) => item.stepId === localStepId);
+        return runSdkStep(step, context, extensionContext, run, { cwd: worktree?.path ?? context.cwd, previous });
+      }),
+      { concurrency: "unbounded" },
+    ).pipe(Effect.withSpan(`runner.sdk.dag.${stage.id}`)));
     if (stageSteps.some((step) => step.status === "paused")) {
       run.warnings.push(isolation?.enabled
         ? `DAG stage ${stage.id} paused after a child idle stall; isolated writer changes were not merged.`
@@ -1128,24 +1179,90 @@ function aggregateHandoff(items: Array<{ agent: string; text: string }>): string
     .join("\n");
 }
 
+interface RunChainOptions {
+  resume?: boolean;
+  initialPrevious?: string;
+}
+
+function runChain(
+  run: RunState,
+  steps: RunStepState[],
+  context: WorkerRunnerContext,
+  options: RunChainOptions = {},
+): Promise<void> {
+  return Effect.runPromise(runChainEffect(run, steps, context, options));
+}
+
+function runChainEffect(
+  run: RunState,
+  steps: RunStepState[],
+  context: WorkerRunnerContext,
+  options: RunChainOptions,
+): Effect.Effect<void, RunnerError> {
+  return Effect.gen(function* () {
+    let previous = options.initialPrevious ?? "";
+    for (const step of steps) {
+      if (options.resume && isUsableStepHandoff(step)) {
+        previous = aggregateHandoff([{ agent: step.agent, text: step.output?.handoff ?? step.output?.text ?? previous }]);
+        maybeAppendImplementationReviewRepair(run, step);
+        continue;
+      }
+      yield* checkAbortEffect(context.signal);
+      const output = yield* runStepEffect(step, context, previous, run);
+      previous = output.handoff ?? output.text;
+      maybeAppendImplementationReviewRepair(run, step);
+    }
+  }).pipe(Effect.withSpan("runner.mock.chain"));
+}
+
+function runParallel(
+  steps: RunStepState[],
+  context: WorkerRunnerContext,
+  previous: string | undefined,
+  run?: RunState,
+  span = "runner.mock.parallel",
+): Promise<AgentOutput[]> {
+  return Effect.runPromise(runParallelEffect(steps, context, previous, run, span));
+}
+
+function runParallelEffect(
+  steps: RunStepState[],
+  context: WorkerRunnerContext,
+  previous: string | undefined,
+  run: RunState | undefined,
+  span: string,
+): Effect.Effect<AgentOutput[], RunnerError> {
+  return Effect.forEach(
+    steps,
+    (step) => runStepEffect(step, context, previous, run),
+    { concurrency: "unbounded" },
+  ).pipe(Effect.withSpan(span));
+}
+
 async function runStep(step: RunStepState, context: WorkerRunnerContext, previous: string | undefined, run?: RunState): Promise<AgentOutput> {
-  step.status = "running";
-  step.startedAt = new Date().toISOString();
-  if (run) persistRun(run);
-  context.onUpdate?.(run ?? { ...createRunState({ kind: "bypass", agents: [], risk: "low", ambiguity: "low", needsMemory: false, needsArtifacts: false, reason: "update" }, context.cwd), steps: [step] });
-  await maybeMockDelay(context.signal);
-  throwIfAborted(context.signal);
-  const agent = context.agents.get(step.agent);
-  const model = context.modelOverrides?.[`${agent?.scope ?? "built-in"}/${step.agent}`] ?? context.modelOverrides?.[step.agent] ?? agent?.model;
-  step.model = model && model !== "inherit" ? model : "inherit";
-  const raw = buildMockOutput(step, context, previous, agent);
-  const output = parseAgentOutput(step.agent, raw);
-  step.output = output;
-  step.status = "complete";
-  step.endedAt = new Date().toISOString();
-  if (run) persistRun(run);
-  context.onUpdate?.(run ?? { ...createRunState({ kind: "bypass", agents: [], risk: "low", ambiguity: "low", needsMemory: false, needsArtifacts: false, reason: "update" }, context.cwd), steps: [step] });
-  return output;
+  return Effect.runPromise(runStepEffect(step, context, previous, run));
+}
+
+function runStepEffect(step: RunStepState, context: WorkerRunnerContext, previous: string | undefined, run?: RunState): Effect.Effect<AgentOutput, RunnerError> {
+  return Effect.gen(function* () {
+    step.status = "running";
+    step.startedAt = new Date().toISOString();
+    if (run) persistRun(run);
+    context.onUpdate?.(run ?? { ...createRunState({ kind: "bypass", agents: [], risk: "low", ambiguity: "low", needsMemory: false, needsArtifacts: false, reason: "update" }, context.cwd), steps: [step] });
+    yield* runnerTryPromise(() => maybeMockDelay(context.signal), step);
+    yield* checkAbortEffect(context.signal);
+    const agent = context.agents.get(step.agent);
+    const model = context.modelOverrides?.[`${agent?.scope ?? "built-in"}/${step.agent}`] ?? context.modelOverrides?.[step.agent] ?? agent?.model;
+    step.model = model && model !== "inherit" ? model : "inherit";
+    const raw = buildMockOutput(step, context, previous, agent);
+    const output = parseAgentOutput(step.agent, raw);
+    step.output = output;
+    step.status = "complete";
+    step.endedAt = new Date().toISOString();
+    if (run) persistRun(run);
+    context.onUpdate?.(run ?? { ...createRunState({ kind: "bypass", agents: [], risk: "low", ambiguity: "low", needsMemory: false, needsArtifacts: false, reason: "update" }, context.cwd), steps: [step] });
+    return output;
+  }).pipe(Effect.withSpan(`runner.mock.step.${step.agent}`));
 }
 
 function buildMockOutput(step: RunStepState, context: WorkerRunnerContext, previous: string | undefined, agent: AgentDefinition | undefined): string {
@@ -1459,9 +1576,34 @@ function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new Error("pi-chalin run stopped by user.");
 }
 
+function checkAbortEffect(signal?: AbortSignal): Effect.Effect<void, RunnerAbortError> {
+  return Effect.try({
+    try: () => throwIfAborted(signal),
+    catch: (error) => new RunnerAbortError(errorMessage(error)),
+  });
+}
+
+function runnerTryPromise<T>(tryPromise: () => Promise<T>, step?: RunStepState): Effect.Effect<T, RunnerError> {
+  return Effect.tryPromise({
+    try: tryPromise,
+    catch: (error) => runnerErrorFromUnknown(error, step),
+  });
+}
+
+function runnerErrorFromUnknown(error: unknown, step?: RunStepState): RunnerError {
+  if (isAbortError(error)) return new RunnerAbortError(errorMessage(error));
+  if (isBudgetExceededError(error, step)) return new BudgetExceededError(errorMessage(error));
+  return new StepFailedError(errorMessage(error));
+}
+
 function isAbortError(error: unknown): boolean {
   const message = errorMessage(error).toLowerCase();
   return message.includes("abort") || message.includes("stopped by user");
+}
+
+function isBudgetExceededError(error: unknown, step?: RunStepState): boolean {
+  const message = errorMessage(error).toLowerCase();
+  return step?.status === "budget-capped" || message.includes("budget cap") || message.includes("budget exceeded");
 }
 
 function errorMessage(error: unknown): string {

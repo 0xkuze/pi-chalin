@@ -1,9 +1,5 @@
+import { Context, Effect, Layer, Ref } from "effect";
 import type { RouteDecision, RunState } from "./schemas.ts";
-
-let lastRun: RunState | undefined;
-const liveStepSessions = new Map<string, LiveStepSessionRef>();
-let routeInvocations: ChalinRouteInvocation[] = [];
-let directCompletion: DirectCompletionState = freshDirectCompletionState();
 
 export type ChalinRouteOutcome = "dry-run" | "ask" | "block" | "failed" | "paused" | "complete";
 type DirectModeKind = "docs-only" | "lean-bounded-code-test" | "bounded-code-test" | "broken-test-triage" | "test-only" | "scaffold-greenfield" | "stateful-time" | "generic";
@@ -79,15 +75,103 @@ export interface LiveStepSessionRef {
   getMessages(): readonly unknown[];
 }
 
+interface RuntimeStateServiceShape {
+  readonly lastRun: Ref.Ref<RunState | undefined>;
+  readonly liveStepSessions: Ref.Ref<Map<string, LiveStepSessionRef>>;
+  readonly routeInvocations: Ref.Ref<ChalinRouteInvocation[]>;
+  readonly directCompletion: Ref.Ref<DirectCompletionState>;
+}
+
+class RuntimeStateService extends Context.Tag("pi-chalin/RuntimeState")<RuntimeStateService, RuntimeStateServiceShape>() {}
+
+const RuntimeStateLayer = Layer.effect(RuntimeStateService, Effect.gen(function* () {
+  return {
+    lastRun: yield* Ref.make<RunState | undefined>(undefined),
+    liveStepSessions: yield* Ref.make(new Map<string, LiveStepSessionRef>()),
+    routeInvocations: yield* Ref.make<ChalinRouteInvocation[]>([]),
+    directCompletion: yield* Ref.make(freshDirectCompletionState()),
+  };
+}));
+
+const runtimeState = Effect.runSync(Effect.gen(function* () {
+  return yield* RuntimeStateService;
+}).pipe(Effect.provide(RuntimeStateLayer)));
+
+const lastRunRef = runtimeState.lastRun;
+const liveStepSessions = refBackedMap(runtimeState.liveStepSessions);
+const routeInvocations = refBackedArray(runtimeState.routeInvocations);
+const directCompletion = refBackedObject(runtimeState.directCompletion);
+
+function getRef<T>(ref: Ref.Ref<T>): T {
+  return Effect.runSync(Ref.get(ref));
+}
+
+function setRef<T>(ref: Ref.Ref<T>, value: T): void {
+  Effect.runSync(Ref.set(ref, value));
+}
+
+function refBackedArray<T>(ref: Ref.Ref<T[]>): T[] {
+  return new Proxy([] as T[], {
+    get(_target, property) {
+      const value = Reflect.get(getRef(ref), property);
+      return typeof value === "function" ? value.bind(getRef(ref)) : value;
+    },
+    set(_target, property, value) {
+      const current = getRef(ref);
+      Reflect.set(current, property, value);
+      return true;
+    },
+    ownKeys() {
+      return Reflect.ownKeys(getRef(ref));
+    },
+    getOwnPropertyDescriptor(_target, property) {
+      return Reflect.getOwnPropertyDescriptor(getRef(ref), property);
+    },
+  });
+}
+
+function resetRefBackedArray<T>(array: T[]): void {
+  array.splice(0, array.length);
+}
+
+function refBackedMap<K, V>(ref: Ref.Ref<Map<K, V>>): Map<K, V> {
+  return new Proxy(new Map<K, V>(), {
+    get(_target, property) {
+      const value = Reflect.get(getRef(ref), property);
+      return typeof value === "function" ? value.bind(getRef(ref)) : value;
+    },
+  });
+}
+
+function refBackedObject<T extends object>(ref: Ref.Ref<T>): T {
+  return new Proxy({} as T, {
+    get(_target, property) {
+      return Reflect.get(getRef(ref), property);
+    },
+    set(_target, property, value) {
+      Reflect.set(getRef(ref), property, value);
+      return true;
+    },
+  });
+}
+
+function replaceRefBackedObject<T extends object>(target: T, next: T): void {
+  for (const key of Object.keys(target) as Array<keyof T>) {
+    delete target[key];
+  }
+  Object.assign(target, next);
+}
+
 export function setLatestRun(run: RunState | undefined): void {
-  lastRun = run;
+  setRef(lastRunRef, run);
 }
 
 export function getLatestRun(): RunState | undefined {
-  return lastRun;
+  return getRef(lastRunRef);
 }
 
 export function getActiveRun(): RunState | undefined {
+  const lastRun = getLatestRun();
   return lastRun?.status === "running" ? lastRun : undefined;
 }
 
@@ -106,8 +190,8 @@ export function clearLiveStepSession(runId: string, stepId: string, ref?: LiveSt
 }
 
 export function beginChalinTurn(options: { prompt?: string; cwd?: string } = {}): void {
-  routeInvocations = [];
-  directCompletion = freshDirectCompletionState();
+  resetRefBackedArray(routeInvocations);
+  replaceRefBackedObject(directCompletion, freshDirectCompletionState());
   directCompletion.cwd = options.cwd;
   directCompletion.directModeKind = classifyDirectModeKind(options.prompt ?? "");
   directCompletion.promptCodePaths = new Set(promptPathTokens(options.prompt ?? "").filter(isCodeLikePath).map(normalizeWorkflowPath));
@@ -522,10 +606,10 @@ export function getChalinRouteInvocations(): readonly ChalinRouteInvocation[] {
 }
 
 export function resetRuntimeState(): void {
-  lastRun = undefined;
+  setLatestRun(undefined);
   liveStepSessions.clear();
-  routeInvocations = [];
-  directCompletion = freshDirectCompletionState();
+  resetRefBackedArray(routeInvocations);
+  replaceRefBackedObject(directCompletion, freshDirectCompletionState());
 }
 
 function liveStepKey(runId: string, stepId: string): string {
