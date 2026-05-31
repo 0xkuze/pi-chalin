@@ -613,10 +613,11 @@ test("buildSdkPrompt injects compact memory context without bloating discovery",
   assert.match(prompt, /Preserve public compatibility/i);
   assert.match(prompt, /capture normalized config/i);
   assert.match(prompt, /caller-side object mutation/i);
-  assert.match(prompt, /internal test seams or runner-native fake timers/i);
+  assert.match(prompt, /internal test seams or runner-native fake time/i);
   assert.match(prompt, /without expanding public APIs/i);
-  assert.match(prompt, /global monkeypatches/i);
-  assert.match(prompt, /wall-clock sleeps/i);
+  assert.match(prompt, /Bun `setSystemTime`/i);
+  assert.match(prompt, /scoped Date\.now restore/i);
+  assert.match(prompt, /ad hoc sleeps/i);
   assert.match(prompt, /Code behavior changes update nearest tests/i);
   assert.match(prompt, /evidence-only tests/i);
   assert.match(prompt, /runner-discoverable cases/i);
@@ -699,6 +700,9 @@ test("buildSdkPrompt puts context-builder into handoff-first gap-read mode", () 
   assert.match(prompt, /Already Covered Evidence Paths/);
   assert.match(prompt, /src\/index\.ts/);
   assert.match(prompt, /primary evidence map/i);
+  assert.match(prompt, /Context handoff completeness/i);
+  assert.match(prompt, /follow imports, callers, tests, fixtures, config, docs, and adjacent patterns/i);
+  assert.match(prompt, /do not omit a domain-critical file\/source just to keep the handoff short/i);
 });
 
 test("buildSdkPrompt puts reviewer into sampled audit mode after handoff", () => {
@@ -727,6 +731,7 @@ test("buildSdkPrompt puts reviewer into sampled audit mode after handoff", () =>
 
   assert.match(prompt, /Handoff-first review/i);
   assert.match(prompt, /sample only the highest-risk/i);
+  assert.match(prompt, /re-read the exact covered file or region once/i);
   assert.match(prompt, /at most 5 gap reads/i);
   assert.match(prompt, /Already Covered Evidence Paths/);
   assert.match(prompt, /middleware\/auth\.js/);
