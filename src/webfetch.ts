@@ -1,6 +1,7 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { Effect, Schedule } from "effect";
 import { resolveChalinPaths, type ChalinPathsOptions } from "./paths.ts";
 
 const EXA_MCP_URL = "https://mcp.exa.ai/mcp?tools=web_search_exa,web_fetch_exa";
@@ -108,25 +109,28 @@ export async function fetchWebUrls(request: WebFetchUrlRequest): Promise<WebCont
 }
 
 export async function callExaMcp(toolName: "web_search_exa" | "web_fetch_exa", args: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    "Accept": "application/json, text/event-stream",
-  };
-  if (process.env.EXA_API_KEY) headers["x-api-key"] = process.env.EXA_API_KEY;
-  const response = await fetch(EXA_MCP_URL, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: toolName, arguments: args } }),
-    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(45_000)]) : AbortSignal.timeout(45_000),
-  });
-  if (!response.ok) throw new Error(`Exa MCP error ${response.status}: ${(await response.text()).slice(0, 300)}`);
-  const body = await response.text();
-  const parsed = parseMcpBody(body);
-  if (parsed.error) throw new Error(`Exa MCP error${parsed.error.code ? ` ${parsed.error.code}` : ""}: ${parsed.error.message ?? "Unknown error"}`);
-  const text = parsed.result?.content?.find((item) => item.type === "text" && item.text?.trim())?.text?.trim();
-  if (parsed.result?.isError) throw new Error(text || "Exa MCP returned an error.");
-  if (!text) throw new Error("Exa MCP returned empty content.");
-  return text;
+  const retryPolicy = Schedule.compose(Schedule.exponential("150 millis"), Schedule.recurs(2));
+  return Effect.runPromise(Effect.tryPromise(async () => {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "Accept": "application/json, text/event-stream",
+    };
+    if (process.env.EXA_API_KEY) headers["x-api-key"] = process.env.EXA_API_KEY;
+    const response = await fetch(EXA_MCP_URL, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: toolName, arguments: args } }),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(45_000)]) : AbortSignal.timeout(45_000),
+    });
+    if (!response.ok) throw new Error(`Exa MCP error ${response.status}: ${(await response.text()).slice(0, 300)}`);
+    const body = await response.text();
+    const parsed = parseMcpBody(body);
+    if (parsed.error) throw new Error(`Exa MCP error${parsed.error.code ? ` ${parsed.error.code}` : ""}: ${parsed.error.message ?? "Unknown error"}`);
+    const text = parsed.result?.content?.find((item) => item.type === "text" && item.text?.trim())?.text?.trim();
+    if (parsed.result?.isError) throw new Error(text || "Exa MCP returned an error.");
+    if (!text) throw new Error("Exa MCP returned empty content.");
+    return text;
+  }).pipe(Effect.retry(retryPolicy), Effect.withSpan(`webfetch.${toolName}`)));
 }
 
 export function formatWebBundle(bundle: WebContextBundle): string {

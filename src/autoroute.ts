@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Effect } from "effect";
 import { AgentCatalog } from "./agents.ts";
 import { loadEffectiveConfig } from "./config.ts";
 import { createConfiguredMemoryStore } from "./memory-provider.ts";
@@ -31,18 +32,14 @@ const BOUNDED_DIRECT_HIDDEN_TOOLS = new Set([...DIRECT_CHALIN_TOOL_NAMES, "grep"
 const GREENFIELD_DIRECT_HIDDEN_TOOLS = new Set([...DIRECT_CHALIN_TOOL_NAMES, "read", "grep", "find", "ls"]);
 const ROUTE_ONLY_TOOLS = new Set(["chalin_route"]);
 
+function runHookEffect<A>(span: string, run: () => A | Promise<A>): Promise<A> {
+  return Effect.runPromise(Effect.tryPromise({ try: async () => run(), catch: (error) => error }).pipe(Effect.withSpan(span)));
+}
+
 export function registerChalinAutoRouter(pi: ExtensionAPI): void {
-  pi.on("input", async (event) => {
-    if (event.source === "extension") return { action: "continue" };
-    const text = event.text.trim();
-    if (!text || text.startsWith("/") || text.startsWith("!")) return { action: "continue" };
+  pi.on("input", (event) => Effect.runPromise(inputGuardEffect(event)));
 
-    // Never consume the user prompt. The primary Pi agent stays in control and
-    // decides whether to call chalin_route as one of its normal tools.
-    return { action: "continue" };
-  });
-
-  pi.on("before_agent_start", async (event, ctx) => {
+  pi.on("before_agent_start", (event, ctx) => runHookEffect("autoroute.beforeAgentStart", async () => {
     restoreScopedToolSet(pi);
     beginChalinTurn({ prompt: typeof event.prompt === "string" ? event.prompt : undefined, cwd: ctx.cwd });
     const loaded = loadEffectiveConfig({ cwd: ctx.cwd });
@@ -104,7 +101,7 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
         display: false,
       },
     };
-  });
+  }));
 
   pi.on("context", (event) => {
     const criticalGuard = getDirectCriticalGuardContextMessage();
@@ -449,6 +446,22 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
     // Subagent execution is driven through the chalin_route tool and Pi's native
     // abort signal.
   });
+}
+
+function inputGuardEffect(event: { source?: string; text: string }): Effect.Effect<{ action: "continue" }> {
+  return Effect.gen(function* () {
+    if (event.source === "extension") return { action: "continue" as const };
+    const text = event.text.trim();
+    yield* Effect.filterOrFail(
+      Effect.succeed(text),
+      (value) => Boolean(value) && !value.startsWith("/") && !value.startsWith("!"),
+      () => new Error("pi-chalin input guard skipped non-user prompt text."),
+    ).pipe(Effect.catchAll(() => Effect.succeed(text)));
+
+    // Never consume the user prompt. The primary Pi agent stays in control and
+    // decides whether to call chalin_route as one of its normal tools.
+    return { action: "continue" as const };
+  }).pipe(Effect.withSpan("autoroute.inputGuard"));
 }
 
 export function resetAutorouteToolStateForTests(): void {

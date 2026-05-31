@@ -76,6 +76,7 @@
     }
   },
   "dependencies": {
+    "effect": "^3.21.2",
     "sql.js-fts5": "^1.4.0",
     "typebox": "^1.1.38"
   },

@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Context, Effect, Layer } from "effect";
 import { registerChalinAutoRouter } from "./autoroute.ts";
 import { hideLegacyTopLevelChildSessions } from "./child-sessions.ts";
 import { registerChalinCommands } from "./commands.ts";
@@ -8,7 +9,24 @@ import { setChalinStatus } from "./ui-status.ts";
 const PI_CHALIN_CHILD_ENV = "PI_CHALIN_CHILD";
 const PI_CHALIN_DISABLED_ENV = "PI_CHALIN_DISABLED";
 
+interface ApiServiceShape {
+  readonly register: (pi: ExtensionAPI) => Effect.Effect<void>;
+}
+
+class ApiService extends Context.Tag("pi-chalin/Api")<ApiService, ApiServiceShape>() {}
+
+const ApiLayer = Layer.succeed(ApiService, {
+  register: (pi) => Effect.sync(() => registerPiChalinUnsafe(pi)),
+});
+
 export default function registerPiChalin(pi: ExtensionAPI): void {
+  Effect.runSync(Effect.gen(function* () {
+    const api = yield* ApiService;
+    yield* api.register(pi);
+  }).pipe(Effect.provide(ApiLayer), Effect.withSpan("api.register")));
+}
+
+function registerPiChalinUnsafe(pi: ExtensionAPI): void {
   if (process.env[PI_CHALIN_CHILD_ENV] === "1" || process.env[PI_CHALIN_DISABLED_ENV] === "1") return;
 
   registerChalinCommands(pi);
