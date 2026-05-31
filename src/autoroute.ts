@@ -29,6 +29,7 @@ const DIRECT_CHALIN_TOOL_NAMES = [
 ];
 const BOUNDED_DIRECT_HIDDEN_TOOLS = new Set([...DIRECT_CHALIN_TOOL_NAMES, "grep", "find", "ls"]);
 const GREENFIELD_DIRECT_HIDDEN_TOOLS = new Set([...DIRECT_CHALIN_TOOL_NAMES, "read", "grep", "find", "ls"]);
+const ROUTE_REQUIRED_HIDDEN_TOOLS = new Set(DIRECT_CHALIN_TOOL_NAMES.filter((name) => name !== "chalin_route"));
 
 export function registerChalinAutoRouter(pi: ExtensionAPI): void {
   pi.on("input", async (event) => {
@@ -49,8 +50,11 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
     const promptText = typeof event.prompt === "string" ? event.prompt : "";
     const resumableRun = loadResumableRunState({ cwd: ctx.cwd, recoverStale: false });
     const resumeContext = resumableRun ? compactResumeCandidateMessage(resumableRun) : undefined;
-    const hiddenDirectTools = hiddenDirectToolsForPrompt(promptText, Boolean(resumeContext));
-    if (hiddenDirectTools) {
+    const forceRouteFirst = shouldForceRouteFirst(promptText, Boolean(resumeContext));
+    const hiddenDirectTools = forceRouteFirst ? undefined : hiddenDirectToolsForPrompt(promptText, Boolean(resumeContext));
+    if (forceRouteFirst) {
+      applyDirectToolScope(pi, ROUTE_REQUIRED_HIDDEN_TOOLS);
+    } else if (hiddenDirectTools) {
       applyDirectToolScope(pi, hiddenDirectTools);
     }
     const skipCompactPrompt = shouldSkipCompactPathPrompt(promptText, Boolean(resumeContext));
@@ -86,7 +90,7 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
           "pi-chalin preflight: if this is branch/project analysis, current diff/PR/branch analysis, project/service structure with entrypoints or testing map, architecture/planning, broad/project-wide review, project-wide refactor strategy, complex/risky multi-file implementation, auth/security/token/session behavior with tests and no explicit source path, stateful parser/scanner/tokenizer work with broad grammar/ownership uncertainty, or independent option comparison, call chalin_route as the first tool unless the user explicitly asks for direct/native/no-subagent work. For explicit memory recall/remembrance or memory inventory/counts, call chalin_memory_search as the first tool; use mode=list for inventory/count questions. Bounded docs-only artifacts, bounded read-only mini-project reviews, bounded scaffolding, named-file bugfixes, named-file refactors, and simple implementation with explicit acceptance criteria should stay direct unless evidence shows state/risk beyond native work.",
           "Direct exception: bounded read-only mini-project reviews that explicitly forbid file changes stay native even when they mention risk/security/auth boundaries. Gather bounded evidence and cite concrete paths; route only if the prompt also asks for deep/project-wide/exhaustive analysis or evidence proves the review is not actually bounded.",
           "Bounded read-only auth/security review: stay native when the prompt asks to review/analyze and not edit. Read package/manifest plus obvious auth/session/server/route files once; avoid repeated ls/find after source hits. Final findings-first and concise: code-proven core risks plus direct secondary risks only, severity, exact path/function evidence, exploit or bypass, impact, and remediation. No code changes, no tests, no broad project scan, no tutorial.",
-          "Docs/no-code with one explicit docs artifact starts native: gather a bounded evidence set, update only that artifact, read it back, and answer. Evidence lock: docs may only claim concepts shown by prompt/source/test evidence; mark missing surfaces as searched/not-found instead of inventing fields or states. Completed docs must not contain literal TODO/TBD/WIP/placeholder tokens, even when describing the previous artifact state; omit that history or say previous stub without placeholder words. Escalate to chalin_route only after concrete evidence shows the artifact needs broad/unbounded synthesis that would pressure parent context. Architecture/refactor docs need a current→target responsibility/ownership map and evidence-derived validation, not a generic code-edit checklist. Deep architecture docs also need a problem taxonomy with evidence, data-flow/coupling map, target ownership/layers, staged migration with exit criteria, risk register with severity and mitigation, rollback strategy, phase checklist, and out-of-scope boundaries; future abstractions are useful only when clearly marked future or out-of-scope. Operational runbooks need evidenced current command/source state, concrete steps, test/typecheck commands only when evidenced, failure-mode diagnosis, isolated reproduction or smoke check, rollback options with VCS caveats, and unresolved gaps separated from bugs. Final Verification is the updated docs readback; searches/grep are Notes.",
+          "Docs/no-code with one explicit docs artifact starts native only when the requested artifact is bounded/local. Deep architecture, migration, cross-language/runtime, dependency-map, ownership/responsibility, staged-plan, or project-wide refactor docs are routed work even when the mutation target is one docs file: call chalin_route first and have the routed workflow update only that artifact. Prefer scout -> planner -> worker for routed docs artifacts; add reviewer only when the user explicitly asks for independent review or the scout exposes unresolved safety risk. Evidence lock: docs may only claim concepts shown by prompt/source/test evidence; mark missing surfaces as searched/not-found instead of inventing fields or states. Completed docs must not contain literal TODO/TBD/WIP/placeholder tokens, even when describing the previous artifact state; omit that history or say previous stub without placeholder words. Architecture/refactor docs need a current→target responsibility/ownership map and evidence-derived validation, not a generic code-edit checklist. Deep architecture docs also need a problem taxonomy with evidence, data-flow/coupling map, target ownership/layers, staged migration with exit criteria, risk register with severity and mitigation, rollback strategy, phase checklist, and out-of-scope boundaries; future abstractions are useful only when clearly marked future or out-of-scope. Operational runbooks need evidenced current command/source state, concrete steps, test/typecheck commands only when evidenced, failure-mode diagnosis, isolated reproduction or smoke check, rollback options with VCS caveats, and unresolved gaps separated from bugs. Final Verification is the updated docs readback; searches/grep are Notes.",
           "For explicit small bugfix/test requests with named files, inspect the target files once, edit promptly, and verify. Do not route or dry-run unless the change is broad, destructive, a security-sensitive mutation, or ambiguous.",
           "Also call chalin_route for risky surgical/long-file edits or stateful grammar/scanner changes only after a cheap target read shows broad grammar coupling, ambiguous transition ownership, unsafe surgery, or repeated local verification failure; use scout → planner → worker → reviewer so the edit stays targeted and verified.",
           "If the user asks to compare independent approaches/options, choose chalin_route with parallel planners/reviewers and synthesize the recommendation afterward.",
@@ -565,6 +569,13 @@ function hiddenDirectToolsForPrompt(prompt: string, hasResumeContext: boolean): 
   return undefined;
 }
 
+function shouldForceRouteFirst(prompt: string, hasResumeContext: boolean): boolean {
+  if (hasResumeContext) return false;
+  if (/\b(direct|native|sin subagentes|sin subagents|no-subagent|no subagent|sin route|no route)\b/i.test(prompt)) return false;
+  const paths = promptPathMentions(prompt);
+  return paths.some(isDocsMarkdownPath) && promptLooksArchitectureDocsArtifact(prompt);
+}
+
 function shouldUseLeanDirectToolScope(prompt: string, hasResumeContext: boolean): boolean {
   if (hasResumeContext || prompt.length > 700) return false;
   const paths = promptPathMentions(prompt).filter(looksLikeSourceOrTestPath);
@@ -721,11 +732,11 @@ function compactScaffoldPathSteeringMessage(pathContract: string, hasUI?: boolea
 
 function compactArchitectureDocsSteeringMessage(pathContract: string, hasUI?: boolean, bareSurfaceContract?: string): string {
   return [
-    "pi-chalin compact docs-artifact preflight: use LLM judgment for intent and risk; paths are structural.",
+    "pi-chalin compact docs-artifact preflight: route broad architecture docs; paths are structural.",
     hasUI ? undefined : pathContract,
     hasUI ? undefined : bareSurfaceContract,
-    "Docs/no-code architecture compact: write the requested docs artifact after one bounded evidence pass. First read the requested artifact, package/build/test script if present, and one concrete source surface per named responsibility. If prompt names bare filenames or public symbols without paths, do not invent path candidates; use a raw inventory or one targeted find/rg by exact basename or symbol, then read the highest-confidence result.",
-    "Mandatory docs mutation: start native. Escalate to `chalin_route` only after concrete evidence proves broad synthesis, multiple ownership surfaces, or parent-context pressure; the routed workflow still updates only the requested docs artifact.",
+    "Route-required architecture docs: if the prompt asks for deep/broad architecture, migration, cross-language/runtime, dependency-map, ownership/responsibility, staged-plan, or multi-surface refactor docs, call `chalin_route` as the first tool with scout -> planner -> worker. Add reviewer only when the user explicitly asks for independent review or scout/planner evidence exposes unresolved safety risk; the worker's docs readback is the default validation. `chalin_project_discovery` and `chalin_project_snapshot` are not substitutes for route. The routed workflow still updates only the requested docs artifact. Do not start native just because the mutation target is one docs file.",
+    "Native docs mode is only for bounded/local docs artifacts. If staying native, write the requested docs artifact after one bounded evidence pass: first read the requested artifact, package/build/test script if present, and one concrete source surface per named responsibility. If prompt names bare filenames or public symbols without paths, do not invent path candidates; use a raw inventory or one targeted find/rg by exact basename or symbol, then read the highest-confidence result.",
     "Architecture/refactor docs must include current->target responsibility/ownership maps and evidence-derived validation when requested. For deep architecture docs, add problem taxonomy with evidence, data-flow/coupling map, ownership/coupling-by-responsibility table, design decision matrix with options/recommendation, dependency delta to add/remove includes/imports/modules, stage-0 golden-test capture before behavior changes, reverse-dependency check, target ownership/layers, staged migration with exit criteria, risk register with severity and mitigation, rollback strategy, phase checklist, and out-of-scope boundaries.",
     "Cross-language/runtime plans: do not pass raw language `bool` or layout-sensitive types across FFI without local ABI evidence. Prefer ABI-stable fixed-width integers or bitfields (`u8`, `c_uint`, `u32 flags`) at the boundary, convert inside safe wrappers, keep old exported symbols as compatibility wrappers when changing signatures, and name explicit ABI/build/link validation plus rollback.",
     "Evidence lock: derive the plan from read paths only; mark future abstractions as future/out-of-scope instead of slipping them into the immediate plan. Do not run wildcard `**/*.h`, `**/*.cpp`, docs, tests, or build-file searches just to inventory absence; mention gaps only when a targeted search was needed. Do not invent commands, owners, timestamps, versions, test paths, code-change diffs, or literal TODO/TBD/WIP/placeholder tokens even when describing the old artifact.",
@@ -797,13 +808,13 @@ function promptLooksScaffoldPathContract(prompt: string): boolean {
 }
 
 function promptLooksOperationalDocsArtifact(prompt: string): boolean {
-  if (/\b(architecture|arquitectura|refactor|refactoriza|migration|migraci[oó]n|deep|profund|mapa de dependencias|dependency map|plan por etapas|staged plan)\b/i.test(prompt)) return false;
+  if (/\b(architecture|arquitectura|refactor|refactoriza|migration|migraci[oó]n|deep|profund|mapa de dependencias|dependency map|plan por etapas|staged plan|cross[- ]?language|multi[- ]?language|cross[- ]?runtime|multi[- ]?runtime|runtime|ffi|ownership|responsibility|responsabilidad|owner|propietario)\b/i.test(prompt)) return false;
   return /\b(runbook|rollback|diagn[oó]stic|diagnos|diagnosticar|diagnose|troubleshoot|how to run|c[oó]mo ejecutar|ejecutar tests?|run tests?|smoke|operational|operativo)\b/i.test(prompt)
     && /\b(actualiza|update|docs?|documentation|runbook|sin c[oó]digo|no code|no cambies c[oó]digo)\b/i.test(prompt);
 }
 
 function promptLooksArchitectureDocsArtifact(prompt: string): boolean {
-  return /\b(architecture|arquitectura|refactor|refactoriza|migration|migraci[oó]n|deep|profund|design|dise[ñn]o|dependency map|mapa de dependencias|ownership|responsibility|responsabilidad|plan por etapas|staged plan|layers?|capas)\b/i.test(prompt)
+  return /\b(architecture|arquitectura|refactor|refactoriza|migration|migraci[oó]n|deep|profund|design|dise[ñn]o|dependency map|mapa de dependencias|ownership|responsibility|responsabilidad|plan por etapas|staged plan|layers?|capas|cross[- ]?language|multi[- ]?language|cross[- ]?runtime|multi[- ]?runtime|runtime|ffi|owner|propietario)\b/i.test(prompt)
     && /\b(actualiza|update|docs?|documentation|sin c[oó]digo|no code|no cambies c[oó]digo|no implementes c[oó]digo)\b/i.test(prompt);
 }
 
