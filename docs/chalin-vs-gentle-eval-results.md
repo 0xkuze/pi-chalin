@@ -2,7 +2,7 @@
 
 Fecha de corrida: 2026-05-31  
 Fuente principal preservada: `.pi-chalin/evals/workflow-quality-2026-05-31T05-33-05-292Z-sdk-12-cases-chalin-gentle-r1-57932-cd21cb37.json`  
-Log `.jsonl` original: `evals/results/workflow-quality-final-12-post-empty-segment-rule-zai-glm51-r1.jsonl`  
+Log `.jsonl` original: `evals/results/workflow-quality-final-12-post-empty-segment-rule-zai-glm51-r1.jsonl` (borrado despues del snapshot)
 Modo: `sdk`  
 Modelo de ejecucion: `zai/glm-5.1`  
 Judge: `zai/glm-5.1`  
@@ -22,7 +22,28 @@ Evidencia:
 
 La suite que valida decision/topologia de `chalin_route` existe separada: `evals/orchestration.eval.ts`. El ultimo reporte local preservado de esa familia, `.pi-chalin/evals/orchestration-2026-05-27T03-44-14-013Z.json`, paso `19/19` con `13` casos esperados usando `chalin_route` y `6` directos. Esa suite valida routing/topologia, pero no es el mismo blind judge de output contra Gentle.
 
-Conclusion honesta: estos resultados prueban que Chalin direct-mode fue superior a Gentle full en esta matriz final. No prueban por si solos que `chalin_route` sea superior a Gentle `pi-subagents`. Para esa afirmacion hace falta una matriz route-required especifica: mismas tareas, Chalin obligado/esperado a usar `chalin_route`, Gentle con `subagent`, y judge blind mirando output/codigo/validacion.
+Conclusion honesta: estos resultados prueban que Chalin direct-mode fue superior a Gentle full en esta matriz final. No prueban por si solos que `chalin_route` sea superior a Gentle `pi-subagents`.
+
+## Seguimiento routed
+
+Se agrego un preset route-required: `bun run eval:workflow:routed`.
+
+Que valida ahora:
+
+- Chalin debe llamar `chalin_route` en casos complejos de arquitectura/docs.
+- Gentle debe llamar `subagent` cuando corre con el companion bundle.
+- El gate falla si cualquiera de los dos resuelve directo en esos casos.
+- El evaluador acepta `Final answer material` de `chalin_route` como respuesta efectiva, aunque el parent no escriba una segunda respuesta.
+
+Smoke real en `complex-bun-zig-runtime-plan`:
+
+| Corrida | Resultado |
+| --- | --- |
+| Primer routed smoke | Chalin `chalin_route=0`; Gentle `subagent=0`; ambos fallaron el gate. |
+| Despues del route-required scope/topologia docs | Chalin `chalin_route=1`, trace `100`, tokens `166,370`, duracion `267,137ms`; el artefacto pasa con scorer corregido (`score=84`) pero excede presupuesto de tiempo. |
+| Gentle en las corridas routed | Gentle siguio con `subagent=0`; no hay evidencia todavia de Gentle full usando `pi-subagents` en esta matriz. |
+
+Conclusion honesta actualizada: Chalin ya entra por `chalin_route` en el caso routed probado y produce output correcto, pero el modo subagentes es bastante mas lento/caro que direct-mode en ese caso. Gentle full no activo `subagent` en los routed smoke runs observados, asi que todavia no hay una comparacion blind completa de Chalin-route vs Gentle-subagent. Lo correcto es reportar direct-mode como ganado y routed-mode como instrumentado/con Chalin funcionando en smoke, pero pendiente de una matriz completa con Gentle subagents efectivamente activos.
 
 ## Resultado ejecutivo
 
@@ -69,5 +90,5 @@ Lectura simple: en esta corrida final, Chalin uso 83.2% menos tokens, costo 83.2
 - La comparacion fue contra Gentle con companion bundle, no contra una instancia contaminada con extensiones de Chalin.
 - En esta corrida Chalin no uso `chalin_route` ni fan-out de subagentes; resolvio por caminos directos/native. Gentle tampoco uso `subagent` en esta matriz. Eso explica buena parte del ahorro de tokens y limita el alcance de la conclusion.
 - El punto critico del judge actualizado es correcto: en tareas de implementacion, no basta con una explicacion bonita. El codigo, los tests, la validacion ejecutable y los hidden checks pesan por encima del texto.
-- Para comparar harness completo falta una suite nueva o extendida que fuerce/espere orquestacion en tareas amplias y compare `chalin_route` contra Gentle `subagent` con blind judge.
+- Para comparar harness completo ya existe el preset route-required, pero falta una matriz completa donde Gentle efectivamente use `subagent`; los smoke runs actuales muestran `subagent=0`.
 - Los `.jsonl` se borran despues de este snapshot; el reporte JSON principal queda preservado en `.pi-chalin/evals`.
