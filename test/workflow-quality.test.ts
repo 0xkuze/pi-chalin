@@ -4,8 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { setDefaultTimeout, test } from "bun:test";
 import { WORKFLOW_ORACLE_DIR, createWorkflowFixture, getWorkflowEvalCase, listWorkflowCommunityCases, listWorkflowComplexCases, listWorkflowEvalCases, listWorkflowHoldoutCases, selectWorkflowPrompt } from "../evals/workflow-cases.ts";
-import { resolveWorkflowShardArgs } from "../evals/workflow-sharded.eval.ts";
-import { assertSdkRunBudget, auditWorkflowProductionFastPaths, auditWorkflowTraceForCheating, buildWorkflowComparativeJudgePrompt, buildWorkflowJudgePrompt, collectWorkflowEvidence, detectWorkflowInfrastructureFailure, detectWorkflowVerification, effectiveWorkflowFinalText, evaluateWorkflowRegressionGates, extractFinalText, extractTokenTotal, extractWorkflowUsage, observeTerminalAssistantAnswer, parseJsonObjectFromText, resolveCaseIds, resolveComparativeJudgeMode, resolveGentlePiRoot, resolveVariants, resolveWorkflowArgs, resolveWorkflowIdleTimeoutMs, resolveWorkflowInfraRetries, resolveWorkflowRunCount, resolveWorkflowThinking, resolveWorkflowTimeoutMs, shouldRequireChalinRoute, shouldRetainWorkflowFixture, shouldRunWorkflowJudge, shouldStoreFullWorkflowOutput, summarizeComparison, summarizeWorkflowFailures, toolsForWorkflowVariant, workflowDiagnostics, workflowRegressionGatesEnabled, workflowReportFilename, writeWorkflowReport, DEFAULT_WORKFLOW_IDLE_TIMEOUT_MS, MAX_WORKFLOW_RUNS, MAX_WORKFLOW_TIMEOUT_MS } from "../evals/workflow-quality.eval.ts";
+import { buildWorkflowShardChildArgs, resolveWorkflowShardArgs } from "../evals/workflow-sharded.eval.ts";
+import { appendWorkflowTail, assertSdkRunBudget, auditWorkflowProductionFastPaths, auditWorkflowTraceForCheating, buildWorkflowComparativeJudgeInfrastructureSkip, buildWorkflowComparativeJudgePrompt, buildWorkflowContentOnlyComparativeJudgePrompt, buildWorkflowJudgePrompt, collectWorkflowEvidence, detectWorkflowInfrastructureFailure, detectWorkflowVerification, effectiveWorkflowFinalText, enforceWorkflowImplementationComparativeWinner, evaluateWorkflowRegressionGates, extractFinalText, extractTokenTotal, extractWorkflowUsage, observeTerminalAssistantAnswer, parseJsonObjectFromText, resolveCaseIds, resolveComparativeJudgeMode, resolveGentleCompanionRoot, resolveGentlePiRoot, resolveVariants, resolveWorkflowArgs, resolveWorkflowIdleTimeoutMs, resolveWorkflowInfraRetries, resolveWorkflowOutputStoragePolicy, resolveWorkflowRunCount, resolveWorkflowThinking, resolveWorkflowTimeoutMs, shouldRequireChalinRoute, shouldRetainWorkflowFixture, shouldRetryWorkflowRun, shouldRunWorkflowJudge, shouldStoreFullWorkflowOutput, summarizeComparison, summarizeWorkflowBlindJudgeStability, summarizeWorkflowFailures, toolsForWorkflowVariant, workflowAgentHistory, workflowDiagnostics, workflowFixtureFingerprint, workflowPromptVariantIndexForRun, workflowRegressionGatesEnabled, workflowReportFilename, workflowToolHistory, writeWorkflowReport, DEFAULT_WORKFLOW_IDLE_TIMEOUT_MS, MAX_WORKFLOW_RUNS, MAX_WORKFLOW_TIMEOUT_MS } from "../evals/workflow-quality.eval.ts";
 import { scoreWorkflowWorkspace } from "../evals/workflow-quality-lib.ts";
 
 setDefaultTimeout(60_000);
@@ -115,6 +115,36 @@ test("workflow prompt variants rotate deterministically by run index", () => {
   }
 });
 
+test("workflow prompt variant selection is harness-invariant for the same case run", () => {
+  const evalCase = getWorkflowEvalCase("holdout-scaffold-config-loader");
+  const variants = resolveVariants("all-harnesses");
+  const runIndex = 2;
+  const selected = variants.map((variant) => ({
+    variant,
+    prompt: selectWorkflowPrompt(evalCase, workflowPromptVariantIndexForRun(runIndex)),
+  }));
+
+  assert.deepEqual(selected.map((item) => item.prompt.index), [1, 1, 1]);
+  assert.equal(new Set(selected.map((item) => item.prompt.prompt)).size, 1);
+  assert.equal(new Set(selected.map((item) => item.prompt.count)).size, 1);
+});
+
+test("workflow fixture fingerprints verify identical initial projects across harnesses", () => {
+  const seed = createWorkflowFixture("holdout-small-feature-sort-tasks", { promptVariantIndex: 1 });
+  const clone = fs.mkdtempSync(path.join(os.tmpdir(), "pi-chalin-fixture-clone-"));
+  try {
+    fs.rmSync(clone, { recursive: true, force: true });
+    fs.cpSync(seed.cwd, clone, { recursive: true, verbatimSymlinks: true });
+    assert.equal(workflowFixtureFingerprint(clone), workflowFixtureFingerprint(seed.cwd));
+
+    fs.appendFileSync(path.join(clone, "src", "sortTasks.ts"), "\n// drift\n");
+    assert.notEqual(workflowFixtureFingerprint(clone), workflowFixtureFingerprint(seed.cwd));
+  } finally {
+    fs.rmSync(seed.cwd, { recursive: true, force: true });
+    fs.rmSync(clone, { recursive: true, force: true });
+  }
+});
+
 test("workflow fixtures start with intentionally incomplete work", () => {
   for (const item of listWorkflowEvalCases({ includeHoldout: true, includeCommunity: true, includeComplex: true })) {
     const fixture = createWorkflowFixture(item.id);
@@ -169,6 +199,48 @@ test("workflow scorer passes a completed small-feature workspace", () => {
   assert.ok(report.metrics.semantic.exportChecksPassed >= 1);
   assert.equal(report.metrics.validation.status, "pass");
   assert.match(report.metrics.validation.hiddenValidation ?? "", /Hidden behavior tests/);
+  fs.rmSync(fixture.cwd, { recursive: true, force: true });
+});
+
+test("workflow scorer ignores Pi runtime metadata directories for scope", () => {
+  const fixture = createWorkflowFixture("holdout-small-feature-sort-tasks");
+  fs.writeFileSync(path.join(fixture.cwd, "src/sortTasks.ts"), `export type Priority = "low" | "medium" | "high";
+export interface Task { id: string; title: string; priority: Priority; dueDate: string }
+const rank: Record<Priority, number> = { high: 0, medium: 1, low: 2 };
+export function sortTasks(tasks: Task[]): Task[] {
+  return [...tasks].sort((a, b) => rank[a.priority] - rank[b.priority] || a.dueDate.localeCompare(b.dueDate));
+}
+`);
+  fs.writeFileSync(path.join(fixture.cwd, "test/sortTasks.test.ts"), `import { describe, it } from "bun:test";
+import assert from "node:assert/strict";
+import { sortTasks, type Task } from "../src/sortTasks.ts";
+const task = (id: string, priority: Task["priority"], dueDate: string): Task => ({ id, title: id, priority, dueDate });
+describe("sortTasks", () => {
+  it("sorts by priority then date", () => {
+    assert.deepEqual(sortTasks([task("low", "low", "2025-01-01"), task("high-b", "high", "2025-02-01"), task("high-a", "high", "2025-01-01")]).map((item) => item.id), ["high-a", "high-b", "low"]);
+  });
+  it("does not mutate and keeps stable ties", () => {
+    const input = [task("a", "medium", "2025-01-01"), task("b", "medium", "2025-01-01")];
+    const output = sortTasks(input);
+    assert.deepEqual(output.map((item) => item.id), ["a", "b"]);
+    assert.notEqual(output, input);
+    assert.deepEqual(input.map((item) => item.id), ["a", "b"]);
+  });
+});
+`);
+  for (const file of [
+    ".pi/settings.json",
+    ".pi-lens/cache/review-graph.json",
+    ".pi-lens/cache/turn-end-findings.json",
+  ]) {
+    fs.mkdirSync(path.dirname(path.join(fixture.cwd, file)), { recursive: true });
+    fs.writeFileSync(path.join(fixture.cwd, file), "{}\n");
+  }
+
+  const report = scoreWorkflowWorkspace(fixture.cwd, fixture.case, { finalText: "Actualicé src/sortTasks.ts y test/sortTasks.test.ts. Verificación: bun test passed.", durationMs: 1000 });
+  assert.equal(report.pass, true);
+  assert.equal(report.warnings.some((issue) => issue.id === "scope-too-wide"), false);
+  assert.equal(report.metrics.projectFiles, 4);
   fs.rmSync(fixture.cwd, { recursive: true, force: true });
 });
 
@@ -308,9 +380,9 @@ test("workflow scorer rejects no-op implementation", () => {
   fs.rmSync(fixture.cwd, { recursive: true, force: true });
 });
 
-test("workflow scorer does not flag legitimate rate limiter test expectations as no-op", () => {
+test("workflow scorer accepts helper-based integer validation without requiring Number.isInteger literal", () => {
   const fixture = createWorkflowFixture("large-feature-rate-limit");
-  fs.writeFileSync(path.join(fixture.cwd, "src/rateLimit.ts"), `export interface RateLimitResult { allowed: boolean; remaining: number; retryAfterMs: number }\nexport function createRateLimiter(options: { limit: number; windowMs: number; now?: () => number }) {\n  if (!Number.isInteger(options.limit) || options.limit < 1) throw new RangeError("limit must be a positive integer");\n  if (!Number.isInteger(options.windowMs) || options.windowMs < 1) throw new RangeError("windowMs must be a positive integer");\n  const now = options.now ?? Date.now;\n  const windows = new Map<string, { start: number; count: number }>();\n  return { check(key: string): RateLimitResult {\n    const current = now();\n    const state = windows.get(key);\n    if (!state || current - state.start >= options.windowMs) { windows.set(key, { start: current, count: 1 }); return { allowed: true, remaining: Math.max(0, options.limit - 1), retryAfterMs: 0 }; }\n    if (state.count < options.limit) { state.count += 1; return { allowed: true, remaining: Math.max(0, options.limit - state.count), retryAfterMs: 0 }; }\n    return { allowed: false, remaining: 0, retryAfterMs: Math.max(0, options.windowMs - (current - state.start)) };\n  }};\n}\n`);
+  fs.writeFileSync(path.join(fixture.cwd, "src/rateLimit.ts"), `export interface RateLimitResult { allowed: boolean; remaining: number; retryAfterMs: number }\nfunction assertPositiveInteger(value: number, name: string) {\n  if (!Number.isFinite(value) || value !== Math.floor(value) || value < 1) throw new RangeError(name + " must be a positive integer");\n}\nexport function createRateLimiter(options: { limit: number; windowMs: number; now?: () => number }) {\n  const { limit, windowMs, now = Date.now } = options;\n  assertPositiveInteger(limit, "limit");\n  assertPositiveInteger(windowMs, "windowMs");\n  const windows = new Map<string, { start: number; count: number }>();\n  return { check(key: string): RateLimitResult {\n    const current = now();\n    const state = windows.get(key);\n    if (!state || current - state.start >= windowMs) { windows.set(key, { start: current, count: 1 }); return { allowed: true, remaining: Math.max(0, limit - 1), retryAfterMs: 0 }; }\n    if (state.count < limit) { state.count += 1; return { allowed: true, remaining: Math.max(0, limit - state.count), retryAfterMs: 0 }; }\n    return { allowed: false, remaining: 0, retryAfterMs: Math.max(0, windowMs - (current - state.start)) };\n  }};\n}\n`);
   fs.writeFileSync(path.join(fixture.cwd, "test/rateLimit.test.ts"), `import { describe, it } from "bun:test";\nimport assert from "node:assert/strict";\nimport { createRateLimiter } from "../src/rateLimit.ts";\ndescribe("createRateLimiter", () => {\n  it("covers allow block and reset", () => {\n    let current = 0;\n    const limiter = createRateLimiter({ limit: 2, windowMs: 1000, now: () => current });\n    assert.deepEqual(limiter.check("u"), { allowed: true, remaining: 1, retryAfterMs: 0 });\n    assert.equal(limiter.check("u").allowed, true);\n    assert.equal(limiter.check("u").allowed, false);\n    current = 1000;\n    assert.equal(limiter.check("u").allowed, true);\n  });\n  it("rejects invalid fractional integer options", () => {\n    assert.throws(() => createRateLimiter({ limit: 1.5, windowMs: 1000 }));\n    assert.throws(() => createRateLimiter({ limit: 1, windowMs: 2.5 }));\n  });\n});\n`);
   const report = scoreWorkflowWorkspace(fixture.cwd, fixture.case, {
     finalText: "Changed src/rateLimit.ts and test/rateLimit.test.ts. Verification: bun test passed. No external dependencies.",
@@ -507,6 +579,45 @@ test("defaults and validates", () => {
     validateTests: true,
   });
   assert.equal(report.pass, true);
+  fs.rmSync(fixture.cwd, { recursive: true, force: true });
+});
+
+test("workflow hidden config validation rejects parseInt prefix parsing", () => {
+  const fixture = createWorkflowFixture("holdout-scaffold-config-loader");
+  fs.mkdirSync(path.join(fixture.cwd, "src"), { recursive: true });
+  fs.mkdirSync(path.join(fixture.cwd, "test"), { recursive: true });
+  fs.writeFileSync(path.join(fixture.cwd, "package.json"), JSON.stringify({
+    name: "mini-config-lib",
+    type: "module",
+    scripts: { test: "bun test" },
+  }, null, 2));
+  fs.writeFileSync(path.join(fixture.cwd, "src/config.ts"), `export type NodeEnv = "development" | "test" | "production";
+export function loadConfig(env: Record<string, string | undefined>) {
+  const nodeEnv = env.NODE_ENV ?? "development";
+  if (!["development", "test", "production"].includes(nodeEnv)) throw new RangeError("Invalid NODE_ENV");
+  const port = env.PORT === undefined ? 3000 : parseInt(env.PORT, 10);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new RangeError("Invalid PORT");
+  return { port, nodeEnv };
+}
+`);
+  fs.writeFileSync(path.join(fixture.cwd, "test/config.test.ts"), `import { test } from "bun:test";
+import assert from "node:assert/strict";
+import { loadConfig } from "../src/config.ts";
+test("defaults and validates obvious bad values", () => {
+  assert.deepEqual(loadConfig({}), { port: 3000, nodeEnv: "development" });
+  assert.equal(loadConfig({ PORT: "8080", NODE_ENV: "production" }).nodeEnv, "production");
+  assert.throws(() => loadConfig({ PORT: "abc" }), RangeError);
+});
+`);
+  fs.writeFileSync(path.join(fixture.cwd, "README.md"), "# Config\n\nUse `loadConfig` with `PORT`, `NODE_ENV`, default port `3000`.\n");
+  const report = scoreWorkflowWorkspace(fixture.cwd, fixture.case, {
+    finalText: "Changed src/config.ts, test/config.test.ts and README.md. Verification: bun test passed.",
+    durationMs: 1000,
+    validateTests: true,
+  });
+  assert.equal(report.pass, false);
+  assert.equal(report.metrics.validation.status, "fail");
+  assert.match(report.metrics.validation.hiddenValidation ?? "", /strict whole-string port parsing/);
   fs.rmSync(fixture.cwd, { recursive: true, force: true });
 });
 
@@ -900,6 +1011,32 @@ Run \`bun run test\` from package.json. Diagnostic and diagnóstico steps inspec
   fs.rmSync(fixture.cwd, { recursive: true, force: true });
 });
 
+test("workflow scorer does not treat Spanish todo as a TODO placeholder", () => {
+  const fixture = createWorkflowFixture("holdout-docs-runbook");
+  fs.writeFileSync(path.join(fixture.cwd, "docs/runbook.md"), `# Sync Runbook
+
+## Estado actual
+
+Run \`bun test\` from package.json. Diagnostic and diagnóstico steps inspect src/sync.ts, especially syncRecords(local, remote), porque la función concatena todo sin deduplicar.
+
+## Pasos
+
+1. Ejecutar \`bun test\`.
+2. Reproducir sync con entradas local y remote solapadas.
+3. Rollback with git restore src/sync.ts or a manual restoration of the previous sync behavior.
+
+La recuperación consiste en corregir las entradas y re-ejecutar syncRecords sin limpiar estado.
+`);
+  const report = scoreWorkflowWorkspace(fixture.cwd, fixture.case, {
+    finalText: "Changed docs/runbook.md. Documented bun test and rollback.",
+    durationMs: 1000,
+    validateTests: false,
+  });
+  assert.equal(report.metrics.documentationPlan.truncated, false);
+  assert.equal(report.pass, true);
+  fs.rmSync(fixture.cwd, { recursive: true, force: true });
+});
+
 test("workflow scorer rejects docs runbooks that omit sync source evidence", () => {
   const fixture = createWorkflowFixture("holdout-docs-runbook");
   fs.writeFileSync(path.join(fixture.cwd, "docs/runbook.md"), `# Sync Runbook
@@ -1043,12 +1180,17 @@ test("workflow eval CLI helpers keep live runs bounded", () => {
   assert.equal(resolveWorkflowInfraRetries("0"), 0);
   assert.equal(resolveComparativeJudgeMode("none"), "none");
   assert.equal(resolveComparativeJudgeMode("pi"), "pi");
+  assert.equal(resolveComparativeJudgeMode("content"), "content-only");
+  assert.equal(resolveComparativeJudgeMode("content-only"), "content-only");
+  assert.equal(resolveComparativeJudgeMode("both"), "both");
   assert.throws(() => resolveComparativeJudgeMode("auto"), /Unsupported workflow comparative judge mode/);
   assert.equal(resolveWorkflowThinking({ kind: "small-feature" }, "adaptive"), "minimal");
   assert.equal(resolveWorkflowThinking({ kind: "scaffold" }, "adaptive"), "minimal");
   assert.equal(resolveWorkflowThinking({ kind: "large-feature", expected: { maxFiles: 5 } } as never, "adaptive"), "minimal");
   assert.equal(resolveWorkflowThinking({ kind: "large-feature", expected: { maxFiles: 12 } } as never, "adaptive"), "low");
   assert.equal(resolveWorkflowThinking({ kind: "bugfix" }, "medium"), "medium");
+  assert.equal(resolveWorkflowThinking({ kind: "small-feature" }, "adaptive", "opencode/minimax-m2.7"), "low");
+  assert.equal(resolveWorkflowThinking({ kind: "bugfix" }, "minimal", "opencode/minimax-m2.7"), "low");
   assert.deepEqual(resolveVariants(undefined), ["simple", "chalin"]);
   assert.deepEqual(resolveVariants("chalin"), ["chalin"]);
   assert.deepEqual(resolveVariants("harnesses"), ["chalin", "gentle"]);
@@ -1071,7 +1213,7 @@ test("workflow eval does not force subagents for small docs fixtures", () => {
   assert.equal(shouldRequireChalinRoute(getWorkflowEvalCase("complex-sqlite-c-tokenizer-bugfix")), false);
 });
 
-test("workflow eval keeps direct chalin docs-only tool access comparable", () => {
+test("workflow eval keeps bounded docs evidence shell available for chalin", () => {
   const docsCase = getWorkflowEvalCase("complex-bun-zig-rust-lockfile-triage");
   const bugfixCase = getWorkflowEvalCase("complex-uv-rust-index-url-bugfix");
 
@@ -1096,6 +1238,36 @@ test("workflow eval validates external gentle-pi root shape", () => {
   assert.equal(resolveGentlePiRoot(root), root);
   fs.rmSync(path.join(root, "extensions", "gentle-ai.ts"));
   assert.throws(() => resolveGentlePiRoot(root), /gentle-pi root is not usable/);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("workflow eval can load the full Gentle companion bundle explicitly", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-chalin-gentle-companions-"));
+  const extensionFiles = [
+    ["pi-subagents-0.25.0", "src", "extension", "index.ts"],
+    ["pi-intercom-0.6.0", "index.ts"],
+    ["gentle-engram-0.1.7", "index.ts"],
+    ["pi-web-access-0.10.7", "index.ts"],
+    ["pi-lens-3.8.46", "index.ts"],
+    ["@juicesharp", "rpiv-todo", "index.ts"],
+    ["@juicesharp", "rpiv-ask-user-question", "index.ts"],
+  ];
+  for (const parts of extensionFiles) {
+    const file = path.join(root, ...parts);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, "export default function noop() {}\n");
+  }
+
+  assert.equal(resolveGentleCompanionRoot(root), root);
+  const tools = toolsForWorkflowVariant("gentle", getWorkflowEvalCase("holdout-docs-runbook"), { gentleCompanionRoot: root });
+  assert.match(tools, /\bsubagent\b/);
+  assert.match(tools, /\bmem_search\b/);
+  assert.match(tools, /\bweb_search\b/);
+  assert.match(tools, /\blsp_diagnostics\b/);
+  assert.match(tools, /\btodo\b/);
+
+  fs.rmSync(path.join(root, "pi-lens-3.8.46", "index.ts"));
+  assert.throws(() => resolveGentleCompanionRoot(root), /Gentle companion root is not usable/);
   fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -1229,6 +1401,43 @@ test("workflow regression gates catch direct-eligible chalin route regressions",
   assert.ok(gates.failures.some((item) => /direct-eligible case called chalin_route/.test(item)));
 });
 
+test("workflow regression gates fail if harnesses receive different prompt variants", () => {
+  const output = (variant: "simple" | "chalin" | "gentle", promptVariantIndex: number) => ({
+    variant,
+    runIndex: 1,
+    promptVariantIndex,
+    promptVariantCount: 3,
+    workspace: { caseId: "small-feature-search-filter", pass: true, score: 100 },
+    trace: { pass: true, score: 100, warnings: [], critical: [] },
+    diagnostics: {
+      infrastructureFailure: undefined,
+      finalAnswerMissing: false,
+      verificationPassed: true,
+      duplicateToolCalls: 0,
+      chalinRouteCalls: 0,
+      chalinRouteNonExecutable: 0,
+      toolEvents: 4,
+      readCalls: 1,
+      writeCalls: 0,
+      editCalls: 1,
+      retries: 0,
+      tokenTotal: 10_000,
+      traceSummary: { directEligible: true, postVerificationExplorationCalls: 0, postVerificationShellCalls: 0, postVerificationToolCallsByName: {}, toolCallSequence: ["read", "edit", "bash"] },
+      antiCheat: { pass: true, critical: [], warnings: [], accessed: [] },
+    },
+    judge: undefined,
+  });
+
+  const gates = evaluateWorkflowRegressionGates([
+    output("simple", 0),
+    output("chalin", 1),
+    output("gentle", 0),
+  ] as never, []);
+
+  assert.equal(gates.pass, false);
+  assert.ok(gates.failures.some((item) => /prompt variant mismatch across harnesses/.test(item)));
+});
+
 test("workflow comparison and gates fail bounded direct token tax regressions", () => {
   const output = (variant: "simple" | "chalin", workspaceScore: number, durationMs: number, tokenTotal: number) => ({
     variant,
@@ -1264,6 +1473,65 @@ test("workflow comparison and gates fail bounded direct token tax regressions", 
   const gates = evaluateWorkflowRegressionGates([], grouped);
   assert.equal(gates.pass, false);
   assert.ok(gates.failures.some((item) => /bounded\/direct chalin token tax/.test(item)));
+});
+
+test("workflow gates warn on bounded token tax when recovered infrastructure inflated target cost", () => {
+  const chalinOutput = {
+    variant: "chalin",
+    runIndex: 1,
+    durationMs: 290_000,
+    workspace: { caseId: "holdout-go-ttl-cache", pass: true, qualityScore: 100, efficiencyScore: 100, score: 100, metrics: { validation: { status: "pass" } }, critical: [], warnings: [] },
+    trace: { pass: true, score: 100, warnings: [], critical: [] },
+    diagnostics: {
+      recoveredInfrastructureFailures: [{ kind: "agent-stall", message: "workflow variant timeout after 240000ms" }],
+      infrastructureFailure: undefined,
+      finalAnswerMissing: false,
+      verificationPassed: true,
+      duplicateToolCalls: 0,
+      chalinRouteCalls: 0,
+      chalinRouteNonExecutable: 0,
+      chalinRouteValidationErrors: 0,
+      toolEvents: 10,
+      readCalls: 2,
+      writeCalls: 1,
+      editCalls: 1,
+      retries: 1,
+      agentRetries: 0,
+      infraRetries: 1,
+      tokenTotal: 52_000,
+      traceSummary: { directEligible: true, postVerificationExplorationCalls: 0, postVerificationShellCalls: 0, postVerificationToolCallsByName: {}, toolCallSequence: ["read", "edit", "write", "bash"] },
+    },
+    judge: { pass: true, score: 100, verdict: "ok", critical: [], warnings: [] },
+  };
+  const gates = evaluateWorkflowRegressionGates([chalinOutput] as never, [{
+    caseId: "holdout-go-ttl-cache",
+    pass: true,
+    reason: "blind judge accepted recovered run",
+    variants: {
+      simple: { passRate: 1, avgWorkspaceScore: 84, avgWorkspaceQualityScore: 96, avgWorkspaceEfficiencyScore: 98, avgTraceScore: 100, p95DurationMs: 62_000, avgTokens: 23_000 },
+      chalin: { passRate: 1, avgWorkspaceScore: 100, avgWorkspaceQualityScore: 100, avgWorkspaceEfficiencyScore: 100, avgTraceScore: 100, p95DurationMs: 290_000, avgTokens: 52_000 },
+    },
+  }] as never);
+
+  assert.equal(gates.pass, true);
+  assert.ok(gates.warnings.some((item) => /bounded\/direct chalin token tax .* recovered infrastructure retry/.test(item)));
+  assert.equal(gates.failures.some((item) => /bounded\/direct chalin token tax/.test(item)), false);
+});
+
+test("workflow gates warn on bounded token tax against non-passing simple baseline", () => {
+  const gates = evaluateWorkflowRegressionGates([], [{
+    caseId: "large-feature-rate-limit",
+    pass: true,
+    reason: "chalin quality/reliability dominates invalid baseline",
+    variants: {
+      simple: { passRate: 0, avgWorkspaceScore: 14, avgWorkspaceQualityScore: 16, avgWorkspaceEfficiencyScore: 100, avgTraceScore: 0, p95DurationMs: 120_000, avgTokens: 14_000 },
+      chalin: { passRate: 1, avgWorkspaceScore: 100, avgWorkspaceQualityScore: 100, avgWorkspaceEfficiencyScore: 100, avgTraceScore: 100, p95DurationMs: 45_000, avgTokens: 33_000 },
+    },
+  }] as never);
+
+  assert.equal(gates.pass, true);
+  assert.ok(gates.warnings.some((item) => /bounded\/direct chalin token tax .* non-passing simple baseline/.test(item)));
+  assert.equal(gates.failures.some((item) => /bounded\/direct chalin token tax/.test(item)), false);
 });
 
 test("workflow regression gates treat simple baseline failures as warnings", () => {
@@ -1685,6 +1953,50 @@ test("workflow comparison does not let failed simple baseline win solely on spee
   assert.match(grouped[0]?.reason ?? "", /efficiencyGate:case-budget-dominance/);
 });
 
+test("workflow comparison lets blind-judge reliability dominance satisfy quality floor against failed simple baseline", () => {
+  const output = (variant: "simple" | "chalin", durationMs: number, tokenTotal: number, score: number, pass: boolean) => ({
+    variant,
+    runIndex: 1,
+    durationMs,
+    workspace: { caseId: "large-feature-rate-limit", pass, score },
+    trace: { pass: true, score: 100, warnings: [], critical: [] },
+    diagnostics: {
+      infrastructureFailure: undefined,
+      finalAnswerMissing: false,
+      verificationPassed: pass,
+      duplicateToolCalls: 0,
+      chalinRouteCalls: 0,
+      chalinRouteNonExecutable: 0,
+      toolEvents: 1,
+      readCalls: 0,
+      writeCalls: 0,
+      editCalls: 1,
+      retries: 0,
+      tokenTotal,
+    },
+    judge: { pass, score, verdict: "ok", critical: [], warnings: [] },
+  });
+  const grouped = summarizeComparison([
+    output("simple", 52_201, 19_836, 81, false),
+    output("chalin", 87_127, 34_854, 88, true),
+  ] as never, [{
+    caseId: "large-feature-rate-limit",
+    runIndex: 1,
+    target: "chalin",
+    candidates: [
+      { label: "A", variant: "simple" },
+      { label: "B", variant: "chalin" },
+    ],
+    winnerVariant: "chalin",
+    targetWins: true,
+  } as never]);
+
+  assert.equal(grouped[0]?.pass, true);
+  assert.match(grouped[0]?.reason ?? "", /blindJudgeQualityDominates:accepted/);
+  assert.match(grouped[0]?.reason ?? "", /efficiencyGate:reasonable/);
+  assert.match(grouped[0]?.reason ?? "", /deterministicEfficiencyGate:blocking-for-bounded-direct/);
+});
+
 test("workflow comparison allows quality gains over simple within a reasonable token budget", () => {
   const output = (variant: "simple" | "chalin", durationMs: number, tokenTotal: number, score: number) => ({
     variant,
@@ -1916,6 +2228,139 @@ test("workflow comparison accepts blind-judge quality lead with lower token cost
   assert.equal(grouped[0]?.pass, true);
   assert.match(grouped[0]?.reason ?? "", /blindJudgeQualityDominates:accepted/);
   assert.match(grouped[0]?.reason ?? "", /tokensStronglyBetter:yes/);
+});
+
+test("workflow comparison lets blind judge override small workspace heuristic gaps against competitors", () => {
+  const output = (variant: "simple" | "chalin" | "gentle", workspaceScore: number, durationMs: number, tokenTotal: number) => ({
+    variant,
+    runIndex: 1,
+    durationMs,
+    workspace: { caseId: "holdout-docs-runbook", pass: true, score: workspaceScore },
+    trace: { pass: true, score: 100, warnings: [], critical: [] },
+    diagnostics: {
+      infrastructureFailure: undefined,
+      finalAnswerMissing: false,
+      verificationPassed: true,
+      duplicateToolCalls: 0,
+      chalinRouteCalls: 0,
+      chalinRouteNonExecutable: 0,
+      toolEvents: 6,
+      readCalls: 3,
+      writeCalls: 1,
+      editCalls: 0,
+      retries: 0,
+      tokenTotal,
+    },
+    judge: { pass: true, score: workspaceScore, verdict: "ok", critical: [], warnings: [] },
+  });
+  const grouped = summarizeComparison([
+    output("simple", 84, 119_000, 27_900),
+    output("chalin", 85, 79_000, 31_900),
+    output("gentle", 87, 70_000, 42_300),
+  ] as never, [comparativeJudgeVerdict("holdout-docs-runbook", [
+    { variant: "simple", durationMs: 119_000, tokens: 27_900, workspaceScore: 84 },
+    { variant: "chalin", durationMs: 79_000, tokens: 31_900, workspaceScore: 85 },
+    { variant: "gentle", durationMs: 70_000, tokens: 42_300, workspaceScore: 87 },
+  ], "chalin")]);
+
+  assert.equal(grouped[0]?.pass, true);
+  assert.match(grouped[0]?.reason ?? "", /workspaceBlindJudgeOverride:accepted/);
+  assert.match(grouped[0]?.reason ?? "", /workspaceQuality:85>=87 or blind-judge-within-5/);
+  assert.match(grouped[0]?.reason ?? "", /blindJudgeQualityDominates:accepted/);
+});
+
+test("workflow comparison uses workspace quality instead of blended efficiency for competitor quality gates", () => {
+  const output = (
+    variant: "chalin" | "gentle",
+    score: number,
+    qualityScore: number,
+    efficiencyScore: number,
+    durationMs: number,
+    tokenTotal: number,
+  ) => ({
+    variant,
+    runIndex: 1,
+    durationMs,
+    workspace: {
+      caseId: "holdout-docs-runbook",
+      pass: true,
+      score,
+      qualityScore,
+      efficiencyScore,
+    },
+    trace: { pass: true, score: 100, warnings: [], critical: [] },
+    diagnostics: {
+      infrastructureFailure: undefined,
+      finalAnswerMissing: false,
+      verificationPassed: true,
+      duplicateToolCalls: 0,
+      chalinRouteCalls: 0,
+      chalinRouteNonExecutable: 0,
+      toolEvents: 6,
+      readCalls: 3,
+      writeCalls: 1,
+      editCalls: 0,
+      retries: 0,
+      tokenTotal,
+    },
+    judge: { pass: true, score: qualityScore, verdict: "ok", critical: [], warnings: [] },
+  });
+  const grouped = summarizeComparison([
+    output("chalin", 85, 100, 66, 82_743, 33_409),
+    output("gentle", 100, 100, 72, 76_497, 44_277),
+  ] as never, [comparativeJudgeVerdict("holdout-docs-runbook", [
+    { variant: "chalin", durationMs: 82_743, tokens: 33_409, workspaceScore: 85 },
+    { variant: "gentle", durationMs: 76_497, tokens: 44_277, workspaceScore: 100 },
+  ], "chalin")]);
+
+  assert.equal(grouped[0]?.pass, true);
+  assert.match(grouped[0]?.reason ?? "", /workspaceQuality:100>=100/);
+  assert.match(grouped[0]?.reason ?? "", /blendedWorkspace:85>=100/);
+  assert.match(grouped[0]?.reason ?? "", /blindJudgeQualityDominates:accepted/);
+});
+
+test("workflow gates separate workspace quality floor from blended efficiency penalties", () => {
+  const output = {
+    variant: "chalin",
+    runIndex: 1,
+    durationMs: 99_000,
+    workspace: {
+      caseId: "holdout-docs-runbook",
+      pass: true,
+      qualityScore: 100,
+      efficiencyScore: 65,
+      score: 84,
+      metrics: { validation: { status: "skipped" } },
+      critical: [],
+      warnings: [{ id: "duration-budget-exceeded" }],
+    },
+    trace: { pass: true, score: 100, warnings: [], critical: [] },
+    diagnostics: {
+      infrastructureFailure: undefined,
+      finalAnswerMissing: false,
+      verificationPassed: true,
+      duplicateToolCalls: 0,
+      chalinRouteCalls: 0,
+      chalinRouteNonExecutable: 0,
+      chalinRouteValidationErrors: 0,
+      toolEvents: 8,
+      readCalls: 3,
+      writeCalls: 1,
+      editCalls: 0,
+      retries: 0,
+      agentRetries: 0,
+      infraRetries: 0,
+      tokenTotal: 30_000,
+      traceSummary: { postVerificationExplorationCalls: 0, postVerificationShellCalls: 0 },
+    },
+    judge: { pass: true, score: 95, verdict: "quality passes", critical: [], warnings: [] },
+  };
+  const grouped = summarizeComparison([output] as never);
+  const gates = evaluateWorkflowRegressionGates([output] as never, grouped);
+
+  assert.equal(gates.pass, true);
+  assert.ok(gates.warnings.some((item) => /blended workspace avg 84 < 90 due to efficiency penalties/.test(item)));
+  assert.equal(gates.failures.some((item) => /workspace avg|workspace quality/.test(item)), false);
 });
 
 test("workflow comparison applies blind judge quality lead against simple baseline", () => {
@@ -2184,6 +2629,9 @@ test("workflow comparative judge prompt is blind to harness names", () => {
     assert.match(prompt, /Candidate B/);
     assert.match(prompt, /calidad como criterio dominante/i);
     assert.match(prompt, /tokens consumidos, duración y tool calls/i);
+    assert.match(prompt, /Respeta el idioma del prompt original/i);
+    assert.match(prompt, /factualidad supera profundidad aparente/i);
+    assert.match(prompt, /gap explícito a un paso operativo inventado/i);
     assert.match(prompt, /Efficiency metrics: durationMs=20000; tokens=25000; toolCalls=4/i);
     assert.doesNotMatch(prompt, /NO uses duración, tokens o número de tools/i);
     assert.doesNotMatch(prompt, /"durationMs"|"tokens"|tokenTotal|"toolEvents"|chalinRoute|effectiveAnswerSource/i);
@@ -2192,6 +2640,82 @@ test("workflow comparative judge prompt is blind to harness names", () => {
   } finally {
     fs.rmSync(fixture.cwd, { recursive: true, force: true });
   }
+});
+
+test("workflow content-only comparative judge prompt hides operational metrics", () => {
+  const output = (variant: "simple" | "chalin", finalText: string, warningId: string) => ({
+    variant,
+    runIndex: 1,
+    durationMs: 90_000,
+    finalText,
+    evidence: { files: [{ path: "docs/diagnostic-refactor-plan.md", contentSnippet: "Parser.cpp owns formatting today. DiagnosticEngine should own formatting through staged overloads, rollback, risks, and golden tests." }] },
+    workspace: {
+      caseId: "complex-llvm-cpp-diagnostic-plan",
+      kind: "review-only",
+      suite: "complex",
+      pass: true,
+      qualityScore: 100,
+      efficiencyScore: 20,
+      score: 87,
+      matched: ["maps parser diagnostic ownership"],
+      missing: [],
+      metrics: { validation: { status: "skipped" } },
+      critical: [],
+      warnings: [
+        { id: warningId, severity: "warning", message: "El documento debe cubrir rollback.", evidence: "rollback", penalty: 4 },
+        { id: "duration-budget-exceeded", severity: "warning", message: "La ejecución excedió el presupuesto de eficiencia.", evidence: "90000ms > 75000ms", penalty: 12 },
+      ],
+    },
+    trace: { pass: true, score: 100, effectiveAnswerChars: finalText.length, critical: [], warnings: [] },
+    diagnostics: { infrastructureFailure: undefined, finalAnswerMissing: false, verificationPassed: false, duplicateToolCalls: 0, chalinRouteCalls: 0, chalinRouteNonExecutable: 0, toolEvents: 42, tokenTotal: 250_000, readCalls: 9, writeCalls: 1, editCalls: 1, retries: 0 },
+    judge: { pass: true, score: 100, verdict: "ok", critical: [], warnings: [] },
+  });
+  const fixture = createWorkflowFixture("complex-llvm-cpp-diagnostic-plan");
+  try {
+    const prompt = buildWorkflowContentOnlyComparativeJudgePrompt(fixture.case, [
+      { label: "A", output: output("simple", "Plan conciso con ownership, riesgos, rollback y golden tests.", "documentation-plan-incomplete") as never },
+      { label: "B", output: output("chalin", "Plan extenso con ownership, alternativas, rollback, riesgos y validación por etapas.", "documentation-plan-incomplete") as never },
+    ]);
+
+    assert.match(prompt, /calidad de contenido/i);
+    assert.match(prompt, /NO ignores pass\/fail determinístico/i);
+    assert.match(prompt, /juzga primero los artefactos/i);
+    assert.match(prompt, /código editado, tests runner-discovered, contrato público/i);
+    assert.match(prompt, /La respuesta final es evidencia secundaria/i);
+    assert.match(prompt, /no premies restricciones más estrictas/i);
+    assert.match(prompt, /Tests adicionales sobre comportamiento inventado/i);
+    assert.match(prompt, /No premies brevedad por sí misma/i);
+    assert.match(prompt, /pass\/fail determinístico/i);
+    assert.match(prompt, /Candidate A/);
+    assert.match(prompt, /Acceptance\/content status/i);
+    assert.match(prompt, /"pass": true/);
+    assert.match(prompt, /Evidence files/i);
+    assert.match(prompt, /Final answer/i);
+    assert.match(prompt, /documentation-plan-incomplete/i);
+    assert.doesNotMatch(prompt, /Efficiency metrics|Workspace score|Trace report|raw workspace score|judge score/i);
+    assert.doesNotMatch(prompt, /durationMs=|tokens=250000|toolCalls=42|tokenTotal|toolEvents/i);
+    assert.doesNotMatch(prompt, /duration-budget-exceeded|90000ms > 75000ms/i);
+    assert.doesNotMatch(prompt, /\b(simple|chalin|gentle|pi-chalin|chalin_route)\b/i);
+  } finally {
+    fs.rmSync(fixture.cwd, { recursive: true, force: true });
+  }
+});
+
+test("workflow implementation comparative judge cannot prefer failing output over passing output", () => {
+  const verdict = comparativeJudgeVerdict("community-ts-event-emitter", [
+    { variant: "gentle", durationMs: 210_000, tokens: 330_000, deterministicPass: false, workspaceScore: 79 },
+    { variant: "chalin", durationMs: 62_000, tokens: 32_000, deterministicPass: true, workspaceScore: 92 },
+  ], "gentle");
+
+  const fixed = enforceWorkflowImplementationComparativeWinner({ kind: "small-feature" }, verdict);
+  assert.equal(fixed.winnerVariant, "chalin");
+  assert.equal(fixed.winnerLabel, "B");
+  assert.equal(fixed.targetWins, true);
+  assert.equal(fixed.targetRank, 1);
+  assert.match(fixed.warnings.join("\n"), /Implementation winner override/);
+
+  const reviewOnly = enforceWorkflowImplementationComparativeWinner({ kind: "review-only" }, verdict);
+  assert.equal(reviewOnly.winnerVariant, "gentle");
 });
 
 test("workflow production fast-path audit scans prod harness surfaces for eval markers", () => {
@@ -2206,6 +2730,11 @@ test("workflow production fast-path audit scans prod harness surfaces for eval m
     const poisoned = auditWorkflowProductionFastPaths(root);
     assert.equal(poisoned.pass, false);
     assert.ok(poisoned.critical.some((item) => /small-feature-search-filter/.test(item)));
+
+    fs.writeFileSync(path.join(root, "src", "autoroute.ts"), "export const shortcut = 'slugify.py';\n");
+    const fixturePathPoisoned = auditWorkflowProductionFastPaths(root);
+    assert.equal(fixturePathPoisoned.pass, false);
+    assert.ok(fixturePathPoisoned.critical.some((item) => /slugify\.py/.test(item)));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -2314,6 +2843,12 @@ test("workflow gates warn on single-sample blind judge wins and fail split case 
   const singleGates = evaluateWorkflowRegressionGates([], single);
   assert.equal(singleGates.pass, true);
   assert.ok(singleGates.warnings.some((item) => /single-sample/.test(item)));
+  const singleStability = summarizeWorkflowBlindJudgeStability(single[0]?.comparativeJudges);
+  assert.equal(singleStability.status, "single-sample-win");
+  assert.equal(singleStability.preliminary, true);
+  assert.equal(singleStability.stable, false);
+  assert.equal(singleStability.recommendation, "rerun-with-runs>=2");
+  assert.deepEqual(singleStability.winnerCounts, { chalin: 1 });
 
   const split = summarizeComparison([
     output("simple", 1),
@@ -2333,6 +2868,11 @@ test("workflow gates warn on single-sample blind judge wins and fail split case 
   const splitGates = evaluateWorkflowRegressionGates([], split);
   assert.equal(splitGates.pass, false);
   assert.ok(splitGates.failures.some((item) => /blind judge case winRate 0.5/.test(item)));
+  const splitStability = summarizeWorkflowBlindJudgeStability(split[0]?.comparativeJudges);
+  assert.equal(splitStability.status, "unstable");
+  assert.equal(splitStability.preliminary, false);
+  assert.equal(splitStability.winRate, 0.5);
+  assert.deepEqual(splitStability.winnerCounts, { chalin: 1, simple: 1 });
 });
 
 test("workflow comparison keeps competitor infrastructure failures as warnings outside target gate", () => {
@@ -2439,6 +2979,30 @@ test("workflow failure UX summarizes what happened and the next step", () => {
   assert.equal(failures[0]?.retainedFixturePath, "/tmp/pi-chalin-fixture");
 });
 
+test("workflow failure UX names provider limits instead of timeout symptoms", () => {
+  const failures = summarizeWorkflowFailures([{
+    variant: "chalin",
+    runIndex: 1,
+    timeoutReason: "workflow empty assistant response without final evidence",
+    retainedFixturePath: "/tmp/pi-chalin-provider-limit",
+    workspace: { caseId: "holdout-go-ttl-cache", pass: false, score: 44 },
+    trace: { pass: false, score: 0, critical: [] },
+    diagnostics: {
+      infrastructureFailure: { kind: "provider-error", message: "usage_limit_reached: reset in 410579 seconds" },
+      finalAnswerMissing: true,
+      verificationPassed: false,
+      duplicateToolCalls: 0,
+    },
+    judge: undefined,
+  } as never]) as Array<{ mode: string; userMessage: string; nextStep: string; retainedFixturePath?: string }>;
+
+  assert.equal(failures[0]?.mode, "infrastructure:provider-error");
+  assert.match(failures[0]?.userMessage ?? "", /model provider failed/i);
+  assert.doesNotMatch(failures[0]?.userMessage ?? "", /bounded timeout|exceeded/i);
+  assert.match(failures[0]?.nextStep ?? "", /provider\/CLI health/i);
+  assert.match(failures[0]?.nextStep ?? "", /pi-chalin-provider-limit/);
+});
+
 test("workflow reports keep full output for failed SDK runs by default", () => {
   const passing = {
     workspace: { caseId: "holdout-scaffold-config-loader", pass: true },
@@ -2458,6 +3022,114 @@ test("workflow reports keep full output for failed SDK runs by default", () => {
   assert.equal(shouldStoreFullWorkflowOutput(passing, { PI_CHALIN_WORKFLOW_STORE_FULL_OUTPUT: "1" }), true);
 });
 
+test("workflow tool history records structured full-output tool events with bounded snippets", () => {
+  const stdout = [
+    JSON.stringify({ type: "tool_execution_start", toolName: "read", args: { path: "src/cache.go" } }),
+    JSON.stringify({ type: "tool_execution_end", toolName: "read", isError: false, result: { content: "package cache\n" } }),
+    JSON.stringify({ type: "tool_execution_start", toolName: "bash", args: { command: "go test ./..." } }),
+    JSON.stringify({ type: "tool_execution_end", toolName: "bash", isError: true, result: { content: "x".repeat(40) } }),
+  ].join("\n");
+
+  const history = workflowToolHistory(stdout, { maxEvents: 3, maxTextChars: 12 });
+  assert.equal(history.totalEvents, 4);
+  assert.equal(history.omittedEvents, 1);
+  assert.deepEqual(history.events.map((event) => `${event.name}:${event.phase}:${event.isError}`), [
+    "read:start:false",
+    "read:end:false",
+    "bash:start:false",
+  ]);
+  assert.equal(history.events[0]?.argsSnippet, "{\"path\":\"sr…");
+  assert.equal(history.events[1]?.resultSnippet, "package cac…");
+  assert.equal(history.events[1]?.resultChars, "package cache\n".length);
+});
+
+test("workflow agent history records structured chalin run steps with bounded snippets", () => {
+  const stdout = [
+    JSON.stringify({
+      type: "tool_execution_end",
+      toolName: "chalin_route",
+      toolCallId: "call-1",
+      result: {
+        details: {
+          route: { kind: "multi-agent-chain", agents: ["scout", "reviewer"] },
+          approval: { action: "allow" },
+          run: {
+            id: "run-1",
+            status: "complete",
+            logsPath: "/tmp/chalin-run.log",
+            metrics: { usage: { totalTokens: 123 } },
+            steps: [
+              { agent: "scout", status: "complete", model: "m1", thinkingLevel: "minimal", output: { handoff: "Scout ".repeat(20) } },
+              { agent: "reviewer", status: "failed", model: "m2", error: "review failed because invariant was missing" },
+            ],
+          },
+        },
+      },
+    }),
+    JSON.stringify({
+      type: "message",
+      message: {
+        details: {
+          result: {
+            route: { kind: "multi-agent-single", agents: ["worker"] },
+            run: {
+              id: "run-2",
+              status: "complete",
+              steps: [{ agent: "worker", status: "complete", handoff: "done" }],
+            },
+          },
+        },
+      },
+    }),
+  ].join("\n");
+
+  const history = workflowAgentHistory(stdout, { maxTextChars: 24 });
+  assert.equal(history.totalRuns, 2);
+  assert.equal(history.omittedRuns, 0);
+  assert.equal(history.runs[0]?.toolName, "chalin_route");
+  assert.equal(history.runs[0]?.toolCallId, "call-1");
+  assert.equal(history.runs[0]?.runId, "run-1");
+  assert.equal(history.runs[0]?.routeKind, "multi-agent-chain");
+  assert.deepEqual(history.runs[0]?.agents, ["scout", "reviewer"]);
+  assert.equal(history.runs[0]?.approvalAction, "allow");
+  assert.equal(history.runs[0]?.logsPath, "/tmp/chalin-run.log");
+  assert.deepEqual(history.runs[0]?.metrics, { usage: { totalTokens: 123 } });
+  assert.equal(history.runs[0]?.totalSteps, 2);
+  assert.equal(history.runs[0]?.steps[0]?.agent, "scout");
+  assert.equal(history.runs[0]?.steps[0]?.handoffChars, "Scout ".repeat(20).length);
+  assert.equal(history.runs[0]?.steps[0]?.handoffSnippet?.length, 24);
+  assert.equal(history.runs[0]?.steps[1]?.errorSnippet, "review failed because i…");
+  assert.equal(history.runs[1]?.runId, "run-2");
+  assert.equal(history.runs[1]?.steps[0]?.handoffSnippet, "done");
+});
+
+test("workflow output storage policy honors CLI args before env defaults", () => {
+  assert.deepEqual(resolveWorkflowOutputStoragePolicy({}, {}), {
+    storeFullOutput: false,
+    storeFailedOutput: true,
+  });
+  assert.deepEqual(resolveWorkflowOutputStoragePolicy({
+    storeFullOutput: "1",
+    storeFailedOutput: "0",
+  }, {
+    PI_CHALIN_WORKFLOW_STORE_FULL_OUTPUT: "0",
+    PI_CHALIN_WORKFLOW_STORE_FAILED_OUTPUT: "1",
+  }), {
+    storeFullOutput: true,
+    storeFailedOutput: false,
+  });
+  assert.deepEqual(resolveWorkflowOutputStoragePolicy({
+    storeFullWorkflowOutput: "false",
+    storeFailedWorkflowOutput: "true",
+  }, {
+    PI_CHALIN_WORKFLOW_STORE_FULL_OUTPUT: "1",
+    PI_CHALIN_WORKFLOW_STORE_FAILED_OUTPUT: "0",
+  }), {
+    storeFullOutput: false,
+    storeFailedOutput: true,
+  });
+});
+
 test("workflow diagnostics classify provider failures as infrastructure", () => {
   const stdout = [
     JSON.stringify({ type: "message_start", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"This organization has been disabled.\"}}" } }),
@@ -2466,6 +3138,35 @@ test("workflow diagnostics classify provider failures as infrastructure", () => 
   const failure = detectWorkflowInfrastructureFailure(stdout);
   assert.equal(failure?.kind, "provider-error");
   assert.match(failure?.message ?? "", /organization has been disabled|invalid_request_error/i);
+});
+
+test("workflow diagnostics prefer provider usage limits over empty-answer stalls", () => {
+  const usageLimit = "Codex error: {\"type\":\"error\",\"error\":{\"type\":\"usage_limit_reached\",\"message\":\"The usage limit has been reached\"}}";
+  const stdout = [
+    JSON.stringify({ type: "message_start", message: { role: "assistant", content: [], stopReason: "error", errorMessage: usageLimit } }),
+    JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: usageLimit } }),
+  ].join("\n");
+
+  const failure = detectWorkflowInfrastructureFailure(stdout, "", "workflow empty assistant response without final evidence");
+  assert.equal(failure?.kind, "provider-error");
+  assert.match(failure?.message ?? "", /usage_limit_reached/);
+});
+
+test("workflow retry policy does not burn retries on hard provider limits", () => {
+  const output = (message: string) => ({
+    workspace: { caseId: "holdout-go-ttl-cache", pass: false, score: 0 },
+    trace: { pass: false, score: 0, warnings: [], critical: [] },
+    diagnostics: {
+      infrastructureFailure: { kind: "provider-error", message },
+      finalAnswerMissing: true,
+      verificationPassed: false,
+      antiCheat: { pass: true, critical: [], warnings: [], accessed: [] },
+    },
+    judge: undefined,
+  });
+
+  assert.equal(shouldRetryWorkflowRun(output("usage_limit_reached: weekly cap reset in 410990 seconds") as never), false);
+  assert.equal(shouldRetryWorkflowRun(output("provider temporarily overloaded") as never), true);
 });
 
 test("workflow gates report late provider errors as infra warnings when output is already valid", () => {
@@ -2559,6 +3260,75 @@ test("workflow gates do not count skipped blind judges against win rate", () => 
   assert.equal(gates.pass, true);
   assert.ok(gates.warnings.some((item) => /blind judge skipped/.test(item)));
   assert.equal(gates.failures.some((item) => /blind judge chalin winRate/.test(item)), false);
+});
+
+test("workflow comparative judge skips blocking candidate infrastructure before blind scoring", () => {
+  const evalCase = getWorkflowEvalCase("holdout-go-ttl-cache");
+  const output = (variant: "simple" | "chalin" | "gentle", blocked = false) => ({
+    variant,
+    runIndex: 2,
+    durationMs: blocked ? 90_000 : 9_000,
+    workspace: {
+      caseId: evalCase.id,
+      pass: !blocked,
+      score: blocked ? 0 : 100,
+      qualityScore: blocked ? 0 : 100,
+      efficiencyScore: blocked ? 0 : 100,
+      matched: [],
+      missing: [],
+      critical: blocked ? [{ id: "validation-failed", severity: "critical", message: "no valid output", penalty: 100 }] : [],
+      warnings: [],
+      metrics: { validation: { status: blocked ? "fail" : "pass" } },
+    },
+    trace: { pass: !blocked, score: blocked ? 0 : 100, warnings: [], critical: [] },
+    diagnostics: {
+      infrastructureFailure: blocked ? { kind: "agent-stall", message: "workflow idle timeout after 90000ms without SDK events" } : undefined,
+      finalAnswerMissing: blocked,
+      verificationPassed: !blocked,
+      duplicateToolCalls: 0,
+      chalinRouteCalls: 0,
+      chalinRouteNonExecutable: 0,
+      chalinRouteValidationErrors: 0,
+      antiCheat: { pass: true, critical: [], warnings: [], accessed: [] },
+      toolEvents: blocked ? 0 : 4,
+      readCalls: blocked ? 0 : 1,
+      writeCalls: 0,
+      editCalls: blocked ? 0 : 1,
+      retries: 0,
+      tokenTotal: blocked ? 0 : 12_000,
+    },
+    judge: undefined,
+  });
+
+  const targetSkipped = buildWorkflowComparativeJudgeInfrastructureSkip(evalCase, 2, [
+    output("simple"),
+    output("chalin", true),
+  ] as never);
+  assert.equal(targetSkipped?.skipped, true);
+  assert.equal(targetSkipped?.reason, "target-infrastructure");
+  assert.equal(targetSkipped?.targetWins, false);
+  assert.equal(targetSkipped?.winnerVariant, undefined);
+  assert.ok(targetSkipped?.warnings.some((item) => /chalin infrastructure failure agent-stall/.test(item)));
+
+  const competitorSkipped = buildWorkflowComparativeJudgeInfrastructureSkip(evalCase, 2, [
+    output("simple", true),
+    output("chalin"),
+  ] as never);
+  assert.equal(competitorSkipped?.skipped, true);
+  assert.equal(competitorSkipped?.reason, "candidate-infrastructure");
+  assert.ok(competitorSkipped?.warnings.some((item) => /simple infrastructure failure agent-stall/.test(item)));
+
+  const competitorFiltered = buildWorkflowComparativeJudgeInfrastructureSkip(evalCase, 2, [
+    output("simple", true),
+    output("chalin"),
+    output("gentle"),
+  ] as never);
+  assert.equal(competitorFiltered, undefined, "a failed non-target candidate should be filtered when two usable candidates remain");
+
+  const stability = summarizeWorkflowBlindJudgeStability([targetSkipped!] as never);
+  assert.equal(stability.status, "skipped");
+  assert.equal(stability.samples, 0);
+  assert.equal(stability.skipped, 1);
 });
 
 test("workflow diagnostics classify SDK idle stalls as infrastructure", () => {
@@ -2687,6 +3457,26 @@ test("workflow runner only treats terminal assistant events as final answers", (
   assert.equal(observeTerminalAssistantAnswer(toolUseEnd).terminalAnswer, false);
   assert.equal(extractFinalText(toolUseEnd), "");
 
+  const explanatoryTextBeforeToolUse = [
+    JSON.stringify({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_end", content: "I will edit the source and then verify." },
+    }),
+    JSON.stringify({
+      type: "turn_end",
+      message: {
+        role: "assistant",
+        stopReason: "toolUse",
+        content: [
+          { type: "text", text: "I will edit the source and then verify." },
+          { type: "toolCall", id: "call-1", name: "edit", arguments: { path: "src/parseDate.ts" } },
+        ],
+      },
+    }),
+  ].join("\n") + "\n";
+  assert.equal(observeTerminalAssistantAnswer(explanatoryTextBeforeToolUse).terminalAnswer, false);
+  assert.equal(extractFinalText(explanatoryTextBeforeToolUse), "");
+
   const rawToolArgsTextEnd = JSON.stringify({
     type: "message_update",
     assistantMessageEvent: { type: "text_end", content: JSON.stringify({ path: "src/parseDate.ts", oldText: "x", newText: "y" }) },
@@ -2740,6 +3530,18 @@ test("workflow diagnostics summarize post-verification exploration waste", () =>
   assert.equal(diagnostics.traceSummary.postVerificationExplorationCalls, 1);
   assert.equal(diagnostics.traceSummary.postVerificationShellCalls, 1);
   assert.deepEqual(diagnostics.traceSummary.postVerificationToolCallsByName, { bash: 1, grep: 1 });
+
+  const gates = evaluateWorkflowRegressionGates([{
+    variant: "chalin",
+    runIndex: 1,
+    workspace: { caseId: "small-feature-search-filter", pass: true, score: 100 },
+    trace: { pass: true, score: 100, warnings: [], critical: [] },
+    diagnostics: { ...diagnostics, verificationPassed: true, finalAnswerMissing: false, antiCheat: { pass: true, critical: [], warnings: [], accessed: [] } },
+    judge: undefined,
+  } as never], []);
+  assert.equal(gates.pass, false);
+  assert.ok(gates.failures.some((item) => /post-verification shell calls 1/.test(item)));
+  assert.ok(gates.failures.some((item) => /post-verification exploration 1/.test(item)));
 });
 
 test("workflow verification detector requires a passing verification bash call", () => {
@@ -2760,6 +3562,20 @@ test("workflow verification detector requires a passing verification bash call",
     JSON.stringify({ type: "tool_execution_end", toolName: "bash", isError: false, result: { content: "/tmp" } }),
   ].join("\n");
   assert.deepEqual(detectWorkflowVerification(nonVerification), { passed: false, calls: 0 });
+});
+
+test("workflow streaming tail keeps recent verification without growing unbounded", () => {
+  const verification = [
+    JSON.stringify({ type: "tool_execution_start", toolName: "bash", args: { command: "bun test" } }),
+    JSON.stringify({ type: "tool_execution_end", toolName: "bash", isError: false, result: { content: "pass" } }),
+  ].join("\n");
+
+  let tail = appendWorkflowTail("x".repeat(40), "y".repeat(40), 50);
+  assert.equal(tail.length, 50);
+  assert.equal(tail, `${"x".repeat(10)}${"y".repeat(40)}`);
+
+  tail = appendWorkflowTail(tail, `\n${verification}`, 500);
+  assert.deepEqual(detectWorkflowVerification(tail), { passed: true, calls: 1 });
 });
 
 test("workflow judge auto mode only triggers for ambiguous deterministic passes", () => {
@@ -3176,6 +3992,30 @@ test("workflow matrix sharding partitions cases deterministically and skips empt
   assert.throws(() => selectWorkflowShard(["a"], 3, 3), /has no cases/);
 });
 
+test("workflow sharded eval forwards full-output storage args to shard workers", () => {
+  const childArgs = buildWorkflowShardChildArgs({
+    caseIds: ["holdout-go-ttl-cache"],
+    variants: ["simple", "chalin", "gentle"],
+    runs: 2,
+    timeoutMs: 60_000,
+    matrixPath: "/tmp/workflow-shard.jsonl",
+    extraArgs: {
+      model: "openai-codex/gpt-5.3-codex-spark",
+      thinking: "minimal",
+      judge: "pi",
+      comparativeJudge: "pi",
+      judgeModel: "zai/glm-5.1",
+      storeFullOutput: "1",
+      storeFailedOutput: "0",
+    },
+  });
+
+  assert.ok(childArgs.includes("--storeFullOutput=1"));
+  assert.ok(childArgs.includes("--storeFailedOutput=0"));
+  assert.ok(childArgs.includes("--comparativeJudge=pi"));
+  assert.ok(childArgs.includes("--judgeModel=zai/glm-5.1"));
+});
+
 test("workflow matrix aggregate uses latest row per case and reports variant efficiency", async () => {
   const { summarizeWorkflowMatrixRows } = await import("../evals/workflow-matrix.ts");
   const aggregate = summarizeWorkflowMatrixRows([
@@ -3203,7 +4043,133 @@ test("workflow matrix aggregate uses latest row per case and reports variant eff
   assert.equal(aggregate.variants.chalin?.passRate, 1);
   assert.equal(aggregate.variants.chalin?.p95DurationMs, 20_000);
   assert.equal(aggregate.variants.simple?.passRate, 0.667);
+  assert.equal(aggregate.blindJudge.cases, 0);
+  assert.equal(aggregate.blindJudge.unavailable, 2);
   assert.deepEqual(aggregate.warnings, ["case-a: recovered infra"]);
+});
+
+test("workflow matrix aggregate chooses latest row by timestamp rather than file order", async () => {
+  const { summarizeWorkflowMatrixRows } = await import("../evals/workflow-matrix.ts");
+  const aggregate = summarizeWorkflowMatrixRows([
+    {
+      caseId: "case-a",
+      recordedAt: "2026-05-27T12:00:00.000Z",
+      pass: true,
+      stats: { chalin: { runs: 2, passCount: 2, passRate: 1, avgWorkspaceScore: 100, p95DurationMs: 8_000, totalTokens: 20, estimatedCostUsd: 0.2, infrastructureFailures: 0 } },
+    },
+    {
+      caseId: "case-a",
+      recordedAt: "2026-05-27T11:00:00.000Z",
+      pass: false,
+      stats: { chalin: { runs: 2, passCount: 1, passRate: 0.5, avgWorkspaceScore: 70, p95DurationMs: 30_000, totalTokens: 60, estimatedCostUsd: 0.6, infrastructureFailures: 0 } },
+    },
+  ]);
+
+  assert.equal(aggregate.pass, true);
+  assert.deepEqual(aggregate.failedCases, []);
+  assert.equal(aggregate.variants.chalin?.passRate, 1);
+  assert.equal(aggregate.variants.chalin?.avgWorkspaceScore, 100);
+});
+
+test("workflow matrix aggregate keeps prior analyzable quality row when latest row is provider-blocked", async () => {
+  const { summarizeWorkflowMatrixRows } = await import("../evals/workflow-matrix.ts");
+  const aggregate = summarizeWorkflowMatrixRows([
+    {
+      caseId: "holdout-go-ttl-cache",
+      pass: true,
+      stats: {
+        chalin: { runs: 2, passCount: 2, passRate: 1, avgWorkspaceScore: 100, p95DurationMs: 12_000, totalTokens: 40_000, estimatedCostUsd: 0.4, infrastructureFailures: 0 },
+        simple: { runs: 2, passCount: 2, passRate: 1, avgWorkspaceScore: 98, p95DurationMs: 10_000, totalTokens: 42_000, estimatedCostUsd: 0.42, infrastructureFailures: 0 },
+      },
+      blindJudgeStability: { status: "stable-win", samples: 2, targetWins: 2, targetLosses: 0, winRate: 1, preliminary: false, stable: true },
+      improvementSignals: { comparisons: 2, targetWins: 1, targetLosses: 1, qualityGaps: 0, efficiencyGaps: 1, infrastructureBlocked: 0, abstractRules: ["quality-equivalent-token-premium"] },
+    },
+    {
+      caseId: "holdout-go-ttl-cache",
+      pass: false,
+      reason: "target-infrastructure-failure provider-error: usage_limit_reached",
+      stats: {
+        chalin: { runs: 1, passCount: 0, passRate: 0, avgWorkspaceScore: 44, p95DurationMs: 2_000, totalTokens: 0, estimatedCostUsd: 0, infrastructureFailures: 1 },
+        simple: { runs: 1, passCount: 0, passRate: 0, avgWorkspaceScore: 44, p95DurationMs: 1_500, totalTokens: 0, estimatedCostUsd: 0, infrastructureFailures: 1 },
+      },
+      blindJudgeStability: { status: "skipped", samples: 0, skipped: 1, targetWins: 0, targetLosses: 0, preliminary: false, stable: false, recommendation: "rerun-judge-or-check-infrastructure" },
+      improvementSignals: { comparisons: 0, targetWins: 0, targetLosses: 0, qualityGaps: 0, efficiencyGaps: 0, infrastructureBlocked: 1, abstractRules: ["provider-health-rerun"] },
+      regressionGates: { pass: false, failures: ["chalin holdout-go-ttl-cache#1: infrastructure failure provider-error"] },
+    },
+  ]);
+
+  assert.equal(aggregate.pass, false);
+  assert.deepEqual(aggregate.failedCases, []);
+  assert.deepEqual(aggregate.infrastructureBlockedCases, ["holdout-go-ttl-cache"]);
+  assert.deepEqual(aggregate.qualityFallbackCases, ["holdout-go-ttl-cache"]);
+  assert.equal(aggregate.passedCases, 1);
+  assert.equal(aggregate.variants.chalin?.runs, 2);
+  assert.equal(aggregate.variants.chalin?.avgWorkspaceScore, 100);
+  assert.deepEqual(aggregate.blindJudge.statuses, { "holdout-go-ttl-cache": "stable-win" });
+  assert.equal(aggregate.blindJudge.skipped, 0);
+  assert.equal(aggregate.improvement.comparisons, 2);
+  assert.equal(aggregate.improvement.efficiencyGaps, 1);
+  assert.equal(aggregate.improvement.infrastructureBlocked, 0);
+  assert.deepEqual(aggregate.improvement.abstractRules, { "quality-equivalent-token-premium": 1 });
+  assert.deepEqual(aggregate.warnings, [
+    "holdout-go-ttl-cache: latest matrix row is blocked by infrastructure; using previous analyzable row for quality aggregate",
+  ]);
+});
+
+test("workflow matrix aggregate keeps prior quality row when latest failure is recovered infra noise", async () => {
+  const { summarizeWorkflowMatrixRows } = await import("../evals/workflow-matrix.ts");
+  const aggregate = summarizeWorkflowMatrixRows([
+    {
+      caseId: "large-feature-rate-limit",
+      pass: true,
+      recordedAt: "2026-05-28T00:00:00.000Z",
+      stats: { chalin: { runs: 1, passCount: 1, passRate: 1, avgWorkspaceScore: 88, p95DurationMs: 87_000, totalTokens: 35_000, estimatedCostUsd: 0.35, infrastructureFailures: 0 } },
+      blindJudgeStability: { status: "preliminary-win", samples: 1, targetWins: 1, targetLosses: 0, preliminary: true },
+    },
+    {
+      caseId: "large-feature-rate-limit",
+      pass: false,
+      recordedAt: "2026-05-28T01:00:00.000Z",
+      reason: "chalin-vs-simple: chalinP95RecoveredInfra=true; blind-judge run1:winner=simple,targetRank=3",
+      stats: { chalin: { runs: 1, passCount: 1, passRate: 1, avgWorkspaceScore: 84, p95DurationMs: 297_000, totalTokens: 130_000, estimatedCostUsd: 1.3, infrastructureFailures: 0 } },
+      blindJudgeStability: { status: "preliminary-loss", samples: 1, targetWins: 0, targetLosses: 1, preliminary: true },
+    },
+  ]);
+
+  assert.equal(aggregate.pass, false);
+  assert.deepEqual(aggregate.failedCases, []);
+  assert.deepEqual(aggregate.infrastructureBlockedCases, ["large-feature-rate-limit"]);
+  assert.deepEqual(aggregate.qualityFallbackCases, ["large-feature-rate-limit"]);
+  assert.equal(aggregate.variants.chalin?.totalTokens, 35_000);
+  assert.deepEqual(aggregate.blindJudge.statuses, { "large-feature-rate-limit": "preliminary-win" });
+});
+
+test("workflow matrix aggregate summarizes improvement gaps and abstract rules", async () => {
+  const { summarizeWorkflowMatrixRows } = await import("../evals/workflow-matrix.ts");
+  const aggregate = summarizeWorkflowMatrixRows([
+    {
+      caseId: "case-a",
+      pass: false,
+      stats: { chalin: { runs: 2, passCount: 2, passRate: 1 } },
+      improvementSignals: { comparisons: 2, targetWins: 1, targetLosses: 1, qualityGaps: 0, efficiencyGaps: 1, infrastructureBlocked: 0, abstractRules: ["compress final", "one focused verification"] },
+    },
+    {
+      caseId: "case-b",
+      pass: false,
+      stats: { chalin: { runs: 2, passCount: 1, passRate: 0.5 } },
+      improvementSignals: { comparisons: 2, targetWins: 0, targetLosses: 2, qualityGaps: 1, efficiencyGaps: 1, infrastructureBlocked: 0, abstractRules: ["compress final"] },
+    },
+  ]);
+
+  assert.equal(aggregate.improvement.comparisons, 4);
+  assert.equal(aggregate.improvement.targetWins, 1);
+  assert.equal(aggregate.improvement.targetLosses, 3);
+  assert.equal(aggregate.improvement.qualityGaps, 1);
+  assert.equal(aggregate.improvement.efficiencyGaps, 2);
+  assert.deepEqual(aggregate.improvement.abstractRules, {
+    "compress final": 2,
+    "one focused verification": 1,
+  });
 });
 
 test("workflow matrix aggregate does not spread shard-level gate failure across passing case rows", async () => {
@@ -3225,4 +4191,61 @@ test("workflow matrix aggregate does not spread shard-level gate failure across 
 
   assert.equal(aggregate.pass, false);
   assert.deepEqual(aggregate.failedCases, ["case-b"]);
+});
+
+test("workflow matrix aggregate surfaces preliminary blind judge stability", async () => {
+  const { summarizeWorkflowMatrixRows } = await import("../evals/workflow-matrix.ts");
+  const aggregate = summarizeWorkflowMatrixRows([
+    {
+      caseId: "case-a",
+      pass: true,
+      stats: { chalin: { runs: 1, passCount: 1, passRate: 1, avgWorkspaceScore: 100, p95DurationMs: 10_000, totalTokens: 10, estimatedCostUsd: 0.1 } },
+      blindJudgeStability: { status: "single-sample-win", samples: 1, targetWins: 1, targetLosses: 0, preliminary: true, stable: false, recommendation: "rerun-with-runs>=2" },
+      regressionGates: { pass: true, warnings: ["case-a: blind judge target win is single-sample only"] },
+    },
+  ]);
+
+  assert.equal(aggregate.pass, true);
+  assert.deepEqual(aggregate.blindJudge.statuses, { "case-a": "single-sample-win" });
+  assert.equal(aggregate.blindJudge.cases, 1);
+  assert.equal(aggregate.blindJudge.samples, 1);
+  assert.equal(aggregate.blindJudge.targetWins, 1);
+  assert.equal(aggregate.blindJudge.preliminary, 1);
+  assert.deepEqual(aggregate.warnings, [
+    "case-a: blind judge target win is single-sample only",
+    "case-a: blind judge stability is preliminary (single-sample-win; samples=1)",
+  ]);
+});
+
+test("workflow matrix aggregate summarizes blind judge majority", async () => {
+  const { summarizeWorkflowMatrixRows } = await import("../evals/workflow-matrix.ts");
+  const aggregate = summarizeWorkflowMatrixRows([
+    {
+      caseId: "case-a",
+      pass: true,
+      stats: { chalin: { runs: 2, passCount: 2, passRate: 1 } },
+      blindJudgeStability: { status: "stable-win", samples: 2, targetWins: 2, targetLosses: 0, winRate: 1, preliminary: false, stable: true },
+    },
+    {
+      caseId: "case-b",
+      pass: false,
+      stats: { chalin: { runs: 2, passCount: 2, passRate: 1 } },
+      blindJudgeStability: { status: "unstable", samples: 2, targetWins: 1, targetLosses: 1, winRate: 0.5, preliminary: false, stable: false },
+    },
+    {
+      caseId: "case-c",
+      pass: false,
+      stats: { chalin: { runs: 2, passCount: 2, passRate: 1 } },
+      blindJudgeStability: { status: "stable-loss", samples: 2, targetWins: 0, targetLosses: 2, winRate: 0, preliminary: false, stable: false },
+    },
+  ]);
+
+  assert.equal(aggregate.blindJudge.cases, 3);
+  assert.equal(aggregate.blindJudge.samples, 6);
+  assert.equal(aggregate.blindJudge.targetWins, 3);
+  assert.equal(aggregate.blindJudge.targetLosses, 3);
+  assert.equal(aggregate.blindJudge.winRate, 0.5);
+  assert.equal(aggregate.blindJudge.stableWins, 1);
+  assert.equal(aggregate.blindJudge.stableLosses, 1);
+  assert.equal(aggregate.blindJudge.unstable, 1);
 });

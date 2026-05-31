@@ -67,7 +67,7 @@ export interface WorkflowQualityReport {
   suggestions: WorkflowQualityIssue[];
 }
 
-const IGNORED_DIRS = new Set([".git", "node_modules", ".pi-chalin", WORKFLOW_ORACLE_DIR, "dist", "coverage", "target"]);
+const IGNORED_DIRS = new Set([".git", "node_modules", ".pi", ".pi-chalin", ".pi-lens", WORKFLOW_ORACLE_DIR, "dist", "coverage", "target"]);
 
 export function scoreWorkflowWorkspace(cwd: string, evalCase: WorkflowEvalCase, options: { finalText?: string; durationMs?: number; validateTests?: boolean; validationTimeoutMs?: number } = {}): WorkflowQualityReport {
   const scoringCwd = resolveScoringRoot(cwd, evalCase);
@@ -517,7 +517,8 @@ function looksLikeTruncatedDocumentation(content: string): boolean {
   if (!trimmed) return false;
   const lastLine = trimmed.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).at(-1) ?? "";
   return /(?:^#+\s+\S.*|:\s*|-|\d+[.)])$/.test(lastLine)
-    || /\b(TODO|TBD|WIP|pendiente)\b/i.test(trimmed)
+    || /\b(?:TODO|TBD|WIP)\b/.test(trimmed)
+    || /(?:^|\n)\s*(?:[-*]\s*)?pendiente\s*:/i.test(trimmed)
     || /(?:rollback|validaci(?:ó|o)n|compatibilidad|riesgos?)\s*:\s*$/i.test(lastLine);
 }
 

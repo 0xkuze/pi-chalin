@@ -80,6 +80,7 @@ async function main(): Promise<void> {
     console.log(`${variant}: runs=${stats.passCount}/${stats.runs}, avgScore=${stats.avgWorkspaceScore}, maxCaseP95=${stats.p95DurationMs}ms, tokens=${stats.totalTokens}, estCost=$${stats.estimatedCostUsd}`);
   }
   if (aggregate.failedCases.length) console.log(`failed cases: ${aggregate.failedCases.join(", ")}`);
+  if (aggregate.infrastructureBlockedCases.length) console.log(`infrastructure blocked cases: ${aggregate.infrastructureBlockedCases.join(", ")}`);
   if (aggregate.warnings.length) console.log(`warnings: ${aggregate.warnings.length}`);
   console.log(`report: ${reportPath}`);
   console.log(`matrix: ${matrixPath}`);
@@ -137,26 +138,14 @@ function runShardAttempt(shard: WorkflowMatrixShard, options: ShardRunOptions, a
   const started = Date.now();
   const matrixPath = path.join(options.shardDir, `shard-${String(shard.index).padStart(2, "0")}-attempt-${attempt}.jsonl`);
   fs.rmSync(matrixPath, { force: true });
-  const childArgs = [
-    workflowEvalPath,
-    "--mode=sdk",
-    `--case=${shard.caseIds.join(",")}`,
-    `--variant=${variantArgForShard(options.variants)}`,
-    `--runs=${options.runs}`,
-    `--timeoutMs=${options.timeoutMs}`,
-    `--matrixPath=${matrixPath}`,
-    "--allowMulti=1",
-    "--allowLong=1",
-    "--gates=1",
-    `--model=${options.extraArgs.model ?? process.env.PI_CHALIN_WORKFLOW_MODEL ?? "openai-codex/gpt-5.3-codex-spark"}`,
-    `--thinking=${options.extraArgs.thinking ?? process.env.PI_CHALIN_WORKFLOW_THINKING ?? "low"}`,
-  ];
-  if (options.extraArgs.judge) childArgs.push(`--judge=${options.extraArgs.judge}`);
-  const comparativeJudge = options.extraArgs.comparativeJudge ?? options.extraArgs.comparisonJudge;
-  if (comparativeJudge) childArgs.push(`--comparativeJudge=${comparativeJudge}`);
-  if (options.extraArgs.judgeModel) childArgs.push(`--judgeModel=${options.extraArgs.judgeModel}`);
-  if (options.extraArgs.judgeTimeoutMs) childArgs.push(`--judgeTimeoutMs=${options.extraArgs.judgeTimeoutMs}`);
-  if (options.extraArgs.gentleRoot) childArgs.push(`--gentleRoot=${options.extraArgs.gentleRoot}`);
+  const childArgs = buildWorkflowShardChildArgs({
+    caseIds: shard.caseIds,
+    variants: options.variants,
+    runs: options.runs,
+    timeoutMs: options.timeoutMs,
+    matrixPath,
+    extraArgs: options.extraArgs,
+  });
   console.log(`shard ${shard.index}/${shard.total} attempt ${attempt}: ${shard.caseIds.join(",")}`);
   const child = spawn(process.execPath, childArgs, {
     cwd: repoRoot,
@@ -170,6 +159,31 @@ function runShardAttempt(shard: WorkflowMatrixShard, options: ShardRunOptions, a
   return new Promise((resolve) => {
     child.on("close", (status, signal) => resolve({ shardIndex: shard.index, caseIds: shard.caseIds, attempts: attempt, status, signal, durationMs: Date.now() - started, matrixPath }));
   });
+}
+
+export function buildWorkflowShardChildArgs(options: { caseIds: string[]; variants: string[]; runs: number; timeoutMs: number; matrixPath: string; extraArgs: Record<string, string> }): string[] {
+  const childArgs = [
+    workflowEvalPath,
+    "--mode=sdk",
+    `--case=${options.caseIds.join(",")}`,
+    `--variant=${variantArgForShard(options.variants)}`,
+    `--runs=${options.runs}`,
+    `--timeoutMs=${options.timeoutMs}`,
+    `--matrixPath=${options.matrixPath}`,
+    "--allowMulti=1",
+    "--allowLong=1",
+    "--gates=1",
+    `--model=${options.extraArgs.model ?? process.env.PI_CHALIN_WORKFLOW_MODEL ?? "openai-codex/gpt-5.3-codex-spark"}`,
+    `--thinking=${options.extraArgs.thinking ?? process.env.PI_CHALIN_WORKFLOW_THINKING ?? "low"}`,
+  ];
+  if (options.extraArgs.judge) childArgs.push(`--judge=${options.extraArgs.judge}`);
+  const comparativeJudge = options.extraArgs.comparativeJudge ?? options.extraArgs.comparisonJudge;
+  if (comparativeJudge) childArgs.push(`--comparativeJudge=${comparativeJudge}`);
+  for (const key of ["judgeModel", "judgeTimeoutMs", "gentleRoot", "storeFullOutput", "storeFullWorkflowOutput", "storeFailedOutput", "storeFailedWorkflowOutput"]) {
+    const value = options.extraArgs[key];
+    if (value !== undefined) childArgs.push(`--${key}=${value}`);
+  }
+  return childArgs;
 }
 
 function variantArgForShard(variants: string[]): string {

@@ -332,19 +332,44 @@ function largeFeatureCase(): WorkflowEvalCase {
       requiredContent: [
         check("src/rateLimit.ts", "exports rate limiter factory", ["export function createRateLimiter|export class RateLimiter", "limit", "windowMs", "Map"], 30),
         check("src/rateLimit.ts", "tracks key windows", ["key", "resetAt|expiresAt|windowStart|\\bstart\\b|hits|bucket|window", "allowed|remaining|retryAfter"], 20),
-        check("src/rateLimit.ts", "validates positive integer options", ["Number\\.isInteger\\([^)]*limit", "Number\\.isInteger\\([^)]*windowMs", "throw\\s+new\\s+\\w*Error"], 16),
+        check("src/rateLimit.ts", "validates positive integer options", ["(?:Number\\.is(?:Safe)?Integer\\([^)]*limit|(?:assert|check|ensure|validate)\\w*\\(\\s*limit)", "(?:Number\\.is(?:Safe)?Integer\\([^)]*windowMs|(?:assert|check|ensure|validate)\\w*\\(\\s*windowMs)", "(?:Number\\.is(?:Safe)?Integer\\(|Math\\.(?:floor|trunc)\\(|%\\s*1\\b)", "throw\\s+new\\s+\\w*Error"], 16),
         check("test/rateLimit.test.ts", "covers allow block and reset", ["createRateLimiter|RateLimiter", "allowed", "false|blocked|deny|limit", "reset|advanceTimers|Date\\.now|mock|tick|now\\s*\\+|current\\s*=", "expect|assert"], 25),
         check("test/rateLimit.test.ts", "covers invalid fractional options", ["1\\.5|2\\.5|fraction|fraccion|integer|entero", "limit", "windowMs", "throws|assert\\.throws|toThrow"], 12),
       ],
       forbiddenContent: [
         forbid("src/rateLimit.ts", "no external dependency shortcut", ["from ['\"]rate-limiter", "express-rate-limit", "bottleneck"], 25),
-        forbid("src/rateLimit.ts", "does not silently round fractional options", ["Math\\.floor\\([^)]*(?:limit|windowMs)", "Math\\.trunc\\([^)]*(?:limit|windowMs)"], 18),
       ],
       finalAnswerPatterns: ["src/rateLimit.ts", "test/rateLimit.test.ts", "sin dependencias|no external|dependenc"],
       maxFiles: 5,
       maxDurationMs: 60_000,
       semantic: { exports: [{ file: "src/rateLimit.ts", names: ["createRateLimiter", "RateLimiter"] }], packageScripts: ["test"], testFiles: [{ file: "test/rateLimit.test.ts", target: "createRateLimiter", assertions: true }] },
       validation: { runTests: true, allowSkip: true },
+      hiddenValidation: {
+        description: "Hidden rate limiter tests reject fractional option rounding and verify independent key windows.",
+        setup(cwd) {
+          write(cwd, "test/rateLimit.hidden.test.ts", `import { describe, it } from "bun:test";
+import assert from "node:assert/strict";
+import { createRateLimiter } from "../src/rateLimit.ts";
+
+describe("createRateLimiter hidden validation", () => {
+  it("rejects fractional options instead of silently rounding them", () => {
+    assert.throws(() => createRateLimiter({ limit: 1.2, windowMs: 1000 }));
+    assert.throws(() => createRateLimiter({ limit: 2, windowMs: 1000.5 }));
+  });
+
+  it("keeps keys independent and resets by elapsed window time", () => {
+    let now = 0;
+    const limiter = createRateLimiter({ limit: 1, windowMs: 100, now: () => now });
+    assert.equal(limiter.check("a").allowed, true);
+    assert.equal(limiter.check("a").allowed, false);
+    assert.equal(limiter.check("b").allowed, true);
+    now = 100;
+    assert.equal(limiter.check("a").allowed, true);
+  });
+});
+`);
+        },
+      },
     },
     setup(cwd) {
       writeBaseBunProject(cwd);
@@ -510,11 +535,38 @@ function holdoutScaffoldConfigLoaderCase(): WorkflowEvalCase {
         check("README.md", "documents config API usage", ["loadConfig", "PORT|port", "NODE_ENV|nodeEnv", "3000"], 10),
       ],
       forbiddenContent: [forbid("package.json", "no dependency shortcut", ["dotenv", "zod", "envalid"], 25)],
-      finalAnswerPatterns: ["src/config.ts", "test/config.test.ts", "README.md"],
+      finalAnswerPatterns: ["src/config.ts", "tests?/config.test.ts", "README.md"],
       maxFiles: 6,
       maxDurationMs: 60_000,
       semantic: { exports: [{ file: "src/config.ts", names: ["loadConfig"] }], packageScripts: ["test"], testFiles: [{ file: "test/*.test.ts", target: "loadConfig", assertions: true }] },
       validation: { runTests: true, allowSkip: true },
+      hiddenValidation: {
+        description: "Hidden config loader tests cover strict whole-string port parsing and env-parameter isolation from process.env.",
+        setup(cwd) {
+          write(cwd, "tests/config.hidden.test.ts", `import { describe, expect, test } from "bun:test";
+import { loadConfig } from "../src/config";
+
+describe("loadConfig hidden validation", () => {
+  test("rejects fractional, trailing-text, and empty PORT values", () => {
+    expect(() => loadConfig({ PORT: "3000.5" })).toThrow();
+    expect(() => loadConfig({ PORT: "3000abc" })).toThrow();
+    expect(() => loadConfig({ PORT: "" })).toThrow();
+  });
+
+  test("uses only the injected env object, not process.env", () => {
+    const previous = process.env.PORT;
+    process.env.PORT = "9999";
+    try {
+      expect(loadConfig({})).toEqual({ port: 3000, nodeEnv: "development" });
+    } finally {
+      if (previous === undefined) delete process.env.PORT;
+      else process.env.PORT = previous;
+    }
+  });
+});
+`);
+        },
+      },
     },
     setup(cwd) {
       write(cwd, "README.md", `# config loader\n\nTODO: scaffold config library.\n`);
