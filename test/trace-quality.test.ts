@@ -87,24 +87,6 @@ test("gradePiTrace treats tools after approval-blocked chalin_route as recovery"
   assert.ok(report.suggestions.some((issue) => issue.id === "chalin-route-approval-blocked"));
 });
 
-test("gradePiTrace treats direct-recommended chalin_route as non-executable recovery", () => {
-  const directRecommended = "pi-chalin direct execution recommended\nstatus: direct-recommended\nDirect execution recommended: this is a bounded explicit-file mutation.";
-  const final = "Cambios: `src/pricing.ts`. Verificación: `bun test` passed.";
-  const stdout = [
-    event({ type: "tool_execution_end", toolName: "chalin_route", result: { content: [{ type: "text", text: directRecommended }] } }),
-    event({ type: "tool_execution_start", toolName: "read", args: { path: "src/pricing.ts" } }),
-    event({ type: "tool_execution_start", toolName: "edit", args: { path: "src/pricing.ts" } }),
-    event({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: final }] } }),
-  ].join("\n");
-
-  const report = gradePiTrace(stdout, { variant: "chalin", promptKind: "generic", finalText: final });
-
-  assert.equal(report.metrics.chalinRouteNonExecutable, 1);
-  assert.equal(report.effectiveAnswerSource, "provided-final");
-  assert.equal(report.warnings.some((issue) => issue.id === "parent-tools-after-chalin"), false);
-  assert.ok(report.suggestions.some((issue) => issue.id === "chalin-route-direct-recommended"));
-});
-
 test("gradePiTrace does not treat approval-blocked chalin_route as final answer", () => {
   const blockedChalin = "pi-chalin completed: scout → planner → worker\nstatus: ask\nApproval: ask — Route risk 'medium' meets approval threshold 'medium'.";
   const report = gradePiTrace(event({ type: "tool_execution_end", toolName: "chalin_route", result: { content: [{ type: "text", text: blockedChalin }] } }), { variant: "chalin", promptKind: "generic" });

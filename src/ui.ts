@@ -10,7 +10,7 @@ import { Container, Spacer, Text, type Component, type Focusable, type TUI } fro
 import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ArtifactStore, FeatureArtifactState } from "./artifacts.ts";
 import { getLatestRun, getLiveStepSession } from "./runtime-state.ts";
-import type { AgentDefinition, ApprovalDecision, ChalinRuntimeState, MemoryRecord, RouteDecision, RunState, RunStepState } from "./schemas.ts";
+import type { AgentDefinition, ApprovalDecision, BudgetCapHit, ChalinRuntimeState, MemoryRecord, RouteDecision, RunState, RunStepState } from "./schemas.ts";
 import { clearLegacyChalinControlWidget, setChalinStatus } from "./ui-status.ts";
 import { formatWebFetchAudit, type WebFetchAuditEntry } from "./webfetch.ts";
 
@@ -1510,14 +1510,15 @@ export function summarizeRuntimeGuards(run: RunState | undefined): string[] {
   if (!run) return ["guards: no run yet"];
   const policyViolations = run.metrics?.policyViolations?.length ?? sumStepMetric(run, (step) => step.metrics?.policyViolations?.length ?? 0);
   const budgetStops = run.metrics?.budgetStopCount ?? sumStepMetric(run, (step) => step.metrics?.budgetStopCount ?? 0);
+  const budgetHits = run.metrics?.budgetCapHits ?? run.steps.flatMap((step) => step.metrics?.budgetCapHits ?? []);
   const duplicateReads = run.metrics?.duplicateReadCount ?? sumStepMetric(run, (step) => step.metrics?.duplicateReadCount ?? 0);
   const toolCalls = run.metrics?.toolCalls ?? sumStepMetric(run, (step) => step.metrics?.toolCalls ?? 0);
-  const modelFallbacks = run.steps.reduce((count, step) => count + (step.modelResolution?.attempts.some((attempt) => ["invalid", "unavailable", "unauthenticated", "fallback"].includes(attempt.status)) ? 1 : 0), 0);
+  const modelFallbacks = run.steps.reduce((count, step) => count + (step.modelResolution?.attempts.some((attempt) => ["invalid", "unavailable", "unauthenticated", "fallback", "runtime-error"].includes(attempt.status)) ? 1 : 0), 0);
   const worktreeState = summarizeWorktreeGuard(run);
   const guardHealth = policyViolations > 0 || /conflict|unavailable|failed/i.test(worktreeState) || modelFallbacks > 0
     ? "attention"
     : "ok";
-  const budgetHealth = budgetStops > 0 ? `limit reached (${budgetStops} stops)` : "ok";
+  const budgetHealth = summarizeBudgetHealth(budgetHits, budgetStops);
   return [
     `guards: ${guardHealth}`,
     `budget: ${budgetHealth}`,
@@ -1526,6 +1527,28 @@ export function summarizeRuntimeGuards(run: RunState | undefined): string[] {
     `worktrees: ${worktreeState}`,
     `model fallback: ${modelFallbacks}`,
   ];
+}
+
+function summarizeBudgetHealth(hits: BudgetCapHit[] | undefined, stops: number): string {
+  const hard = (hits ?? []).filter((hit) => hit.severity === "hard");
+  const soft = (hits ?? []).filter((hit) => hit.severity === "soft");
+  if (hard.length > 0 || stops > 0) return `stopped ${formatBudgetHit(hard[0] ?? soft[0])}${stops > 0 ? ` (${stops} stops)` : ""}`;
+  if (soft.length > 0) return `warning ${formatBudgetHit(soft[0])}`;
+  return "ok";
+}
+
+function formatBudgetHit(hit: BudgetCapHit | undefined): string {
+  if (!hit) return "unknown cap";
+  const used = formatCompactNumber(hit.used);
+  const limit = formatCompactNumber(hit.limit);
+  return `${hit.name} ${used}/${limit}${hit.toolName ? ` via ${hit.toolName}` : ""}`;
+}
+
+function formatCompactNumber(value: number): string {
+  if (!Number.isFinite(value)) return "∞";
+  if (Math.abs(value) >= 1_000_000) return `${Math.round(value / 100_000) / 10}M`;
+  if (Math.abs(value) >= 1_000) return `${Math.round(value / 100) / 10}k`;
+  return String(Math.round(value * 1000) / 1000);
 }
 
 async function openLiveStatusOverlay(ctx: ExtensionContext, run: RunState): Promise<void> {
@@ -1930,7 +1953,7 @@ function emptyUsage() {
 function formatStepDiagnostics(step: RunStepState): string {
   return [
     step.modelResolution ? `model: ${step.modelResolution.selected}\nthinking: ${step.thinkingLevel ?? "inherit"}\n${step.modelResolution.attempts.map((attempt) => `- ${attempt.source}: ${attempt.ref ?? "inherit"} -> ${attempt.status}${attempt.reason ? ` (${attempt.reason})` : ""}`).join("\n")}` : undefined,
-    step.metrics ? `tools: ${step.metrics.toolCalls}/${step.maxToolCalls ?? "?"}\npolicy violations: ${step.metrics.policyViolations?.length ?? 0}\nbudget stops: ${step.metrics.budgetStopCount ?? 0}\nfiles read: ${step.metrics.filesRead?.join(", ") ?? "none"}` : undefined,
+    step.metrics ? `tools: ${step.metrics.toolCalls}/${step.maxToolCalls ?? "?"}\npolicy violations: ${step.metrics.policyViolations?.length ?? 0}\nbudget: ${summarizeBudgetHealth(step.metrics.budgetCapHits, step.metrics.budgetStopCount ?? 0)}\nfiles read: ${step.metrics.filesRead?.join(", ") ?? "none"}` : undefined,
     step.error ? `error: ${step.error}` : undefined,
   ].filter(Boolean).join("\n\n");
 }
@@ -2017,7 +2040,7 @@ function formatActivityStep(step: RunState["steps"][number] | undefined): string
     step.task,
     step.output?.handoff,
     step.modelResolution ? `model: ${step.modelResolution.selected}\nthinking: ${step.thinkingLevel ?? "inherit"}\n${step.modelResolution.attempts.map((attempt) => `- ${attempt.source}: ${attempt.ref ?? "inherit"} → ${attempt.status}${attempt.reason ? ` (${attempt.reason})` : ""}`).join("\n")}` : undefined,
-    step.metrics ? `tools: ${step.metrics.toolCalls}/${step.maxToolCalls ?? "?"} · policy violations: ${step.metrics.policyViolations?.length ?? 0} · budget stops: ${step.metrics.budgetStopCount ?? 0}` : undefined,
+    step.metrics ? `tools: ${step.metrics.toolCalls}/${step.maxToolCalls ?? "?"} · policy violations: ${step.metrics.policyViolations?.length ?? 0} · budget: ${summarizeBudgetHealth(step.metrics.budgetCapHits, step.metrics.budgetStopCount ?? 0)}` : undefined,
     step.error ? `error: ${step.error}` : undefined,
   ].filter(Boolean).join("\n");
 }

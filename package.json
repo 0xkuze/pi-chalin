@@ -41,7 +41,11 @@
     "eval:workflow": "bun evals/workflow-quality.eval.ts",
     "eval:workflow:sharded": "bun evals/workflow-sharded.eval.ts --preset=community",
     "eval:workflow:matrix": "bun evals/workflow-quality.eval.ts --preset=matrix",
+    "eval:workflow:harness": "bun evals/workflow-quality.eval.ts --preset=harness",
+    "eval:workflow:complex": "bun evals/workflow-quality.eval.ts --preset=complex",
+    "eval:workflow:routed": "bun evals/workflow-quality.eval.ts --preset=routed",
     "eval:workflow:community": "bun evals/workflow-quality.eval.ts --preset=community",
+    "eval:workflow:improvement": "bun evals/workflow-improvement.eval.ts",
     "eval:long": "bun evals/long-running.eval.ts"
   },
   "keywords": [

@@ -1,4 +1,5 @@
-export type TraceVariant = "simple" | "chalin";
+const traceVariants = ["simple", "chalin", "gentle"] as const;
+export type TraceVariant = (typeof traceVariants)[number];
 export type TraceIssueSeverity = "critical" | "warning" | "suggestion";
 
 export interface TraceToolEvent {
@@ -189,10 +190,6 @@ export function gradePiTrace(stdout: string, options: GradePiTraceOptions = {}):
   if (variant === "chalin" && chalinApprovalBlocked > 0) {
     add({ id: "chalin-route-approval-blocked", severity: "suggestion", message: "`chalin_route` quedó bloqueado por approval; si el parent recupera con tools directas, no debe contarse como exploración post-chalin.", evidence: `${chalinApprovalBlocked} blocked route result(s)`, penalty: 0 });
   }
-  if (variant === "chalin" && chalinNonExecutable > chalinApprovalBlocked) {
-    add({ id: "chalin-route-direct-recommended", severity: "suggestion", message: "`chalin_route` recomendó ejecución directa; si el parent recupera con tools nativas, no debe contarse como handoff chalin ejecutado.", evidence: `${chalinNonExecutable - chalinApprovalBlocked} direct recommendation(s)`, penalty: 0 });
-  }
-
   const answerText = effective.text;
   const minAnswerChars = options.minAnswerChars ?? (promptKind === "deep-project-analysis" ? DEFAULT_MIN_DEEP_ANSWER_CHARS : 120);
   if (!answerText.trim()) {
@@ -349,7 +346,7 @@ function countNonExecutableChalinRoutes(toolEvents: TraceToolEvent[]): number {
 }
 
 function isNonExecutableChalinResult(text: string): boolean {
-  return isApprovalBlockedChalinResult(text) || /\bstatus:\s*direct-recommended\b|direct execution recommended|pi-chalin direct execution recommended/i.test(text);
+  return isApprovalBlockedChalinResult(text);
 }
 
 function isApprovalBlockedChalinResult(text: string): boolean {

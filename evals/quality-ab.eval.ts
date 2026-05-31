@@ -44,7 +44,7 @@ const extensionPath = path.join(repoRoot, "src", "index.ts");
 if (isMain()) await main();
 
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
+  const args = parseQualityArgs(process.argv.slice(2));
   const startedAt = new Date().toISOString();
   const mode = args.mode ?? process.env.PI_CHALIN_QUALITY_MODE ?? "files";
   const requestedTimeoutMs = args.timeoutMs ?? process.env.PI_CHALIN_QUALITY_TIMEOUT_MS;
@@ -406,11 +406,21 @@ function killProcessTree(pid: number | undefined, signal: NodeJS.Signals): void 
   }
 }
 
-function parseArgs(items: string[]): Record<string, string> {
+export function parseQualityArgs(items: string[]): Record<string, string> {
   const result: Record<string, string> = {};
-  for (const item of items) {
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index] ?? "";
     const match = item.match(/^--([^=]+)=(.+)$/);
-    if (match?.[1] && match[2]) result[match[1]] = match[2];
+    if (match?.[1] && match[2]) {
+      result[match[1]] = match[2];
+      continue;
+    }
+    const flag = item.match(/^--(.+)$/);
+    const next = items[index + 1];
+    if (flag?.[1] && next && !next.startsWith("--")) {
+      result[flag[1]] = next;
+      index += 1;
+    }
   }
   return result;
 }

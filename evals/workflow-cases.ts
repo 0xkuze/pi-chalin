@@ -3,7 +3,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 export type WorkflowCaseKind = "refactor" | "test-writing" | "small-feature" | "large-feature" | "scaffold" | "greenfield" | "bugfix" | "review-only";
-export type WorkflowCaseSuite = "calibration" | "holdout" | "community";
+export type WorkflowCaseSuite = "calibration" | "holdout" | "community" | "complex";
+export const WORKFLOW_ORACLE_DIR = ".workflow-oracle";
 
 export interface RequiredContentCheck {
   file: string;
@@ -17,6 +18,7 @@ export interface ForbiddenContentCheck {
   patterns: string[];
   penalty: number;
   label: string;
+  promptMustMention?: string[];
 }
 
 export interface WorkflowEvalCase {
@@ -27,7 +29,7 @@ export interface WorkflowEvalCase {
   prompt: string;
   promptVariants?: string[];
   sourceProfile?: {
-    kind: "synthetic" | "community-inspired";
+    kind: "synthetic" | "community-inspired" | "real-oss-inspired";
     inspiredBy?: string[];
     privateData: false;
   };
@@ -41,7 +43,11 @@ export interface WorkflowEvalCase {
     maxDurationMs?: number;
     semantic?: WorkflowSemanticExpectation;
     validation?: WorkflowValidationExpectation;
+    hiddenValidation?: WorkflowHiddenValidationExpectation;
+    orchestration?: WorkflowOrchestrationExpectation;
+    antiCheat?: WorkflowAntiCheatExpectation;
   };
+  authoringReview?: WorkflowAuthoringReview;
   setup(cwd: string): void;
 }
 
@@ -57,6 +63,30 @@ export interface WorkflowValidationExpectation {
   allowSkip?: boolean;
 }
 
+export interface WorkflowHiddenValidationExpectation {
+  description: string;
+  setup(cwd: string): void;
+}
+
+export interface WorkflowAntiCheatExpectation {
+  forbiddenPathMarkers?: string[];
+  notes?: string[];
+}
+
+export interface WorkflowOrchestrationExpectation {
+  requireChalinRoute?: boolean;
+  requireGentleSubagent?: boolean;
+  rationale?: string;
+}
+
+export interface WorkflowAuthoringReview {
+  oracleSolution?: string;
+  knownFailureModes?: string[];
+  antiCheatNotes?: string[];
+  reviewedBy: string;
+  reviewedAt: string;
+}
+
 export interface WorkflowFixture {
   case: WorkflowEvalCase;
   cwd: string;
@@ -65,7 +95,7 @@ export interface WorkflowFixture {
   promptVariantCount: number;
 }
 
-export function listWorkflowEvalCases(options: { includeHoldout?: boolean; includeCommunity?: boolean } = {}): WorkflowEvalCase[] {
+export function listWorkflowEvalCases(options: { includeHoldout?: boolean; includeCommunity?: boolean; includeComplex?: boolean } = {}): WorkflowEvalCase[] {
   const calibration = [
     refactorPricingCase(),
     addUnitTestCase(),
@@ -78,6 +108,7 @@ export function listWorkflowEvalCases(options: { includeHoldout?: boolean; inclu
     ...calibration,
     ...(options.includeHoldout ? listWorkflowHoldoutCases() : []),
     ...(options.includeCommunity ? listWorkflowCommunityCases() : []),
+    ...(options.includeComplex ? listWorkflowComplexCases() : []),
   ];
 }
 
@@ -121,8 +152,21 @@ export function listWorkflowCommunityCases(): WorkflowEvalCase[] {
   ];
 }
 
+export function listWorkflowComplexCases(): WorkflowEvalCase[] {
+  return [
+    complexBunZigRustLockfileTriageCase(),
+    complexBunZigRuntimePlanCase(),
+    complexUvRustIndexUrlBugfixCase(),
+    complexRustWorkspaceCacheFeatureCase(),
+    complexSqliteCTokenizerBugfixCase(),
+    complexRedisCExpireFeatureCase(),
+    complexCpythonCUnicodeRegressionCase(),
+    complexLlvmCppDiagnosticPlanCase(),
+  ];
+}
+
 export function getWorkflowEvalCase(id: string): WorkflowEvalCase {
-  const found = listWorkflowEvalCases({ includeHoldout: true, includeCommunity: true }).find((item) => item.id === id);
+  const found = listWorkflowEvalCases({ includeHoldout: true, includeCommunity: true, includeComplex: true }).find((item) => item.id === id);
   if (!found) throw new Error(`Unsupported workflow eval case: ${id}`);
   return found;
 }
@@ -130,7 +174,7 @@ export function getWorkflowEvalCase(id: string): WorkflowEvalCase {
 export function selectWorkflowPrompt(evalCase: WorkflowEvalCase, variantIndex = 0): { prompt: string; index: number; count: number } {
   const prompts = evalCase.promptVariants?.length ? evalCase.promptVariants : autoPromptVariants(evalCase.prompt);
   const index = ((Math.floor(variantIndex) % prompts.length) + prompts.length) % prompts.length;
-  return { prompt: prompts[index]!, index, count: prompts.length };
+  return { prompt: workflowPromptWithHarnessOrchestration(evalCase, prompts[index]!), index, count: prompts.length };
 }
 
 function autoPromptVariants(prompt: string): string[] {
@@ -139,6 +183,16 @@ function autoPromptVariants(prompt: string): string[] {
     `Necesito una solución acotada, verificable y sin atajos. ${prompt} Si se piden tests, deben probar el comportamiento solicitado con asserts no triviales. Al final reporta archivos cambiados y verificación ejecutada.`,
     `Trabaja como en un cambio real de producción pero mantén el scope mínimo. ${prompt} Si se piden tests, actualízalos con casos de comportamiento/edge case y ejecútalos.`,
   ];
+}
+
+function workflowPromptWithHarnessOrchestration(evalCase: WorkflowEvalCase, prompt: string): string {
+  const orchestration = evalCase.expected.orchestration;
+  if (!orchestration?.requireChalinRoute && !orchestration?.requireGentleSubagent) return prompt;
+  return [
+    prompt,
+    "",
+    "Esta es una tarea compleja de harness: si tu entorno tiene router, subagentes o delegacion especializada disponible, usalo para aislar contexto, ejecutar/revisar el trabajo y entregar evidencia. Decide tu propia topologia y roles segun la evidencia; no uses una cadena prehecha.",
+  ].join("\n");
 }
 
 export function createWorkflowFixture(id: string, options: { promptVariantIndex?: number } = {}): WorkflowFixture {
@@ -162,6 +216,7 @@ function refactorPricingCase(): WorkflowEvalCase {
         check("src/pricing.ts", "exports calculateInvoice", ["export function calculateInvoice", "subtotal", "tax", "total"], 22),
         check("src/pricing.ts", "extracts helper functions", ["function (?!calculateInvoice)\\w+|const \\w*(Subtotal|Tax|Discount|Taxable)\\w*\\s*(?::[^=]+)?=\\s*\\([^)]*\\)\\s*(?::[^=]+)?=>", "subtotal", "taxable|tax"], 18),
         check("test/pricing.test.ts", "keeps behavior tests", ["calculateInvoice", "discount", "tax", "total", "expect|assert"], 20),
+        check("test/pricing.test.ts", "covers pricing edge behavior", ["items\\s*:\\s*\\[(?:(?!\\]).)*sku\\s*:(?:(?!\\]).)*sku\\s*:", "missing discount|defaults missing discount|descuento omitido|discount to zero", "12\\.5|7\\.25|8\\.875|fraction|fracci[oó]n|porcentajes fraccionarios"], 18),
         check("package.json", "keeps test script", ["vitest run|node\\s+.*--test|bun test"], 8),
       ],
       forbiddenContent: [
@@ -196,6 +251,7 @@ function addUnitTestCase(): WorkflowEvalCase {
         check("test/safeDivide.test.ts", "normal division still covered", ["10", "2", "5"], 10),
       ],
       forbiddenContent: [forbid("src/safeDivide.ts", "does not rewrite into throwing behavior", ["throw\\s+new\\s+\\w*Error", "Infinity"], 25)],
+      forbiddenFiles: ["src/*.test.ts"],
       finalAnswerPatterns: ["test/safeDivide.test.ts", "divisi[oó]n|division"],
       maxFiles: 3,
       maxDurationMs: 45_000,
@@ -220,8 +276,9 @@ function smallFeatureCase(): WorkflowEvalCase {
     expected: {
       requiredFiles: ["src/filterTasks.ts", "test/filterTasks.test.ts", "package.json"],
       requiredContent: [
-        check("src/filterTasks.ts", "exports filterTasks", ["export function filterTasks", "title", "description", "toLowerCase", "filter"], 30),
+        check("src/filterTasks.ts", "exports filterTasks", ["export function filterTasks", "title", "description", "to(?:Locale)?LowerCase", "filter"], 30),
         check("test/filterTasks.test.ts", "case-insensitive title/description tests", ["filterTasks", "description|desc", "case|may[uú]sculas|lower|toLowerCase|ALPHA|alpha", "expect|assert"], 28),
+        check("test/filterTasks.test.ts", "search filter edge coverage", ["empty|vac[ií]a|\"\"|''", "\"\\s{2,}\"|'\\s{2,}'|whitespace|blank|trim", "\\[\\]|length\\s*,\\s*0|no matches|no-match|sin resultados", "order|orden|preserv|tasks\\[[0-9]+\\].*tasks\\[[0-9]+\\]"], 16),
       ],
       forbiddenContent: [forbid("src/filterTasks.ts", "does not hardcode fixture terms", ["alpha beta only", "hardcoded"], 20)],
       finalAnswerPatterns: ["src/filterTasks.ts", "test/filterTasks.test.ts"],
@@ -229,6 +286,42 @@ function smallFeatureCase(): WorkflowEvalCase {
       maxDurationMs: 45_000,
       semantic: { exports: [{ file: "src/filterTasks.ts", names: ["filterTasks"] }], packageScripts: ["test"], testFiles: [{ file: "test/filterTasks.test.ts", target: "filterTasks", assertions: true }] },
       validation: { runTests: true, allowSkip: true },
+      hiddenValidation: {
+        description: "Hidden behavior tests cover case-insensitive title/description search, blank query behavior, no-match behavior, and order preservation.",
+        setup(cwd) {
+          write(cwd, "test/__hidden__/filterTasks.hidden.test.ts", `import { describe, it } from "bun:test";
+import assert from "node:assert/strict";
+import { filterTasks, type Task } from "../../src/filterTasks.ts";
+
+const tasks: Task[] = [
+  { id: "a", title: "Alpha rollout", description: "Billing launch" },
+  { id: "b", title: "Beta cleanup", description: "Remove obsolete flag" },
+  { id: "c", title: "Gamma docs", description: "ALPHA release notes" },
+];
+
+describe("filterTasks hidden behavior", () => {
+  it("matches title or description case-insensitively and preserves order", () => {
+    assert.deepEqual(filterTasks(tasks, "alpha").map((task) => task.id), ["a", "c"]);
+  });
+
+  it("returns all tasks for a blank query without mutating input order", () => {
+    assert.deepEqual(filterTasks(tasks, "   ").map((task) => task.id), ["a", "b", "c"]);
+  });
+
+  it("returns an empty list when no task matches", () => {
+    assert.deepEqual(filterTasks(tasks, "shipyard"), []);
+  });
+});
+`);
+        },
+      },
+    },
+    authoringReview: {
+      oracleSolution: "Implement filterTasks as a pure filter over normalized query/title/description and add behavior tests for empty, no-match, case-insensitive, and order-preserving paths.",
+      knownFailureModes: ["Returns tasks unchanged", "Only searches title", "Case-sensitive search", "Ignores blank query normalization", "Hardcodes starter fixture terms"],
+      antiCheatNotes: ["Starter tests are intentionally insufficient; hidden tests are installed only during validation."],
+      reviewedBy: "pi-chalin-maintainers",
+      reviewedAt: "2026-05-24",
     },
     setup(cwd) {
       writeBaseBunProject(cwd);
@@ -244,20 +337,50 @@ function largeFeatureCase(): WorkflowEvalCase {
     kind: "large-feature",
     suite: "calibration",
     title: "Implement bounded rate limiter feature across module and tests",
-    prompt: "Implementa un rate limiter in-memory en src/rateLimit.ts con ventanas por key, límite configurable, reset por tiempo y tests. Mantén el scope pequeño: no agregues dependencias externas.",
+    prompt: "Implementa un rate limiter in-memory en src/rateLimit.ts con ventanas por key, límite configurable, reset por tiempo y tests. Valida que limit y windowMs sean enteros positivos, incluyendo tests para valores fraccionarios inválidos. Mantén el scope pequeño: no agregues dependencias externas.",
     expected: {
       requiredFiles: ["src/rateLimit.ts", "test/rateLimit.test.ts", "package.json"],
       requiredContent: [
         check("src/rateLimit.ts", "exports rate limiter factory", ["export function createRateLimiter|export class RateLimiter", "limit", "windowMs", "Map"], 30),
         check("src/rateLimit.ts", "tracks key windows", ["key", "resetAt|expiresAt|windowStart|\\bstart\\b|hits|bucket|window", "allowed|remaining|retryAfter"], 20),
+        check("src/rateLimit.ts", "validates positive integer options", ["(?:Number\\.is(?:Safe)?Integer\\([^)]*limit|(?:assert|check|ensure|validate)\\w*\\(\\s*limit)", "(?:Number\\.is(?:Safe)?Integer\\([^)]*windowMs|(?:assert|check|ensure|validate)\\w*\\(\\s*windowMs)", "(?:Number\\.is(?:Safe)?Integer\\(|Math\\.(?:floor|trunc)\\(|%\\s*1\\b)", "throw\\s+new\\s+\\w*Error"], 16),
         check("test/rateLimit.test.ts", "covers allow block and reset", ["createRateLimiter|RateLimiter", "allowed", "false|blocked|deny|limit", "reset|advanceTimers|Date\\.now|mock|tick|now\\s*\\+|current\\s*=", "expect|assert"], 25),
+        check("test/rateLimit.test.ts", "covers invalid fractional options", ["1\\.5|2\\.5|fraction|fraccion|integer|entero", "limit", "windowMs", "throws|assert\\.throws|toThrow"], 12),
       ],
-      forbiddenContent: [forbid("src/rateLimit.ts", "no external dependency shortcut", ["from ['\"]rate-limiter", "express-rate-limit", "bottleneck"], 25)],
+      forbiddenContent: [
+        forbid("src/rateLimit.ts", "no external dependency shortcut", ["from ['\"]rate-limiter", "express-rate-limit", "bottleneck"], 25),
+      ],
       finalAnswerPatterns: ["src/rateLimit.ts", "test/rateLimit.test.ts", "sin dependencias|no external|dependenc"],
       maxFiles: 5,
       maxDurationMs: 60_000,
       semantic: { exports: [{ file: "src/rateLimit.ts", names: ["createRateLimiter", "RateLimiter"] }], packageScripts: ["test"], testFiles: [{ file: "test/rateLimit.test.ts", target: "createRateLimiter", assertions: true }] },
       validation: { runTests: true, allowSkip: true },
+      hiddenValidation: {
+        description: "Hidden rate limiter tests reject fractional option rounding and verify independent key windows.",
+        setup(cwd) {
+          write(cwd, "test/rateLimit.hidden.test.ts", `import { describe, it } from "bun:test";
+import assert from "node:assert/strict";
+import { createRateLimiter } from "../src/rateLimit.ts";
+
+describe("createRateLimiter hidden validation", () => {
+  it("rejects fractional options instead of silently rounding them", () => {
+    assert.throws(() => createRateLimiter({ limit: 1.2, windowMs: 1000 }));
+    assert.throws(() => createRateLimiter({ limit: 2, windowMs: 1000.5 }));
+  });
+
+  it("keeps keys independent and resets by elapsed window time", () => {
+    let now = 0;
+    const limiter = createRateLimiter({ limit: 1, windowMs: 100, now: () => now });
+    assert.equal(limiter.check("a").allowed, true);
+    assert.equal(limiter.check("a").allowed, false);
+    assert.equal(limiter.check("b").allowed, true);
+    now = 100;
+    assert.equal(limiter.check("a").allowed, true);
+  });
+});
+`);
+        },
+      },
     },
     setup(cwd) {
       writeBaseBunProject(cwd);
@@ -273,12 +396,12 @@ function scaffoldCase(): WorkflowEvalCase {
     kind: "scaffold",
     suite: "calibration",
     title: "Scaffold a small CLI tool in a partially empty repo",
-    prompt: "Scaffoldea un CLI TypeScript mínimo llamado note-pack: package.json, src/cli.ts, README con uso, y test básico. El comando debe aceptar un argumento de texto y devolverlo normalizado a minúsculas.",
+    prompt: "Scaffoldea un CLI TypeScript mínimo llamado note-pack: package.json, src/cli.ts, README con uso, y test básico en test/cli.test.ts. Usa Bun para ejecutar el test TypeScript sin agregar frameworks de test externos. El comando debe aceptar un argumento de texto y devolverlo normalizado a minúsculas.",
     expected: {
       requiredFiles: ["package.json", "src/cli.ts", "README.md", "test/*.test.ts"],
       requiredContent: [
         check("package.json", "declares CLI package and scripts", ["note-pack", "bin", "test", "type"], 20),
-        check("src/*.ts", "implements lowercase normalization", ["toLowerCase", "export"], 25),
+        check("src/*.ts", "implements lowercase normalization", ["to(?:Locale)?LowerCase", "export"], 25),
         check("test/*.test.ts", "tests normalization", ["normalize|note-pack|cli", "toLowerCase|lowercase|min[uú]scula|may[uú]scula", "expect|assert|test\\("], 20),
         check("README.md", "documents usage", ["note-pack", "Usage|Uso", "bun|Bun|note-pack\\s+<"], 10),
       ],
@@ -423,11 +546,38 @@ function holdoutScaffoldConfigLoaderCase(): WorkflowEvalCase {
         check("README.md", "documents config API usage", ["loadConfig", "PORT|port", "NODE_ENV|nodeEnv", "3000"], 10),
       ],
       forbiddenContent: [forbid("package.json", "no dependency shortcut", ["dotenv", "zod", "envalid"], 25)],
-      finalAnswerPatterns: ["src/config.ts", "test/config.test.ts", "README.md"],
+      finalAnswerPatterns: ["src/config.ts", "tests?/config.test.ts", "README.md"],
       maxFiles: 6,
       maxDurationMs: 60_000,
       semantic: { exports: [{ file: "src/config.ts", names: ["loadConfig"] }], packageScripts: ["test"], testFiles: [{ file: "test/*.test.ts", target: "loadConfig", assertions: true }] },
       validation: { runTests: true, allowSkip: true },
+      hiddenValidation: {
+        description: "Hidden config loader tests cover strict whole-string port parsing and env-parameter isolation from process.env.",
+        setup(cwd) {
+          write(cwd, "tests/config.hidden.test.ts", `import { describe, expect, test } from "bun:test";
+import { loadConfig } from "../src/config";
+
+describe("loadConfig hidden validation", () => {
+  test("rejects fractional, trailing-text, and empty PORT values", () => {
+    expect(() => loadConfig({ PORT: "3000.5" })).toThrow();
+    expect(() => loadConfig({ PORT: "3000abc" })).toThrow();
+    expect(() => loadConfig({ PORT: "" })).toThrow();
+  });
+
+  test("uses only the injected env object, not process.env", () => {
+    const previous = process.env.PORT;
+    process.env.PORT = "9999";
+    try {
+      expect(loadConfig({})).toEqual({ port: 3000, nodeEnv: "development" });
+    } finally {
+      if (previous === undefined) delete process.env.PORT;
+      else process.env.PORT = previous;
+    }
+  });
+});
+`);
+        },
+      },
     },
     setup(cwd) {
       write(cwd, "README.md", `# config loader\n\nTODO: scaffold config library.\n`);
@@ -553,7 +703,7 @@ function holdoutDocsRunbookCase(): WorkflowEvalCase {
     expected: {
       requiredFiles: ["docs/runbook.md", "package.json", "src/sync.ts"],
       requiredContent: [
-        check("docs/runbook.md", "documents tests diagnosis and rollback", ["Bun\\s+(run\\s+)?test", "sync", "rollback", "diagn[oó]stic|diagnos|debug|troubleshoot", "src/sync.ts|package.json"], 45),
+        check("docs/runbook.md", "documents tests diagnosis and rollback", ["Bun\\s+(run\\s+)?test", "sync", "rollback", "diagn[oó]stic|diagnos|debug|troubleshoot", "package.json", "src/sync.ts", "syncRecords|local|remote"], 45),
         check("src/sync.ts", "code remains untouched surface", ["export function syncRecords", "remote", "local"], 10),
       ],
       forbiddenFiles: ["test/*", "tests/*"],
@@ -997,6 +1147,32 @@ function communityGoJsonDecoderCase(): WorkflowEvalCase {
       maxFiles: 5,
       maxDurationMs: 60_000,
       validation: { runTests: true, allowSkip: false },
+      hiddenValidation: {
+        description: "Hidden Go strict decoder tests cover whitespace-only empty bodies and trailing JSON values.",
+        setup(cwd) {
+          write(cwd, "jsonx/decode_hidden_test.go", `package jsonx
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestDecodeStrictRejectsWhitespaceOnlyBody(t *testing.T) {
+	_, err := DecodeStrict[payload](strings.NewReader("   \\n\\t  "))
+	if err == nil {
+		t.Fatal("expected empty body error for whitespace-only input")
+	}
+}
+
+func TestDecodeStrictRejectsTrailingJSON(t *testing.T) {
+	_, err := DecodeStrict[payload](strings.NewReader(` + "`" + `{"Name":"Ada"} {"Name":"Grace"}` + "`" + `))
+	if err == nil {
+		t.Fatal("expected trailing JSON error")
+	}
+}
+`);
+        },
+      },
     },
     setup(cwd) {
       write(cwd, "go.mod", "module example.com/jsonx\n\ngo 1.22\n");
@@ -1170,8 +1346,365 @@ function communityTsEventEmitterCase(): WorkflowEvalCase {
   };
 }
 
+function complexBunZigRustLockfileTriageCase(): WorkflowEvalCase {
+  return {
+    id: "complex-bun-zig-rust-lockfile-triage",
+    kind: "review-only",
+    suite: "complex",
+    title: "Bun-inspired Zig/Rust lockfile duplicate package triage",
+    prompt: "En esta base multi-lenguaje inspirada en Bun, haz un analisis profundo cross-language del bug de paquetes duplicados cuando la ruta del workspace mezcla separadores Windows/POSIX. No cambies codigo: actualiza docs/lockfile-triage.md con causa raiz en Zig y Rust, archivos implicados, reproduccion minima, plan de fix y validacion.",
+    sourceProfile: realOssProfile("Bun", "Zig lockfile parser", "Rust package manifest resolver"),
+    expected: {
+      requiredFiles: ["docs/lockfile-triage.md", "src/install/lockfile.zig", "crates/resolver/src/manifest.rs"],
+      requiredContent: [
+        check("docs/lockfile-triage.md", "documents cross-language root cause", ["Lockfile\\.parse|lockfile\\.zig", "PackageManifest|manifest\\.rs|crates/resolver/src/manifest\\.rs", "Windows|POSIX|separator|separador|\\\\\\\\|/", "duplicate|duplicad", "cache key|workspace[_ -]?key|path key|identity keys?|package key"], 48),
+        check("docs/lockfile-triage.md", "includes repro fix plan and validation", ["Repro|reproducci", "Plan|fix", "normalize|normaliz", "zig test|cargo test|bun test|validation|validaci"], 34),
+        check("src/install/lockfile.zig", "fixture keeps Zig lockfile surface", ["pub const Lockfile", "parse", "workspace_path"], 8),
+        check("crates/resolver/src/manifest.rs", "fixture keeps Rust manifest surface", ["pub struct PackageManifest", "from_json", "workspace_path"], 8),
+      ],
+      forbiddenFiles: ["src/install/*.test.zig", "crates/resolver/tests/*"],
+      finalAnswerPatterns: ["docs/lockfile-triage.md", "Lockfile", "manifest"],
+      maxFiles: 10,
+      maxDurationMs: 75_000,
+      validation: { runTests: false, allowSkip: true },
+      orchestration: {
+        requireChalinRoute: true,
+        requireGentleSubagent: true,
+        rationale: "Cross-language root-cause triage spans multiple ownership surfaces and should exercise each harness's subagent/router path.",
+      },
+    },
+    setup(cwd) {
+      write(cwd, "README.md", "# Bun-inspired installer fixture\n\nSynthetic fixture for lockfile/resolver triage.\n");
+      write(cwd, "src/install/lockfile.zig", `pub const Lockfile = struct {\n    workspace_path: []const u8,\n\n    pub fn parse(workspace_path: []const u8) Lockfile {\n        return .{ .workspace_path = workspace_path };\n    }\n\n    pub fn packageKey(this: Lockfile, name: []const u8) []const u8 {\n        _ = this;\n        return name;\n    }\n};\n`);
+      write(cwd, "crates/resolver/src/manifest.rs", `pub struct PackageManifest {\n    pub name: String,\n    pub workspace_path: String,\n}\n\nimpl PackageManifest {\n    pub fn from_json(name: &str, workspace_path: &str) -> Self {\n        Self { name: name.to_string(), workspace_path: workspace_path.to_string() }\n    }\n\n    pub fn workspace_key(&self) -> String {\n        format!(\"{}:{}\", self.workspace_path, self.name)\n    }\n}\n`);
+      write(cwd, "docs/lockfile-triage.md", "# Lockfile duplicate triage\n\nTODO: map root cause and fix plan.\n");
+    },
+  };
+}
+
+function complexBunZigRuntimePlanCase(): WorkflowEvalCase {
+  return {
+    id: "complex-bun-zig-runtime-plan",
+    kind: "review-only",
+    suite: "complex",
+    title: "Bun-inspired runtime boundary planning across Zig and Rust",
+    prompt: "En esta base multi-lenguaje inspirada en Bun, planifica una implementacion segura y cross-language para propagar un nuevo runtime flag `--deny-net` desde CLI Zig hasta el runtime Rust. No escribas codigo: actualiza docs/deny-net-plan.md con arquitectura, archivos tocados, riesgos, pasos incrementales y validacion.",
+    sourceProfile: realOssProfile("Bun", "Zig CLI boundary", "Rust runtime services"),
+    expected: {
+      requiredFiles: ["docs/deny-net-plan.md", "src/cli.zig", "src/bindings/runtime.zig", "crates/runtime/src/permissions.rs"],
+      requiredContent: [
+        check("docs/deny-net-plan.md", "maps Zig to Rust boundary", ["src/cli\\.zig", "runtime\\.zig", "permissions\\.rs", "FFI|binding|boundary|frontera", "deny-net"], 46),
+        check("docs/deny-net-plan.md", "contains incremental implementation and validation plan", ["Paso|Step|Stage|Fase|Etapa|increment|staged|S[0-9]", "risk|riesgo", "tests|valid|verif", "CLI|runtime", "rollback|compat"], 34),
+      ],
+      forbiddenFiles: ["src/**/*.test.zig", "crates/runtime/tests/*"],
+      finalAnswerPatterns: ["docs/deny-net-plan.md", "deny-net", "valid|verif|verificaci|prueba|test"],
+      maxFiles: 10,
+      maxDurationMs: 75_000,
+      validation: { runTests: false, allowSkip: true },
+      orchestration: {
+        requireChalinRoute: true,
+        requireGentleSubagent: true,
+        rationale: "Cross-runtime architecture planning should use routed/subagent context isolation instead of direct parent-only work.",
+      },
+    },
+    setup(cwd) {
+      write(cwd, "src/cli.zig", `pub const CliOptions = struct {\n    script: []const u8,\n};\n\npub fn parseArgs(script: []const u8) CliOptions {\n    return .{ .script = script };\n}\n`);
+      write(cwd, "src/bindings/runtime.zig", `pub extern fn bun_runtime_start(script: [*:0]const u8) void;\n`);
+      write(cwd, "crates/runtime/src/permissions.rs", `pub struct RuntimePermissions {\n    pub allow_net: bool,\n}\n\nimpl Default for RuntimePermissions {\n    fn default() -> Self { Self { allow_net: true } }\n}\n`);
+      write(cwd, "docs/deny-net-plan.md", "# deny-net plan\n\nTODO: plan runtime flag propagation.\n");
+    },
+  };
+}
+
+function complexUvRustIndexUrlBugfixCase(): WorkflowEvalCase {
+  return {
+    id: "complex-uv-rust-index-url-bugfix",
+    kind: "bugfix",
+    suite: "complex",
+    title: "uv-inspired Rust index URL normalization bugfix",
+    prompt: "En este workspace Rust inspirado en uv, corrige normalize_index_url en crates/index-url/src/lib.rs sin agregar dependencias externas. Debe normalizar scheme/host case-insensitive, quitar credenciales y tratar especificamente /simple y /simple/ como equivalentes normalizando /simple a /simple/. Otros paths y URLs sin path deben preservarse salvo scheme/host/credenciales, incluyendo query/fragment. Añade/actualiza tests y deja cargo test pasando.",
+    sourceProfile: realOssProfile("uv", "Rust index URL resolver", "Python package indexes"),
+    expected: {
+      requiredFiles: ["Cargo.toml", "crates/index-url/Cargo.toml", "crates/index-url/src/lib.rs"],
+      requiredContent: [
+        check("crates/index-url/src/lib.rs", "normalizes index URLs", ["pub fn normalize_index_url", "trim", "to_ascii_lowercase|to_lowercase", "simple", "credentials|userinfo|@|split"], 44),
+        check("crates/index-url/src/lib.rs", "contains Rust unit tests for equivalent URLs", ["#\\[cfg\\(test\\)\\]", "#\\[test\\]", "EXAMPLE\\.COM|Example\\.com|example\\.com", "/simple/?", "assert_eq"], 36),
+      ],
+      forbiddenContent: [forbid("crates/index-url/src/lib.rs", "no url crate shortcut", ["use url::", "url ="], 20, ["dependencias externas|external dependencies"])],
+      finalAnswerPatterns: ["crates/index-url/src/lib.rs", "cargo test"],
+      maxFiles: 8,
+      maxDurationMs: 75_000,
+      validation: { runTests: true, allowSkip: false },
+      hiddenValidation: {
+        description: "Hidden Rust index URL behavior tests cover query/fragment composition, non-target path case preservation, and no-path preservation.",
+        setup(cwd) {
+          write(cwd, "crates/index-url/tests/hidden.rs", `use index_url::normalize_index_url;
+
+#[test]
+fn normalizes_simple_before_query_and_fragment() {
+    assert_eq!(
+        normalize_index_url("HTTPS://token@Example.COM/simple?format=json#frag"),
+        "https://example.com/simple/?format=json#frag"
+    );
+}
+
+#[test]
+fn preserves_non_target_path_case_and_no_path_urls() {
+    assert_eq!(
+        normalize_index_url("https://Example.com/pkg/SIMPLE"),
+        "https://example.com/pkg/SIMPLE"
+    );
+    assert_eq!(normalize_index_url("https://Example.com"), "https://example.com");
+}
+
+#[test]
+fn preserves_non_simple_path_query_without_adding_slash() {
+    assert_eq!(
+        normalize_index_url("https://Example.com/path?x=1"),
+        "https://example.com/path?x=1"
+    );
+}
+`);
+        },
+      },
+      orchestration: {
+        requireChalinRoute: true,
+        requireGentleSubagent: true,
+        rationale: "Rust workspace URL normalization combines package-index semantics, hidden behavioral edges, and verification, so both harnesses should exercise routed implementation planning/review.",
+      },
+    },
+    setup(cwd) {
+      write(cwd, "Cargo.toml", `[workspace]\nmembers = ["crates/index-url"]\nresolver = "2"\n`);
+      write(cwd, "crates/index-url/Cargo.toml", `[package]\nname = "index-url"\nversion = "0.1.0"\nedition = "2021"\n`);
+      write(cwd, "crates/index-url/src/lib.rs", `pub fn normalize_index_url(input: &str) -> String {\n    input.trim().to_string()\n}\n\n#[cfg(test)]\nmod tests {\n    use super::normalize_index_url;\n\n    #[test]\n    fn normalizes_simple_suffix_and_case() {\n        assert_eq!(normalize_index_url("HTTPS://EXAMPLE.COM/simple"), "https://example.com/simple/");\n    }\n\n    #[test]\n    fn strips_credentials_from_index_url() {\n        assert_eq!(normalize_index_url("https://token@example.com/simple/"), "https://example.com/simple/");\n    }\n}\n`);
+    },
+  };
+}
+
+function complexRustWorkspaceCacheFeatureCase(): WorkflowEvalCase {
+  return {
+    id: "complex-rust-workspace-cache-feature",
+    kind: "large-feature",
+    suite: "complex",
+    title: "Rust workspace cache key feature with deterministic markers",
+    prompt: "En este workspace Rust, implementa build_cache_key en crates/cache-key/src/lib.rs. Debe normalizar package con trim + lowercase, normalizar version con trim sin cambiar su contenido, aplicar trim a markers, ignorar markers vacios despues del trim, ordenar markers, preservar case y duplicados de markers, producir una key deterministica y cubrirlo con tests. Deja cargo test pasando.",
+    sourceProfile: realOssProfile("Cargo ecosystem", "uv cache keys", "Rust workspaces"),
+    expected: {
+      requiredFiles: ["Cargo.toml", "crates/cache-key/Cargo.toml", "crates/cache-key/src/lib.rs"],
+      requiredContent: [
+        check("crates/cache-key/src/lib.rs", "implements deterministic cache key builder", ["pub fn build_cache_key", "package", "version", "markers", "sort|sort_unstable", "filter|is_empty", "to_ascii_lowercase|to_lowercase"], 48),
+        check("crates/cache-key/src/lib.rs", "tests marker ordering and empty markers", ["#\\[test\\]", "marker", "sort|order|determin", "empty|blank", "assert_eq"], 34),
+      ],
+      finalAnswerPatterns: ["crates/cache-key/src/lib.rs", "cargo test"],
+      maxFiles: 8,
+      maxDurationMs: 75_000,
+      validation: { runTests: true, allowSkip: false },
+      hiddenValidation: {
+        description: "Hidden Rust cache key behavior tests cover marker case preservation, trimming, sorting, duplicate retention, and empty marker filtering.",
+        setup(cwd) {
+          write(cwd, "crates/cache-key/tests/hidden.rs", `use cache_key::build_cache_key;
+
+#[test]
+fn preserves_marker_case_while_sorting_and_filtering() {
+    assert_eq!(
+        build_cache_key(" Ruff ", " 1.0.0 ", &["Zed", " alpha ", "", "  "]),
+        "ruff:1.0.0:Zed,alpha"
+    );
+}
+
+#[test]
+fn keeps_duplicate_markers_without_lowercasing() {
+    assert_eq!(
+        build_cache_key("Pkg", "2", &["B", "a", "B"]),
+        "pkg:2:B,B,a"
+    );
+}
+`);
+        },
+      },
+      orchestration: {
+        requireChalinRoute: true,
+        requireGentleSubagent: true,
+        rationale: "Rust workspace cache-key work combines canonicalization rules, marker ordering, and hidden contract validation, so both harnesses should use their routed/subagent path.",
+      },
+    },
+    setup(cwd) {
+      write(cwd, "Cargo.toml", `[workspace]\nmembers = ["crates/cache-key"]\nresolver = "2"\n`);
+      write(cwd, "crates/cache-key/Cargo.toml", `[package]\nname = "cache-key"\nversion = "0.1.0"\nedition = "2021"\n`);
+      write(cwd, "crates/cache-key/src/lib.rs", `pub fn build_cache_key(package: &str, version: &str, markers: &[&str]) -> String {\n    format!("{package}:{version}:{}", markers.join(","))\n}\n\n#[cfg(test)]\nmod tests {\n    use super::build_cache_key;\n\n    #[test]\n    fn normalizes_package_and_version() {\n        assert_eq!(build_cache_key(" Ruff ", " 1.0.0 ", &[]), "ruff:1.0.0:");\n    }\n}\n`);
+    },
+  };
+}
+
+function complexSqliteCTokenizerBugfixCase(): WorkflowEvalCase {
+  return {
+    id: "complex-sqlite-c-tokenizer-bugfix",
+    kind: "bugfix",
+    suite: "complex",
+    title: "SQLite-inspired C tokenizer quote/comment bugfix",
+    prompt: "Corrige el tokenizer C inspirado en SQLite: count_sql_tokens debe contar tokens ignorando whitespace, tratar strings entre comillas simples como un token separado incluso cuando la comilla aparece pegada a texto no-whitespace, y saltar comentarios -- hasta fin de linea. No agregues dependencias. Deja make test pasando.",
+    sourceProfile: realOssProfile("SQLite", "C tokenizer", "SQL parser edge cases"),
+    expected: {
+      requiredFiles: ["Makefile", "include/sql_tokenizer.h", "src/sql_tokenizer.c", "tests/test_sql_tokenizer.c"],
+      requiredContent: [
+        check("src/sql_tokenizer.c", "handles quoted strings and line comments", ["count_sql_tokens", "'|quote|in_string|string", "--|comment|line_comment|p\\[0\\]\\s*==\\s*'-'|p\\[1\\]\\s*==\\s*'-'", "isspace|ctype", "tokens"], 48),
+        check("tests/test_sql_tokenizer.c", "tests quotes comments and whitespace", ["count_sql_tokens", "select", "a b|quoted|quote", "--|comment", "assert"], 36),
+      ],
+      finalAnswerPatterns: ["src/sql_tokenizer.c", "tests/test_sql_tokenizer.c", "make test"],
+      maxFiles: 8,
+      maxDurationMs: 75_000,
+      validation: { runTests: true, allowSkip: false },
+      hiddenValidation: {
+        description: "Hidden SQL tokenizer behavior tests cover unrestricted line comments, EOF comments, escaped quotes, quoted comment markers, and quote-delimited tokens adjacent to normal token characters.",
+        setup(cwd) {
+          write(cwd, "tests/test_sql_tokenizer.c", `#include "sql_tokenizer.h"
+#include <assert.h>
+
+int main(void) {
+    assert(count_sql_tokens("select 'a b' from users") == 4);
+    assert(count_sql_tokens("select a -- ignored token\\nfrom t") == 4);
+    assert(count_sql_tokens("  select   *   from t  ") == 4);
+    assert(count_sql_tokens("select a--comment without space\\nfrom t") == 4);
+    assert(count_sql_tokens("select a--comment at eof") == 2);
+    assert(count_sql_tokens("select 'it''s -- not comment' from t") == 4);
+    assert(count_sql_tokens("a'b c d'") == 2);
+    return 0;
+}
+`);
+        },
+      },
+      orchestration: {
+        requireChalinRoute: true,
+        requireGentleSubagent: true,
+        rationale: "C tokenizer changes alter state transitions with hidden grammar-edge validation, so both harnesses should use subagent-backed review instead of parent-only direct work.",
+      },
+    },
+    authoringReview: {
+      oracleSolution: "Treat single-quoted strings as separate tokens with doubled quote escapes even when adjacent to normal token characters, skip any -- line comment until newline/EOF, and keep whitespace-only token boundaries intact.",
+      knownFailureModes: ["Only handles comments when followed by whitespace", "Counts words inside quoted strings", "Treats -- inside strings as comments", "Passes starter tests without adding edge coverage"],
+      antiCheatNotes: ["Starter tests are intentionally incomplete; hidden validation extends the visible test with boundary cases after the agent finishes."],
+      reviewedBy: "pi-chalin-maintainers",
+      reviewedAt: "2026-05-24",
+    },
+    setup(cwd) {
+      writeCMakeProject(cwd, "test_sql_tokenizer", "src/sql_tokenizer.c tests/test_sql_tokenizer.c");
+      write(cwd, "include/sql_tokenizer.h", `#pragma once\n\nint count_sql_tokens(const char *sql);\n`);
+      write(cwd, "src/sql_tokenizer.c", `#include "sql_tokenizer.h"\n#include <ctype.h>\n\nint count_sql_tokens(const char *sql) {\n    int tokens = 0;\n    int in_token = 0;\n    for (const char *p = sql; *p; ++p) {\n        if (isspace((unsigned char)*p)) {\n            in_token = 0;\n        } else if (!in_token) {\n            tokens++;\n            in_token = 1;\n        }\n    }\n    return tokens;\n}\n`);
+      write(cwd, "tests/test_sql_tokenizer.c", `#include "sql_tokenizer.h"\n#include <assert.h>\n\nint main(void) {\n    assert(count_sql_tokens("select 'a b' from users") == 4);\n    assert(count_sql_tokens("select a -- ignored token\\nfrom t") == 4);\n    assert(count_sql_tokens("  select   *   from t  ") == 4);\n    return 0;\n}\n`);
+    },
+  };
+}
+
+function complexRedisCExpireFeatureCase(): WorkflowEvalCase {
+  return {
+    id: "complex-redis-c-expire-feature",
+    kind: "large-feature",
+    suite: "complex",
+    title: "Redis-inspired C expire table with deterministic clock",
+    prompt: "Implementa en C una tabla TTL minima inspirada en Redis en src/expire_table.c: expire_set, expire_get y expire_sweep deben usar un reloj inyectado en ms, expirar keys vencidas y preservar keys vivas. Deja make test pasando.",
+    sourceProfile: realOssProfile("Redis", "C expire dictionary", "TTL semantics"),
+    expected: {
+      requiredFiles: ["Makefile", "include/expire_table.h", "src/expire_table.c", "tests/test_expire_table.c"],
+      requiredContent: [
+        check("src/expire_table.c", "implements ttl set get and sweep", ["expire_set", "expire_get", "expire_sweep", "now_ms|clock", "ttl_ms|expires", "strcmp|key"], 50),
+        check("tests/test_expire_table.c", "tests expiry and live keys", ["expire_set", "expire_get", "expire_sweep", "expired|ttl|live", "assert"], 36),
+      ],
+      forbiddenContent: [
+        forbid("src/expire_table.c", "no wall-clock sleep shortcut", ["sleep\\(", "usleep\\(", "time\\("], 24),
+        forbid("src/expire_table.c", "no arbitrary fixed-size table cap", ["#define\\s+MAX_EXPIRE_ENTRIES", "static\\s+expire_entry_t\\s+\\w+\\s*\\["], 20),
+      ],
+      finalAnswerPatterns: ["src/expire_table.c", "tests/test_expire_table.c", "make test"],
+      maxFiles: 8,
+      maxDurationMs: 75_000,
+      validation: { runTests: true, allowSkip: false },
+      orchestration: {
+        requireChalinRoute: true,
+        requireGentleSubagent: true,
+        rationale: "C TTL table work is stateful and memory-sensitive enough to require routed implementation plus review in both harnesses.",
+      },
+    },
+    setup(cwd) {
+      writeCMakeProject(cwd, "test_expire_table", "src/expire_table.c tests/test_expire_table.c");
+      write(cwd, "include/expire_table.h", `#pragma once\n\nvoid expire_set(const char *key, const char *value, long long ttl_ms, long long now_ms);\nconst char *expire_get(const char *key, long long now_ms);\nvoid expire_sweep(long long now_ms);\nvoid expire_clear(void);\n`);
+      write(cwd, "src/expire_table.c", `#include "expire_table.h"\n\nvoid expire_set(const char *key, const char *value, long long ttl_ms, long long now_ms) {\n    (void)key; (void)value; (void)ttl_ms; (void)now_ms;\n}\n\nconst char *expire_get(const char *key, long long now_ms) {\n    (void)key; (void)now_ms;\n    return 0;\n}\n\nvoid expire_sweep(long long now_ms) { (void)now_ms; }\nvoid expire_clear(void) {}\n`);
+      write(cwd, "tests/test_expire_table.c", `#include "expire_table.h"\n#include <assert.h>\n#include <string.h>\n\nint main(void) {\n    expire_clear();\n    expire_set("session", "abc", 100, 0);\n    assert(strcmp(expire_get("session", 50), "abc") == 0);\n    assert(expire_get("session", 101) == 0);\n\n    expire_set("live", "yes", 100, 200);\n    expire_set("dead", "no", 10, 200);\n    expire_sweep(250);\n    assert(strcmp(expire_get("live", 250), "yes") == 0);\n    assert(expire_get("dead", 250) == 0);\n    return 0;\n}\n`);
+    },
+  };
+}
+
+function complexCpythonCUnicodeRegressionCase(): WorkflowEvalCase {
+  return {
+    id: "complex-cpython-c-unicode-regression",
+    kind: "bugfix",
+    suite: "complex",
+    title: "CPython-inspired C unicode trim regression",
+    prompt: "Corrige ascii_trim en C inspirado en CPython: debe recortar solo whitespace ASCII de bordes y preservar bytes UTF-8 internos sin truncarlos. Deja make test pasando.",
+    sourceProfile: realOssProfile("CPython", "unicodeobject.c", "C string helpers"),
+    expected: {
+      requiredFiles: ["Makefile", "include/ascii_trim.h", "src/ascii_trim.c", "tests/test_ascii_trim.c"],
+      requiredContent: [
+        check("src/ascii_trim.c", "trims ascii whitespace without mutating utf8 bytes", ["ascii_trim", "isspace|ASCII|unsigned char", "memmove|memcpy|start|end", "len"], 46),
+        check("tests/test_ascii_trim.c", "tests edge trim and utf8 preservation", ["ascii_trim", "caf|é|UTF|utf8", "hello\\\\t|leading|trailing|spaces|tabs", "assert|strcmp"], 36),
+      ],
+      finalAnswerPatterns: ["src/ascii_trim.c", "tests/test_ascii_trim.c", "make test"],
+      maxFiles: 8,
+      maxDurationMs: 75_000,
+      validation: { runTests: true, allowSkip: false },
+      orchestration: {
+        requireChalinRoute: true,
+        requireGentleSubagent: true,
+        rationale: "C byte-level unicode trimming is a risky low-level regression surface, so both harnesses should exercise subagent-backed implementation and review.",
+      },
+    },
+    setup(cwd) {
+      writeCMakeProject(cwd, "test_ascii_trim", "src/ascii_trim.c tests/test_ascii_trim.c");
+      write(cwd, "include/ascii_trim.h", `#pragma once\n\nvoid ascii_trim(char *value);\n`);
+      write(cwd, "src/ascii_trim.c", `#include "ascii_trim.h"\n#include <string.h>\n\nvoid ascii_trim(char *value) {\n    size_t len = strlen(value);\n    if (len > 0 && value[len - 1] == ' ') value[len - 1] = '\\0';\n}\n`);
+      write(cwd, "tests/test_ascii_trim.c", `#include "ascii_trim.h"\n#include <assert.h>\n#include <string.h>\n\nint main(void) {\n    char a[] = "  hello\\t";\n    ascii_trim(a);\n    assert(strcmp(a, "hello") == 0);\n\n    char b[] = "  café au lait  ";\n    ascii_trim(b);\n    assert(strcmp(b, "café au lait") == 0);\n    return 0;\n}\n`);
+    },
+  };
+}
+
+function complexLlvmCppDiagnosticPlanCase(): WorkflowEvalCase {
+  return {
+    id: "complex-llvm-cpp-diagnostic-plan",
+    kind: "review-only",
+    suite: "complex",
+    title: "LLVM-inspired C++ diagnostic ownership planning",
+    prompt: "En esta base C++ inspirada en LLVM/Clang, haz un analisis profundo de arquitectura para mover la responsabilidad de formateo de diagnostics fuera de Parser.cpp hacia DiagnosticEngine sin cambiar comportamiento. No implementes codigo: actualiza docs/diagnostic-refactor-plan.md con mapa de dependencias, plan por etapas, riesgos y pruebas.",
+    sourceProfile: realOssProfile("LLVM/Clang", "C++ parser diagnostics", "large compiler refactors"),
+    expected: {
+      requiredFiles: ["docs/diagnostic-refactor-plan.md", "include/DiagnosticEngine.h", "lib/Parser.cpp", "lib/DiagnosticEngine.cpp"],
+      requiredContent: [
+        check("docs/diagnostic-refactor-plan.md", "maps parser diagnostic ownership", ["Parser\\.cpp", "DiagnosticEngine", "format|formatting|formate", "ownership|responsabilidad", "dependency|dependencia|acopla|coupling"], 46),
+        check("docs/diagnostic-refactor-plan.md", "includes staged plan risks and validation", ["stage|etapa|paso", "risk|riesgo", "test|validaci", "golden|snapshot|regression|regresi[oó]n", "rollback|compat"], 34),
+      ],
+      forbiddenFiles: ["lib/*Test.cpp", "tests/*"],
+      finalAnswerPatterns: ["docs/diagnostic-refactor-plan.md", "DiagnosticEngine", "Parser.cpp"],
+      maxFiles: 10,
+      maxDurationMs: 75_000,
+      validation: { runTests: false, allowSkip: true },
+      orchestration: {
+        requireChalinRoute: true,
+        requireGentleSubagent: true,
+        rationale: "Large refactor planning across parser and diagnostics ownership should exercise routed analysis.",
+      },
+    },
+    setup(cwd) {
+      write(cwd, "include/DiagnosticEngine.h", `#pragma once\n#include <string>\n\nclass DiagnosticEngine {\npublic:\n  void report(int line, const std::string &message);\n};\n`);
+      write(cwd, "lib/DiagnosticEngine.cpp", `#include "DiagnosticEngine.h"\n#include <iostream>\n\nvoid DiagnosticEngine::report(int line, const std::string &message) {\n  std::cerr << line << ": " << message << "\\n";\n}\n`);
+      write(cwd, "lib/Parser.cpp", `#include "DiagnosticEngine.h"\n#include <sstream>\n\nvoid parseToken(DiagnosticEngine &diag, int line, const char *token) {\n  std::ostringstream message;\n  message << "unexpected token '" << token << "'";\n  diag.report(line, message.str());\n}\n`);
+      write(cwd, "docs/diagnostic-refactor-plan.md", "# Diagnostic refactor plan\n\nTODO: plan ownership migration.\n");
+    },
+  };
+}
+
 function communityProfile(...inspiredBy: string[]): WorkflowEvalCase["sourceProfile"] {
   return { kind: "community-inspired", inspiredBy, privateData: false };
+}
+
+function realOssProfile(...inspiredBy: string[]): WorkflowEvalCase["sourceProfile"] {
+  return { kind: "real-oss-inspired", inspiredBy, privateData: false };
 }
 
 function writeBaseBunProject(cwd: string): void {
@@ -1184,12 +1717,16 @@ function writeBaseBunProject(cwd: string): void {
   write(cwd, "tsconfig.json", JSON.stringify({ compilerOptions: { target: "ES2022", module: "NodeNext", moduleResolution: "NodeNext", strict: true, noEmit: true, allowImportingTsExtensions: true }, include: ["src/**/*.ts", "test/**/*.ts"] }, null, 2));
 }
 
+function writeCMakeProject(cwd: string, target: string, sources: string): void {
+  write(cwd, "Makefile", `CC ?= cc\nCFLAGS ?= -std=c11 -Wall -Wextra -Werror -Iinclude\n\n.PHONY: test clean\n\ntest: tests/${target}\n\t./tests/${target}\n\ntests/${target}: ${sources} include/*.h\n\t$(CC) $(CFLAGS) -o $@ ${sources}\n\nclean:\n\trm -f tests/${target}\n`);
+}
+
 function check(file: string, label: string, patterns: string[], points: number): RequiredContentCheck {
   return { file, label, patterns, points };
 }
 
-function forbid(file: string, label: string, patterns: string[], penalty: number): ForbiddenContentCheck {
-  return { file, label, patterns, penalty };
+function forbid(file: string, label: string, patterns: string[], penalty: number, promptMustMention?: string[]): ForbiddenContentCheck {
+  return { file, label, patterns, penalty, promptMustMention };
 }
 
 function write(cwd: string, relativePath: string, content: string): void {

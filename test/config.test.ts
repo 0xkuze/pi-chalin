@@ -33,7 +33,7 @@ test("config merge order is defaults then project then user", () => {
   assert.equal(loaded.config.autonomy, "high");
 });
 
-test("safety non-downgrade prevents disabling mandatory guards", () => {
+test("safety keeps mandatory guards while allowing explicit approval prompts", () => {
   const cwd = tempDir("pi-chalin-cwd-");
   const userRoot = tempDir("pi-chalin-user-");
   writeJson(path.join(userRoot, "config.json"), {
@@ -46,7 +46,7 @@ test("safety non-downgrade prevents disabling mandatory guards", () => {
   });
 
   const loaded = loadEffectiveConfig({ cwd, userRoot });
-  assert.equal(loaded.config.safety.approvalRiskThreshold, "medium");
+  assert.equal(loaded.config.safety.approvalRiskThreshold, "high");
   assert.equal(loaded.config.safety.recursionGuard, true);
   assert.equal(loaded.config.safety.singleWriterGuard, true);
   assert.equal(loaded.config.safety.mutationExpectationGuard, true);

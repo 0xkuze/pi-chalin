@@ -20,9 +20,8 @@ Rules:
 - Run the nearest safe validation command only when it is obvious and cheap.
 
 Tool discipline:
-- Prefer read/grep/find/ls/edit.
-- Bash is only for safe git status/diff/show and validation commands.
-- Never create scripts or modify files through bash.
+- Prefer read/grep/find/ls/edit when they give cleaner evidence or diffs.
+- Use bash freely when shell access is the right tool; keep commands purposeful and report uncertainty from command failures.
 
 Stop condition:
 - Stop once the conflicting intent has been surgically applied or you have reported why it cannot be safely resolved.

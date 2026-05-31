@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "bun:test";
-import { extractFinalText, extractChalinToolResultText, MAX_VARIANT_TIMEOUT_MS, resolveVariantTimeoutMs, resolveVariantsToRun } from "../evals/quality-ab.eval.ts";
+import { extractFinalText, extractChalinToolResultText, MAX_VARIANT_TIMEOUT_MS, parseQualityArgs, resolveVariantTimeoutMs, resolveVariantsToRun } from "../evals/quality-ab.eval.ts";
 
 test("resolveVariantTimeoutMs caps SDK quality evals to a fast-fail window", () => {
   assert.equal(resolveVariantTimeoutMs(undefined), MAX_VARIANT_TIMEOUT_MS);
@@ -14,6 +14,14 @@ test("resolveVariantsToRun supports single-variant diagnosis", () => {
   assert.deepEqual(resolveVariantsToRun("chalin"), ["chalin"]);
   assert.deepEqual(resolveVariantsToRun("simple"), ["simple"]);
   assert.throws(() => resolveVariantsToRun("unknown"), /Unsupported quality eval variant/);
+});
+
+test("parseQualityArgs accepts equals and separated flag values", () => {
+  assert.deepEqual(parseQualityArgs(["--mode=sdk", "--fixture", "go-service", "--variant", "chalin"]), {
+    mode: "sdk",
+    fixture: "go-service",
+    variant: "chalin",
+  });
 });
 
 test("extractFinalText reconstructs Pi streaming JSON deltas", () => {

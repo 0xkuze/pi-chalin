@@ -1,5 +1,5 @@
 import type { ChalinFooterState } from "./ui-status.ts";
-import type { RouteDecision, RunState, RunStatus } from "./schemas.ts";
+import type { BudgetCapHit, RouteDecision, RunState, RunStatus } from "./schemas.ts";
 
 type ChalinRouteWidgetStep = {
   id?: string;
@@ -180,7 +180,7 @@ export function colorizeChalinWidget(text: string, theme: { fg(scope: string, va
     if (/current:/.test(line)) return theme.fg("muted", line);
     if (/✓/.test(line)) return theme.fg("success", line);
     if (/×|failed|attention/.test(line)) return theme.fg("error", line);
-    if (/budget: limit reached/.test(line)) return theme.fg("warning", line);
+    if (/budget: (warning|stopped|limit reached)/.test(line)) return theme.fg("warning", line);
     if (/◆/.test(line)) return theme.fg("accent", line);
     return theme.fg("dim", line);
   }).join("\n");
@@ -190,9 +190,23 @@ function formatWidgetGuards(metrics: RunState["metrics"] | undefined): string {
   if (!metrics) return "tools: 0 · guards: checking";
   const policyViolations = metrics.policyViolations?.length ?? 0;
   const budgetStops = metrics.budgetStopCount ?? 0;
+  const budgetHits = metrics.budgetCapHits ?? [];
   if (policyViolations > 0) return `tools: ${metrics.toolCalls} · guards: attention · ${policyViolations} policy`;
-  if (budgetStops > 0) return `tools: ${metrics.toolCalls} · guards: ok · budget: limit reached (${budgetStops} stops)`;
+  if (budgetStops > 0) return `tools: ${metrics.toolCalls} · guards: ok · budget: stopped ${formatBudgetHit(budgetHits.find((hit) => hit.severity === "hard") ?? budgetHits[0])} (${budgetStops} stops)`;
+  if (budgetHits.some((hit) => hit.severity === "soft")) return `tools: ${metrics.toolCalls} · guards: ok · budget: warning ${formatBudgetHit(budgetHits.find((hit) => hit.severity === "soft"))}`;
   return `tools: ${metrics.toolCalls} · guards: ok`;
+}
+
+function formatBudgetHit(hit: BudgetCapHit | undefined): string {
+  if (!hit) return "unknown cap";
+  return `${hit.name} ${formatCompactNumber(hit.used)}/${formatCompactNumber(hit.limit)}${hit.toolName ? ` via ${hit.toolName}` : ""}`;
+}
+
+function formatCompactNumber(value: number): string {
+  if (!Number.isFinite(value)) return "∞";
+  if (Math.abs(value) >= 1_000_000) return `${Math.round(value / 100_000) / 10}M`;
+  if (Math.abs(value) >= 1_000) return `${Math.round(value / 100) / 10}k`;
+  return String(Math.round(value * 1000) / 1000);
 }
 
 export function footerStateForRun(run: RunState): ChalinFooterState {

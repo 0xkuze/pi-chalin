@@ -13,8 +13,8 @@ import {
 } from "./trace-quality.ts";
 
 export const DEFAULT_JUDGE_MODEL = "anthropic-vibeproxy/claude-opus-4-7";
-export const DEFAULT_JUDGE_TIMEOUT_MS = 45_000;
-export const MAX_JUDGE_TIMEOUT_MS = 60_000;
+export const DEFAULT_JUDGE_TIMEOUT_MS = 120_000;
+export const MAX_JUDGE_TIMEOUT_MS = 300_000;
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -174,7 +174,7 @@ function contentToText(content: unknown): string {
 }
 
 function parseVariant(value: string): TraceVariant {
-  if (value === "simple" || value === "chalin") return value;
+  if (value === "simple" || value === "chalin" || value === "gentle") return value;
   throw new Error(`Unsupported trace variant: ${value}`);
 }
 

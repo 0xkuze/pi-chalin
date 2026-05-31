@@ -192,6 +192,30 @@ export interface TokenUsageSummary {
   cost: TokenUsageCost;
 }
 
+export type BudgetCapName =
+  | "max_tool_calls"
+  | "max_seconds"
+  | "max_usd"
+  | "max_turns"
+  | "max_output_chars"
+  | "max_read_bytes"
+  | "max_files_touched"
+  | "max_retries_per_tool"
+  | "max_cross_step_duplicate_reads";
+
+export type BudgetCapSeverity = "soft" | "hard";
+export type BudgetCapPhase = "pre-tool" | "post-tool" | "post-step";
+
+export interface BudgetCapHit {
+  name: BudgetCapName;
+  used: number;
+  limit: number;
+  severity: BudgetCapSeverity;
+  phase: BudgetCapPhase;
+  toolName?: string;
+  reason?: string;
+}
+
 export interface RunStepMetrics {
   durationMs: number;
   usage: TokenUsageSummary;
@@ -200,6 +224,7 @@ export interface RunStepMetrics {
   toolCallsByName: Record<string, number>;
   policyViolations?: string[];
   budgetStopCount?: number;
+  budgetCapHits?: BudgetCapHit[];
   duplicateReadCount?: number;
   crossStepDuplicateReadCount?: number;
   crossStepDuplicateReads?: string[];
@@ -208,6 +233,9 @@ export interface RunStepMetrics {
   outputChars?: number;
   outputTruncatedCount?: number;
   filesTouched?: string[];
+  shellCommands?: string[];
+  postMutationShellCommands?: number;
+  successfulPostMutationShellCommands?: number;
   retriesByTool?: Record<string, number>;
   utility?: {
     findingsPerTool: number;
@@ -220,7 +248,7 @@ export interface RunStepMetrics {
 }
 
 export type ModelResolutionSource = "session-override" | "agent" | "tier" | "inherit";
-export type ModelResolutionStatus = "selected" | "invalid" | "unavailable" | "unauthenticated" | "fallback";
+export type ModelResolutionStatus = "selected" | "invalid" | "unavailable" | "unauthenticated" | "fallback" | "runtime-error";
 
 export interface ModelResolutionAttempt {
   source: ModelResolutionSource;
@@ -252,16 +280,21 @@ export interface RunStepState {
   currentTool?: string;
   modelResolution?: ModelResolutionLog;
   metrics?: RunStepMetrics;
+  delegationDepth?: number;
 }
 
 export interface RunState {
   id: string;
   route: RouteDecision;
+  rootTask?: string;
   status: RunStatus;
   startedAt: string;
   endedAt?: string;
   steps: RunStepState[];
   logsPath?: string;
+  parentRunId?: string;
+  parentStepId?: string;
+  delegationDepth?: number;
   warnings: string[];
   budgetPreflight?: {
     taskKind: string;
@@ -280,6 +313,7 @@ export interface RunState {
     toolCallsByName: Record<string, number>;
     policyViolations?: string[];
     budgetStopCount?: number;
+    budgetCapHits?: BudgetCapHit[];
     duplicateReadCount?: number;
     crossStepDuplicateReadCount?: number;
     crossStepDuplicateReads?: string[];

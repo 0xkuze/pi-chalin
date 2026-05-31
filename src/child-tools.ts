@@ -1,7 +1,7 @@
-import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
+  createBashToolDefinition,
   createEditToolDefinition,
   createFindToolDefinition,
   createGrepToolDefinition,
@@ -17,6 +17,7 @@ import type { BudgetPolicy } from "./budget.ts";
 import { buildProjectDiscoveryIndex, formatProjectDiscoveryIndex } from "./discovery.ts";
 import { createMemoryCandidate } from "./memory.ts";
 import { createConfiguredMemoryStore } from "./memory-provider.ts";
+import type { BudgetCapHit, BudgetCapName, BudgetCapSeverity } from "./schemas.ts";
 import { buildProjectSnapshot, formatProjectSnapshot } from "./snapshot.ts";
 import { fetchWebUrls, formatWebBundle, searchWeb } from "./webfetch.ts";
 
@@ -25,11 +26,6 @@ const DiscoveryParams = Type.Object({
   maxDepth: Type.Optional(Type.Number({ description: "Maximum directory depth to index. Default 4." })),
   maxEntries: Type.Optional(Type.Number({ description: "Maximum entries to return. Default 450." })),
 });
-const BashParams = Type.Object({
-  command: Type.String({ description: "Safe shell command to execute" }),
-  timeout: Type.Optional(Type.Number({ description: "Timeout in seconds" })),
-});
-
 const ChalinArtifactWriteParams = Type.Object({
   kind: Type.Union([Type.Literal("checkpoint"), Type.Literal("validation-contract"), Type.Literal("worker-skill"), Type.Literal("feature-state")]),
   featureId: Type.String({ description: "Stable feature/task artifact id." }),
@@ -97,6 +93,38 @@ const ChalinMemoryReviseParams = Type.Object({
   reason: Type.Optional(Type.String({ description: "Why the old memory is stale, wrong, or less useful." })),
 });
 
+const DelegateStepParams = Type.Object({
+  id: Type.Optional(Type.String({ description: "Stable step id." })),
+  agent: Type.String({ description: "Available pi-chalin agent name for the delegated subtask." }),
+  task: Type.String({ description: "Concrete delegated outcome, evidence to inspect, files to modify if any, and success criteria." }),
+  budget: Type.Optional(Type.Union([
+    Type.Literal("tight"),
+    Type.Literal("normal"),
+    Type.Literal("deep"),
+    Type.Literal("extended"),
+  ])),
+});
+
+const DelegateStageParams = Type.Object({
+  id: Type.Optional(Type.String({ description: "Stable stage id." })),
+  name: Type.Optional(Type.String({ description: "Human-readable stage name." })),
+  tasks: Type.Array(DelegateStepParams),
+});
+
+const ChalinDelegateParams = Type.Object({
+  task: Type.String({ description: "Bounded objective for the nested subagent chain. Include current evidence and exact success criteria." }),
+  topology: Type.Union([
+    Type.Literal("single"),
+    Type.Literal("chain"),
+    Type.Literal("parallel"),
+    Type.Literal("dag"),
+  ], { description: "Small nested workflow only. Use single/chain/parallel with steps; dag with stages." }),
+  steps: Type.Optional(Type.Array(DelegateStepParams)),
+  stages: Type.Optional(Type.Array(DelegateStageParams)),
+  reason: Type.String({ description: "Why this rare nested delegation is necessary instead of finishing in the current agent." }),
+  requiresWorkspaceMutation: Type.Optional(Type.Boolean()),
+});
+
 type ChalinMemorySearchParamsShape = {
   query: string;
   limit?: number;
@@ -121,12 +149,14 @@ type ChalinMemoryReviseParamsShape = {
   reason?: string;
 };
 
-interface BashGuardDetails {
-  blocked: boolean;
-  reason?: string;
-  command: string;
-  exitCode?: number | null;
-}
+export type ChalinDelegateParamsShape = {
+  task: string;
+  topology: "single" | "chain" | "parallel" | "dag";
+  steps?: Array<{ id?: string; agent: string; task: string; budget?: "tight" | "normal" | "deep" | "extended" }>;
+  stages?: Array<{ id?: string; name?: string; tasks: Array<{ id?: string; agent: string; task: string; budget?: "tight" | "normal" | "deep" | "extended" }> }>;
+  reason: string;
+  requiresWorkspaceMutation?: boolean;
+};
 
 export interface ChildToolPolicyOptions {
   cwd: string;
@@ -136,6 +166,12 @@ export interface ChildToolPolicyOptions {
   allowedTools?: string[];
   priorFilesRead?: string[];
   maxCrossStepDuplicateReads?: number;
+  subagentDelegation?: {
+    enabled: boolean;
+    depth: number;
+    maxDepth: number;
+    execute(params: ChalinDelegateParamsShape): Promise<{ text: string; details?: unknown }>;
+  };
   onActivity?: (activity: ChildToolActivity) => void;
 }
 
@@ -150,12 +186,16 @@ export interface ChildToolPolicyMetrics {
   toolCallsByName: Record<string, number>;
   policyViolations: string[];
   budgetStopCount: number;
+  budgetCapHits: BudgetCapHit[];
   duplicateReadCount: number;
   filesRead: string[];
   readBytes: number;
   outputChars: number;
   outputTruncatedCount: number;
   filesTouched: string[];
+  shellCommands: string[];
+  postMutationShellCommands: number;
+  successfulPostMutationShellCommands: number;
   retriesByTool: Record<string, number>;
 }
 
@@ -164,6 +204,7 @@ export interface ChildToolPolicy {
   maxToolCalls: number;
   agentName?: string;
   allowedTools: Set<string>;
+  subagentDelegation?: ChildToolPolicyOptions["subagentDelegation"];
   beforeTool(toolName: string, params: Record<string, unknown>): { allowed: true } | { allowed: false; reason: string };
   afterTool(toolName: string, result: unknown): unknown;
   metrics(): ChildToolPolicyMetrics;
@@ -172,8 +213,12 @@ export interface ChildToolPolicy {
 export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToolPolicy {
   const toolCallsByName: Record<string, number> = {};
   const policyViolations: string[] = [];
+  const budgetCapHits: BudgetCapHit[] = [];
+  const budgetCapHitKeys = new Set<string>();
   const filesRead: string[] = [];
   const filesTouched: string[] = [];
+  const shellCommands: string[] = [];
+  const pendingShellCommands: Array<{ command?: string; afterMutation: boolean }> = [];
   const retriesByTool: Record<string, number> = {};
   const allowedTools = new Set(options.allowedTools ?? []);
   const priorFilesRead = new Set((options.priorFilesRead ?? []).map((item) => normalizeMetricPath(item, options.cwd)));
@@ -185,6 +230,9 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
   let outputChars = 0;
   let outputTruncatedCount = 0;
   let crossStepDuplicateReadCount = 0;
+  let mutationSucceeded = false;
+  let postMutationShellCommands = 0;
+  let successfulPostMutationShellCommands = 0;
   const startedAt = Date.now();
   const caps = options.budgetPolicy?.caps ?? {
     maxToolCalls: options.maxToolCalls,
@@ -202,6 +250,41 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
     return { allowed: false, reason };
   }
 
+  function recordBudgetCapHit(input: {
+    name: BudgetCapName;
+    used: number;
+    limit: number;
+    severity: BudgetCapSeverity;
+    phase: BudgetCapHit["phase"];
+    toolName?: string;
+    reason?: string;
+  }): void {
+    if (!Number.isFinite(input.limit)) return;
+    const key = `${input.phase}:${input.severity}:${input.name}:${input.toolName ?? ""}`;
+    if (budgetCapHitKeys.has(key)) return;
+    budgetCapHitKeys.add(key);
+    budgetCapHits.push({
+      name: input.name,
+      used: roundMetric(input.used),
+      limit: roundMetric(input.limit),
+      severity: input.severity,
+      phase: input.phase,
+      ...(input.toolName ? { toolName: input.toolName } : {}),
+      ...(input.reason ? { reason: input.reason } : {}),
+    });
+  }
+
+  function budgetBlock(toolName: string, name: BudgetCapName, used: number, limit: number, reason?: string): { allowed: false; reason: string } {
+    budgetStopCount += 1;
+    recordBudgetCapHit({ name, used, limit, severity: "hard", phase: "pre-tool", toolName, reason });
+    activity(toolName, "blocked");
+    return { allowed: false, reason: `budget_exceeded:${toolName}:${name}=${limit}` };
+  }
+
+  function budgetWarn(toolName: string, name: BudgetCapName, used: number, limit: number, phase: BudgetCapHit["phase"] = "pre-tool", reason?: string): void {
+    recordBudgetCapHit({ name, used, limit, severity: "soft", phase, toolName, reason });
+  }
+
   function activity(toolName: string, phase: ChildToolActivity["phase"]): void {
     options.onActivity?.({ toolName, phase, at: Date.now() });
   }
@@ -217,6 +300,11 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
       const target = getPathParam(params);
       if (target) filesTouched.push(normalizeMetricPath(target, options.cwd));
     }
+    if (toolName === "bash") {
+      const command = getCommandParam(params);
+      if (command) shellCommands.push(command);
+      pendingShellCommands.push({ command, afterMutation: mutationSucceeded });
+    }
     return { allowed: true };
   }
 
@@ -225,39 +313,32 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
     maxToolCalls: caps.maxToolCalls,
     agentName: options.agentName,
     allowedTools,
+    subagentDelegation: options.subagentDelegation,
     beforeTool(toolName, params) {
       if (hasExplicitAllowlist && !allowedTools.has(toolName)) {
         activity(toolName, "blocked");
         return violation(`tool_not_allowed:${toolName}`);
       }
       if (Date.now() - startedAt >= caps.maxSeconds * 1000) {
-        budgetStopCount += 1;
-        activity(toolName, "blocked");
-        return { allowed: false, reason: `budget_exceeded:${toolName}:max_seconds=${caps.maxSeconds}` };
+        return budgetBlock(toolName, "max_seconds", Math.ceil((Date.now() - startedAt) / 1000), caps.maxSeconds);
+      }
+      if (toolCalls >= adaptiveHardLimit(caps.maxToolCalls, "tool-calls")) {
+        return budgetBlock(toolName, "max_tool_calls", toolCalls, caps.maxToolCalls, "adaptive hard ceiling after soft tool-call budget");
       }
       if (toolCalls >= caps.maxToolCalls) {
-        budgetStopCount += 1;
-        activity(toolName, "blocked");
-        return { allowed: false, reason: `budget_exceeded:${toolName}:max_tool_calls=${caps.maxToolCalls}` };
+        budgetWarn(toolName, "max_tool_calls", toolCalls, caps.maxToolCalls, "pre-tool", "soft tool-call budget reached; continuing under adaptive grace");
       }
-      if (readBytes >= caps.maxReadBytes) {
-        budgetStopCount += 1;
-        activity(toolName, "blocked");
-        return { allowed: false, reason: `budget_exceeded:${toolName}:max_read_bytes=${caps.maxReadBytes}` };
+      if (isInspectionTool(toolName) && readBytes >= adaptiveHardLimit(caps.maxReadBytes, "read-bytes")) {
+        return budgetBlock(toolName, "max_read_bytes", readBytes, caps.maxReadBytes, "adaptive hard ceiling after soft read budget");
+      }
+      if (isInspectionTool(toolName) && readBytes >= caps.maxReadBytes) {
+        budgetWarn(toolName, "max_read_bytes", readBytes, caps.maxReadBytes, "pre-tool", "soft read budget reached; continuing under adaptive grace");
+      }
+      if ((toolName === "edit" || toolName === "write") && filesTouched.length >= adaptiveHardLimit(caps.maxFilesTouched, "files-touched")) {
+        return budgetBlock(toolName, "max_files_touched", filesTouched.length, caps.maxFilesTouched, "adaptive hard ceiling after soft touched-files budget");
       }
       if (filesTouched.length >= caps.maxFilesTouched && (toolName === "edit" || toolName === "write")) {
-        budgetStopCount += 1;
-        activity(toolName, "blocked");
-        return { allowed: false, reason: `budget_exceeded:${toolName}:max_files_touched=${caps.maxFilesTouched}` };
-      }
-
-      if (toolName === "bash") {
-        const command = typeof params.command === "string" ? params.command : "";
-        const verdict = classifyBashCommand(command);
-        if (!verdict.allowed) {
-          activity(toolName, "blocked");
-          return violation(`bash_policy:${verdict.reason ?? "blocked"}:${command.slice(0, 140)}`);
-        }
+        budgetWarn(toolName, "max_files_touched", filesTouched.length, caps.maxFilesTouched, "pre-tool", "soft touched-files budget reached; continuing under adaptive grace");
       }
 
       if (toolName === "write") {
@@ -271,12 +352,17 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
       if (toolName === "read") {
         const readPath = getPathParam(params);
         const normalizedReadPath = readPath ? normalizeMetricPath(readPath, options.cwd) : undefined;
-        if (normalizedReadPath && priorFilesRead.has(normalizedReadPath) && crossStepDuplicateReadCount >= maxCrossStepDuplicateReads) {
-          budgetStopCount += 1;
-          activity(toolName, "blocked");
-          return { allowed: false, reason: `budget_exceeded:read:cross_step_duplicate_reads=${maxCrossStepDuplicateReads}:${normalizedReadPath}` };
+        if (normalizedReadPath && priorFilesRead.has(normalizedReadPath)) {
+          const nextDuplicateCount = crossStepDuplicateReadCount + 1;
+          const hardDuplicateLimit = adaptiveHardLimit(maxCrossStepDuplicateReads, "duplicate-reads");
+          if (nextDuplicateCount > hardDuplicateLimit) {
+            return budgetBlock("read", "max_cross_step_duplicate_reads", nextDuplicateCount, maxCrossStepDuplicateReads, normalizedReadPath);
+          }
+          if (nextDuplicateCount > maxCrossStepDuplicateReads) {
+            budgetWarn("read", "max_cross_step_duplicate_reads", nextDuplicateCount, maxCrossStepDuplicateReads, "pre-tool", normalizedReadPath);
+          }
+          crossStepDuplicateReadCount = nextDuplicateCount;
         }
-        if (normalizedReadPath && priorFilesRead.has(normalizedReadPath)) crossStepDuplicateReadCount += 1;
       }
 
       if (toolName === "edit") {
@@ -297,10 +383,19 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
       return recorded;
     },
     afterTool(toolName, result) {
+      if ((toolName === "edit" || toolName === "write") && !isToolError(result)) mutationSucceeded = true;
+      if (toolName === "bash") {
+        const pending = pendingShellCommands.shift();
+        if (pending?.afterMutation) {
+          postMutationShellCommands += 1;
+          if (!isToolError(result)) successfulPostMutationShellCommands += 1;
+        }
+      }
       const compressed = compressToolResult(result, toolName, caps.maxOutputChars);
       if (compressed.truncated) outputTruncatedCount += 1;
       outputChars += compressed.outputChars;
       if (toolName === "read") readBytes += compressed.outputChars;
+      recordPostToolBudgetWarnings(toolName);
       activity(toolName, "end");
       return compressed.result;
     },
@@ -310,16 +405,27 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
         toolCallsByName: { ...toolCallsByName },
         policyViolations: [...policyViolations],
         budgetStopCount,
+        budgetCapHits: budgetCapHits.slice(0, 30),
         duplicateReadCount: filesRead.length - new Set(filesRead).size,
         filesRead: [...new Set(filesRead)].slice(0, 50),
         readBytes,
         outputChars,
         outputTruncatedCount,
         filesTouched: [...new Set(filesTouched)].slice(0, 50),
+        shellCommands: shellCommands.slice(0, 30),
+        postMutationShellCommands,
+        successfulPostMutationShellCommands,
         retriesByTool: { ...retriesByTool },
       };
     },
   };
+
+  function recordPostToolBudgetWarnings(toolName: string): void {
+    if (toolCalls >= caps.maxToolCalls) budgetWarn(toolName, "max_tool_calls", toolCalls, caps.maxToolCalls, "post-tool");
+    if (outputChars >= caps.maxOutputChars) budgetWarn(toolName, "max_output_chars", outputChars, caps.maxOutputChars, "post-tool");
+    if (readBytes >= caps.maxReadBytes) budgetWarn(toolName, "max_read_bytes", readBytes, caps.maxReadBytes, "post-tool");
+    if (filesTouched.length >= caps.maxFilesTouched) budgetWarn(toolName, "max_files_touched", filesTouched.length, caps.maxFilesTouched, "post-tool");
+  }
 }
 
 export function createChildTools(policy: ChildToolPolicy): ToolDefinition[] {
@@ -335,9 +441,10 @@ export function createChildTools(policy: ChildToolPolicy): ToolDefinition[] {
     ...builtinTools.map(([name, tool]) => [name, guardTool(tool, name, policy)] as [string, ToolDefinition<any, any, any>]),
     ["chalin_project_discovery", createProjectDiscoveryTool(policy)],
     ["chalin_project_snapshot", createProjectSnapshotTool(policy)],
-    ["bash", createGuardedBashTool(policy)],
+    ["bash", guardTool(createBashToolDefinition(policy.cwd), "bash", policy)],
     ["chalin_web_search", createChalinWebSearchTool(policy)],
     ["chalin_artifact_write", createChalinArtifactWriteTool(policy)],
+    ["chalin_delegate", createChalinDelegateTool(policy)],
     ["chalin_memory_search", createChalinMemorySearchTool(policy)],
     ["chalin_memory_write", createChalinMemoryWriteTool(policy)],
     ["chalin_memory_revise", createChalinMemoryReviseTool(policy)],
@@ -350,9 +457,10 @@ export function createProjectDiscoveryTool(policy: ChildToolPolicy): ToolDefinit
     name: "chalin_project_discovery",
     label: "Chalin Project Discovery",
     description: "Return a raw, stack-agnostic project file index with shallow files, config-like files, test-like files, directories, and extension histogram. It does not infer architecture or framework.",
-    promptSnippet: "chalin_project_discovery: get a raw non-semantic file index before deciding which files to inspect.",
+    promptSnippet: "chalin_project_discovery: get a raw non-semantic file index for broad orientation; skip it for bounded edits when native find/grep/read is cheaper.",
     promptGuidelines: [
       "Call chalin_project_discovery before broad repository exploration.",
+      "For bounded bugfix/refactor/test/scaffold work, prefer targeted native find/grep/read over inventorying the project.",
       "Use it as an index, not as proof of architecture.",
       "Read evidence files before making project claims.",
     ],
@@ -376,11 +484,11 @@ export function createProjectSnapshotTool(policy: ChildToolPolicy): ToolDefiniti
   return defineTool<typeof SnapshotParams, unknown>({
     name: "chalin_project_snapshot",
     label: "Chalin Project Snapshot",
-    description: "Return a stack-agnostic, cached project snapshot: stack signals, test/build commands, entrypoints, high-signal files, and git context.",
-    promptSnippet: "chalin_project_snapshot: get cached stack/project/git context before manual repository exploration.",
+    description: "Legacy alias that returns raw project inventory plus git metadata. It does not infer stack, entrypoints, tests, commands, or importance.",
+    promptSnippet: "chalin_project_snapshot: get raw project inventory plus git metadata before branch/diff reconnaissance.",
     promptGuidelines: [
-      "Call chalin_project_snapshot before broad repository exploration.",
-      "Use the snapshot to choose high-signal files instead of scanning the whole repository.",
+      "Prefer chalin_project_discovery unless git metadata is needed.",
+      "Treat this as filesystem/git facts only; choose follow-up reads/searches with LLM judgment.",
     ],
     parameters: SnapshotParams,
     async execute() {
@@ -394,43 +502,6 @@ export function createProjectSnapshotTool(policy: ChildToolPolicy): ToolDefiniti
     },
   });
 }
-
-export function createGuardedBashTool(policy: ChildToolPolicy): ToolDefinition {
-  return defineTool<typeof BashParams, BashGuardDetails>({
-    name: "bash",
-    label: "bash (guarded)",
-    description: "Run only safe inspection or explicit validation commands. Scripts, file writes, and generated readers/modifiers are blocked.",
-    promptSnippet: "bash: guarded shell for git/status/list/search/test commands only; do not create scripts or modify files.",
-    promptGuidelines: [
-      "Use read/find/grep/ls/edit before bash when possible.",
-      "Do not create Python/Node/shell scripts to inspect or modify files.",
-      "Do not use bash for file edits. Use edit for targeted changes.",
-    ],
-    parameters: BashParams,
-    async execute(_toolCallId, params, signal) {
-      const gate = policy.beforeTool("bash", params);
-      if (!gate.allowed) {
-        return {
-          content: [{ type: "text" as const, text: `Blocked by pi-chalin child policy: ${gate.reason}\nUse Pi-native read/find/grep/ls/edit tools instead, or stop and report partial findings.` }],
-          details: { blocked: true, reason: gate.reason, command: params.command },
-        };
-      }
-      const verdict = classifyBashCommand(params.command);
-      if (!verdict.allowed) {
-        return {
-          content: [{ type: "text" as const, text: `Blocked by pi-chalin child bash guard: ${verdict.reason}\nUse Pi-native read/find/grep/ls/edit tools instead.` }],
-          details: { blocked: true, reason: verdict.reason, command: params.command },
-        };
-      }
-      const result = await runGuardedCommand(params.command, policy.cwd, Math.min(Math.max(params.timeout ?? 10, 1), 30), signal);
-      return policy.afterTool("bash", {
-        content: [{ type: "text" as const, text: result.text }],
-        details: { blocked: false, reason: undefined, exitCode: result.exitCode, command: params.command },
-      }) as never;
-    },
-  });
-}
-
 
 export function createChalinWebSearchTool(policy: ChildToolPolicy): ToolDefinition {
   return defineTool<typeof ChalinWebSearchParams, unknown>({
@@ -488,6 +559,39 @@ export function createChalinMemorySearchTool(policy: ChildToolPolicy): ToolDefin
       return policy.afterTool("chalin_memory_search", {
         content: [{ type: "text" as const, text }],
         details: { ...bundle, results: bundle.results.map((result) => ({ id: result.record.id, category: result.record.category, score: result.score })) },
+      }) as never;
+    },
+  });
+}
+
+export function createChalinDelegateTool(policy: ChildToolPolicy): ToolDefinition {
+  return defineTool<typeof ChalinDelegateParams, unknown>({
+    name: "chalin_delegate",
+    label: "Chalin Delegate",
+    description: "Rare nested pi-chalin delegation for a coordinating subagent that discovers a bounded subproblem is too ambiguous, long, or multi-surface to finish alone. Maximum two subagent levels below the primary orchestrator.",
+    promptSnippet: "chalin_delegate: rarely split a subagent's work into a tiny nested chain/DAG when current evidence proves the task is too broad or ambiguous to finish safely alone.",
+    promptGuidelines: [
+      "This is exceptional, not a normal path. Prefer finishing the current task yourself when the scope is bounded.",
+      "Use only after current evidence shows ambiguity, multiple independent surfaces, or review/isolation needs that would otherwise lower quality.",
+      "Keep the nested plan tiny and concrete. Pass current evidence, exact files/surfaces, ownership boundaries, and success criteria in the task.",
+      "Do not use it to avoid ordinary implementation work, repeat broad discovery, or create another planning layer without a clear output contract.",
+      "Nested delegation stops at two subagent levels; if blocked by depth, return a compact handoff and ask the parent orchestrator to continue.",
+    ],
+    parameters: ChalinDelegateParams,
+    async execute(_toolCallId, params: ChalinDelegateParamsShape) {
+      const input = isRecord(params) ? params : {};
+      const gate = policy.beforeTool("chalin_delegate", input);
+      if (!gate.allowed) return blockedToolResult(gate.reason);
+      const delegate = policy.subagentDelegation;
+      if (!delegate?.enabled) return blockedToolResult("nested_delegation_unavailable");
+      if (delegate.depth >= delegate.maxDepth) {
+        return blockedToolResult(`nested_delegation_depth_exceeded:${delegate.depth}/${delegate.maxDepth}`);
+      }
+      if (!params.reason?.trim()) return blockedToolResult("nested_delegation_reason_required");
+      const result = await delegate.execute(params);
+      return policy.afterTool("chalin_delegate", {
+        content: [{ type: "text" as const, text: result.text }],
+        details: result.details,
       }) as never;
     },
   });
@@ -658,7 +762,7 @@ function artifactToolResult(text: string, details: unknown) {
 function guardTool(base: ToolDefinition<any, any, any>, toolName: string, policy: ChildToolPolicy): ToolDefinition<any, any, any> {
   return {
     ...base,
-    description: `${base.description} Guarded by pi-chalin child policy: bounded calls, no script-driven inspection, and surgical writes only.`,
+    description: `${base.description} Guarded by pi-chalin child policy: adaptive budgets, observable activity, and surgical repository writes.`,
     promptGuidelines: [
       ...(base.promptGuidelines ?? []),
       "Stay within the pi-chalin child tool budget.",
@@ -682,42 +786,12 @@ function blockedToolResult(reason: string) {
   };
 }
 
-export function classifyBashCommand(command: string): { allowed: boolean; reason?: string } {
-  const normalized = command.trim();
-  if (!normalized) return { allowed: false, reason: "empty command" };
-  if (/[;&|`$<>]/.test(normalized) || normalized.includes("$(")) return { allowed: false, reason: "shell composition, substitution, pipes, or redirection are not allowed for child agents" };
-  if (/\b(?:python|python3|node|ruby|perl|php|deno|tsx|ts-node|sh|bash|zsh)\b/i.test(normalized)) return { allowed: false, reason: "creating or running ad-hoc scripts is not allowed" };
-  if (/\b(?:tee|touch|mv|cp|rm|mkdir|rmdir|chmod|chown|sed\s+-i|truncate)\b/i.test(normalized)) return { allowed: false, reason: "file mutation through bash is not allowed" };
-
-  const words = normalized.split(/\s+/);
-  const first = words[0] ?? "";
-  if (["pwd", "ls"].includes(first)) return { allowed: true };
-  if (["grep", "rg", "find"].includes(first)) return { allowed: true };
-  if (first === "cat") return words.length <= 4 ? { allowed: true } : { allowed: false, reason: "cat is allowed only for one small explicit file; prefer read" };
-  if (first === "git" && isAllowedGit(words.slice(1))) return { allowed: true };
-  if (isAllowedTestCommand(words)) return { allowed: true };
-  return { allowed: false, reason: `command '${first}' is not in the child-agent bash allowlist` };
-}
-
-function isAllowedGit(args: string[]): boolean {
-  const sub = args[0];
-  return Boolean(sub && ["status", "branch", "log", "diff", "show", "rev-parse", "rev-list"].includes(sub));
-}
-
-function isAllowedTestCommand(words: string[]): boolean {
-  const [cmd, ...args] = words;
-  const joined = words.join(" ");
-  if (cmd === "go") return args[0] === "test";
-  if (cmd === "cargo") return args[0] === "test" || args[0] === "check";
-  if (cmd === "pytest") return true;
-  if (cmd === "mvn") return args.includes("test");
-  if (cmd === "gradle") return args.includes("test");
-  if (["npm", "pnpm", "yarn", "bun"].includes(cmd ?? "")) return /\b(test|vitest|jest|typecheck|lint)\b/.test(joined);
-  return false;
-}
-
 function getPathParam(params: Record<string, unknown>): string | undefined {
   return typeof params.path === "string" ? params.path : typeof params.file_path === "string" ? params.file_path : undefined;
+}
+
+function getCommandParam(params: Record<string, unknown>): string | undefined {
+  return typeof params.command === "string" ? params.command : undefined;
 }
 
 function resolveProjectPath(target: string, cwd: string): string {
@@ -735,6 +809,28 @@ function stringSize(value: unknown): number {
   return typeof value === "string" ? value.length : 0;
 }
 
+function adaptiveHardLimit(limit: number, kind: "tool-calls" | "read-bytes" | "files-touched" | "duplicate-reads"): number {
+  if (!Number.isFinite(limit)) return Number.POSITIVE_INFINITY;
+  if (limit <= 0) return 0;
+  if (kind === "tool-calls") return Math.max(limit + 12, Math.ceil(limit * 1.5));
+  if (kind === "read-bytes") return Math.max(limit + 120_000, Math.ceil(limit * 2));
+  if (kind === "files-touched") return Math.max(limit + 2, Math.ceil(limit * 1.5));
+  return Math.max(limit + 2, Math.ceil(limit * 1.5));
+}
+
+function isInspectionTool(toolName: string): boolean {
+  return toolName === "read" || toolName === "grep" || toolName === "find" || toolName === "ls" || toolName === "chalin_project_discovery" || toolName === "chalin_project_snapshot" || toolName === "chalin_web_search";
+}
+
+function isToolError(result: unknown): boolean {
+  return isRecord(result) && result.isError === true;
+}
+
+function roundMetric(value: number): number {
+  if (!Number.isFinite(value)) return value;
+  return Math.round(value * 1000) / 1000;
+}
+
 function truncateForTool(text: string, maxChars: number): string {
   const normalized = text.replace(/\s+/g, " ").trim();
   if (normalized.length <= maxChars) return normalized;
@@ -743,25 +839,6 @@ function truncateForTool(text: string, maxChars: number): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function runGuardedCommand(command: string, cwd: string, timeoutSeconds: number, signal?: AbortSignal): Promise<{ text: string; exitCode: number | null }> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, { cwd, shell: true, stdio: ["ignore", "pipe", "pipe"] });
-    let output = "";
-    const timeout = setTimeout(() => child.kill("SIGTERM"), timeoutSeconds * 1000);
-    const onAbort = () => child.kill("SIGTERM");
-    signal?.addEventListener("abort", onAbort, { once: true });
-    child.stdout?.on("data", (chunk) => { output += chunk.toString(); });
-    child.stderr?.on("data", (chunk) => { output += chunk.toString(); });
-    child.on("error", reject);
-    child.on("close", (exitCode) => {
-      clearTimeout(timeout);
-      signal?.removeEventListener("abort", onAbort);
-      const text = output.trim();
-      resolve({ exitCode, text: compressTextTail(text, 8000, "pi-chalin guarded bash") });
-    });
-  });
 }
 
 function compressToolResult(result: unknown, toolName: string, maxChars: number): { result: unknown; outputChars: number; truncated: boolean } {

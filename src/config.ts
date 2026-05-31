@@ -8,7 +8,7 @@ export type ApprovalRiskThreshold = RouteRisk | "none";
 export type ModelPersistenceTarget = "session" | "project" | "user";
 export type MemoryProvider = "auto" | "engram" | "pi-chalin";
 
-const DEFAULT_APPROVAL_RISK_THRESHOLD: RouteRisk = "medium";
+const DEFAULT_APPROVAL_RISK_THRESHOLD: ApprovalRiskThreshold = "none";
 
 export interface ChalinConfig {
   enabled: boolean;
@@ -122,7 +122,9 @@ function coerceConfig(input: ChalinConfig, diagnostics: string[]): ChalinConfig 
     config.safety.approvalRiskThreshold = DEFAULT_CONFIG.safety.approvalRiskThreshold;
   }
 
-  if (config.safety.approvalRiskThreshold !== "none" && riskRank(config.safety.approvalRiskThreshold) > riskRank(DEFAULT_APPROVAL_RISK_THRESHOLD)) {
+  if (DEFAULT_APPROVAL_RISK_THRESHOLD !== "none"
+    && config.safety.approvalRiskThreshold !== "none"
+    && riskRank(config.safety.approvalRiskThreshold) > riskRank(DEFAULT_APPROVAL_RISK_THRESHOLD)) {
     diagnostics.push(
       `Safety non-downgrade enforced: approvalRiskThreshold '${config.safety.approvalRiskThreshold}' is weaker than '${DEFAULT_APPROVAL_RISK_THRESHOLD}'.`,
     );

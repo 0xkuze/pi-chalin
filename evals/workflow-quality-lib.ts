@@ -1,8 +1,9 @@
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import ts from "typescript";
-import type { WorkflowEvalCase } from "./workflow-cases.ts";
+import { WORKFLOW_ORACLE_DIR, type WorkflowEvalCase } from "./workflow-cases.ts";
 
 export interface WorkflowQualityIssue {
   id: string;
@@ -16,6 +17,7 @@ export interface WorkflowValidationResult {
   status: "pass" | "fail" | "skipped";
   command?: string;
   reason?: string;
+  hiddenValidation?: string;
   durationMs: number;
   stdoutSnippet?: string;
   stderrSnippet?: string;
@@ -30,6 +32,13 @@ export interface WorkflowSemanticMetrics {
   testChecksPassed: number;
   packageBinPassed?: boolean;
   packageBinTargetPassed?: boolean;
+}
+
+export interface WorkflowDocumentationPlanMetrics {
+  checked: boolean;
+  matched: string[];
+  missing: string[];
+  truncated: boolean;
 }
 
 export interface WorkflowQualityReport {
@@ -50,6 +59,7 @@ export interface WorkflowQualityReport {
     finalTextChars: number;
     scoringRoot: string;
     semantic: WorkflowSemanticMetrics;
+    documentationPlan: WorkflowDocumentationPlanMetrics;
     validation: WorkflowValidationResult;
   };
   critical: WorkflowQualityIssue[];
@@ -57,7 +67,7 @@ export interface WorkflowQualityReport {
   suggestions: WorkflowQualityIssue[];
 }
 
-const IGNORED_DIRS = new Set([".git", "node_modules", ".pi-chalin", "dist", "coverage"]);
+const IGNORED_DIRS = new Set([".git", "node_modules", ".pi", ".pi-chalin", ".pi-lens", WORKFLOW_ORACLE_DIR, "dist", "coverage", "target"]);
 
 export function scoreWorkflowWorkspace(cwd: string, evalCase: WorkflowEvalCase, options: { finalText?: string; durationMs?: number; validateTests?: boolean; validationTimeoutMs?: number } = {}): WorkflowQualityReport {
   const scoringCwd = resolveScoringRoot(cwd, evalCase);
@@ -78,6 +88,12 @@ export function scoreWorkflowWorkspace(cwd: string, evalCase: WorkflowEvalCase, 
     }
   }
 
+  const shouldValidateTests = options.validateTests ?? evalCase.expected.validation?.runTests;
+  const validation = shouldValidateTests
+    ? validateWorkflowTests(scoringCwd, evalCase, { timeoutMs: options.validationTimeoutMs })
+    : skippedValidation("validation disabled");
+  const hiddenValidationPassed = validation.status === "pass" && Boolean(evalCase.expected.hiddenValidation);
+
   for (const check of evalCase.expected.requiredContent) {
     possible += check.points;
     const content = readPattern(scoringCwd, check.file);
@@ -85,6 +101,16 @@ export function scoreWorkflowWorkspace(cwd: string, evalCase: WorkflowEvalCase, 
     if (failed.length === 0) {
       earned += check.points;
       matched.push(`content:${check.file}:${check.label}`);
+    } else if (hiddenValidationPassed && !isTestEvidenceFile(check.file)) {
+      earned += check.points;
+      matched.push(`content-validated:${check.file}:${check.label}`);
+      issues.push({
+        id: "static-content-evidence-missing",
+        severity: "warning",
+        message: `La validación ejecutable pasó, pero la evidencia estática no reconoció: ${check.label}.`,
+        evidence: `${check.file}: ${failed.join(", ")}`,
+        penalty: 0,
+      });
     } else {
       missing.push(`content:${check.file}:${check.label}`);
       issues.push({ id: "missing-required-content", severity: "critical", message: `No cumple contenido esperado: ${check.label}.`, evidence: `${check.file}: ${failed.join(", ")}`, penalty: Math.min(30, check.points) });
@@ -101,7 +127,7 @@ export function scoreWorkflowWorkspace(cwd: string, evalCase: WorkflowEvalCase, 
 
   for (const forbidden of evalCase.expected.forbiddenContent ?? []) {
     const content = read(scoringCwd, forbidden.file);
-    const hit = forbidden.patterns.find((pattern) => new RegExp(pattern, "ims").test(content));
+    const hit = forbidden.patterns.find((pattern) => forbiddenPatternMatches(content, pattern));
     if (hit) {
       issues.push({ id: "forbidden-content", severity: "critical", message: `Apareció contenido prohibido: ${forbidden.label}.`, evidence: `${forbidden.file}: ${hit}`, penalty: forbidden.penalty });
     }
@@ -115,9 +141,8 @@ export function scoreWorkflowWorkspace(cwd: string, evalCase: WorkflowEvalCase, 
     earned += Math.round((semanticEarned / semanticPossible) * 24);
   }
 
-  const validation = options.validateTests || evalCase.expected.validation?.runTests
-    ? validateWorkflowTests(scoringCwd, evalCase, { timeoutMs: options.validationTimeoutMs ?? 8_000 })
-    : skippedValidation("validation disabled");
+  const documentationPlan = evaluateDocumentationPlan(scoringCwd, evalCase, issues);
+
   if (validation.status === "pass") {
     possible += 8;
     earned += 8;
@@ -139,7 +164,7 @@ export function scoreWorkflowWorkspace(cwd: string, evalCase: WorkflowEvalCase, 
       earned += 4;
       matched.push(`final:${pattern}`);
     } else {
-      const finalEvidenceIsOutcome = evalCase.kind === "review-only";
+      const finalEvidenceIsOutcome = evalCase.kind === "review-only" && evalCase.expected.requiredFiles.length === 0;
       issues.push({
         id: "missing-final-answer-evidence",
         severity: finalEvidenceIsOutcome ? "critical" : "warning",
@@ -173,12 +198,14 @@ export function scoreWorkflowWorkspace(cwd: string, evalCase: WorkflowEvalCase, 
   const critical = issues.filter((issue) => issue.severity === "critical");
   const warnings = issues.filter((issue) => issue.severity === "warning");
   const suggestions = issues.filter((issue) => issue.severity === "suggestion");
+  const onlyNonFunctionalWarnings = warnings.every((issue) => issue.id === "duration-budget-exceeded" || issue.id === "static-content-evidence-missing");
+  const pass = critical.length === 0 && (score >= 80 || (qualityScore >= 80 && onlyNonFunctionalWarnings));
 
   return {
     caseId: evalCase.id,
     kind: evalCase.kind,
     suite: evalCase.suite,
-    pass: critical.length === 0 && score >= 80,
+    pass,
     qualityScore,
     efficiencyScore,
     score,
@@ -192,6 +219,7 @@ export function scoreWorkflowWorkspace(cwd: string, evalCase: WorkflowEvalCase, 
       finalTextChars: finalText.length,
       scoringRoot: scoringCwd,
       semantic,
+      documentationPlan,
       validation,
     },
     critical,
@@ -210,25 +238,101 @@ export function validateWorkflowTests(cwd: string, evalCase: WorkflowEvalCase, o
       durationMs: Date.now() - started,
     };
   }
-  const command = resolveValidationCommand(cwd);
-  if (!command) return skippedValidation("no dependency-free validation command detected", started);
-  const run = spawnSync(command.command, command.args, {
-    cwd,
-    encoding: "utf-8",
-    timeout: options.timeoutMs ?? 8_000,
-    env: { ...process.env, CI: "1" },
-  });
-  const stdout = run.stdout ?? "";
-  const stderr = run.stderr ?? "";
-  const noTestsExecuted = didValidationRunZeroTests(stdout, stderr);
-  return {
-    status: run.status === 0 && !noTestsExecuted ? "pass" : "fail",
-    command: [command.command, ...command.args].join(" "),
-    durationMs: Date.now() - started,
-    reason: noTestsExecuted ? "validation command executed zero tests" : run.error?.message,
-    stdoutSnippet: snippet(stdout, 800),
-    stderrSnippet: snippet(stderr, 800),
-  };
+  const hiddenValidation = evalCase.expected.hiddenValidation;
+  let validationCwd = cwd;
+  let tempValidationParent: string | undefined;
+  if (hiddenValidation) {
+    try {
+      tempValidationParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-chalin-hidden-validation-"));
+      validationCwd = path.join(tempValidationParent, "workspace");
+      fs.cpSync(cwd, validationCwd, { recursive: true });
+      hiddenValidation.setup(validationCwd);
+    } catch (error) {
+      if (tempValidationParent) fs.rmSync(tempValidationParent, { recursive: true, force: true });
+      return {
+        status: "fail",
+        reason: error instanceof Error ? `hidden validation setup failed: ${error.message}` : "hidden validation setup failed",
+        hiddenValidation: hiddenValidation.description,
+        durationMs: Date.now() - started,
+      };
+    }
+  }
+  try {
+    const command = resolveValidationCommand(validationCwd);
+    if (!command) return skippedValidation("no dependency-free validation command detected", started);
+    const timeoutMs = options.timeoutMs ?? defaultValidationTimeoutMs(command.command);
+    const run = spawnSync(command.command, command.args, {
+      cwd: validationCwd,
+      encoding: "utf-8",
+      timeout: timeoutMs,
+      env: { ...process.env, CI: "1" },
+    });
+    const stdout = run.stdout ?? "";
+    const stderr = run.stderr ?? "";
+    const noTestsExecuted = didValidationRunZeroTests(stdout, stderr);
+    return {
+      status: run.status === 0 && !noTestsExecuted ? "pass" : "fail",
+      command: [command.command, ...command.args].join(" "),
+      hiddenValidation: hiddenValidation?.description,
+      durationMs: Date.now() - started,
+      reason: noTestsExecuted ? "validation command executed zero tests" : run.error?.message,
+      stdoutSnippet: snippet(stdout, 800),
+      stderrSnippet: snippet(stderr, 800),
+    };
+  } finally {
+    if (tempValidationParent) fs.rmSync(tempValidationParent, { recursive: true, force: true });
+  }
+}
+
+function forbiddenPatternMatches(content: string, pattern: string): boolean {
+  const simpleCallName = simpleForbiddenCallName(pattern);
+  if (simpleCallName) return hasStandaloneFunctionCall(content, simpleCallName);
+  return new RegExp(pattern, "ims").test(content);
+}
+
+function simpleForbiddenCallName(pattern: string): string | undefined {
+  if (!pattern.endsWith("\\(")) return undefined;
+  const name = pattern.slice(0, -2);
+  if (!name) return undefined;
+  for (const char of name) {
+    if (!isIdentifierChar(char)) return undefined;
+  }
+  return isIdentifierStart(name[0] ?? "") ? name : undefined;
+}
+
+function hasStandaloneFunctionCall(content: string, name: string): boolean {
+  let index = content.indexOf(name);
+  while (index >= 0) {
+    const before = content[index - 1] ?? "";
+    const afterName = index + name.length;
+    let cursor = afterName;
+    while (isHorizontalWhitespace(content[cursor] ?? "")) cursor += 1;
+    if (!isIdentifierChar(before) && content[cursor] === "(") return true;
+    index = content.indexOf(name, index + name.length);
+  }
+  return false;
+}
+
+function isIdentifierStart(char: string): boolean {
+  if (char === "_") return true;
+  const code = char.charCodeAt(0);
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
+
+function isIdentifierChar(char: string): boolean {
+  if (isIdentifierStart(char)) return true;
+  const code = char.charCodeAt(0);
+  return code >= 48 && code <= 57;
+}
+
+function isHorizontalWhitespace(char: string): boolean {
+  return char === " " || char === "\t";
+}
+
+function defaultValidationTimeoutMs(command: string): number {
+  if (command === "cargo") return 30_000;
+  if (command === "go" || command === "python3" || command === "bun" || command === "npm") return 20_000;
+  return 12_000;
 }
 
 function missingExpectedTestArtifact(cwd: string, evalCase: WorkflowEvalCase): string | undefined {
@@ -257,11 +361,13 @@ function resolveValidationCommand(cwd: string): { command: string; args: string[
       return { command: script.includes("go test") ? "go" : "python3", args: script.includes("go test") ? ["test", "./..."] : ["-m", "unittest", "discover", "-s", "tests"] };
     }
     if (/node\s+.*--test|npm\s+test/i.test(script) || hasNodeModules(cwd)) {
-      return { command: "bun", args: ["test"] };
+      return { command: "npm", args: ["test"] };
     }
     return undefined;
   }
   if (fs.existsSync(path.join(cwd, "go.mod"))) return { command: "go", args: ["test", "./..."] };
+  if (fs.existsSync(path.join(cwd, "Cargo.toml"))) return { command: "cargo", args: ["test"] };
+  if (fs.existsSync(path.join(cwd, "Makefile"))) return { command: "make", args: ["test"] };
   if (fs.existsSync(path.join(cwd, "tests")) && listFiles(cwd).some((file) => file.endsWith(".py"))) {
     return { command: "python3", args: ["-m", "unittest", "discover", "-s", "tests"] };
   }
@@ -346,6 +452,74 @@ function evaluateSemanticExpectations(cwd: string, evalCase: WorkflowEvalCase, m
   }
 
   return metrics;
+}
+
+function evaluateDocumentationPlan(cwd: string, evalCase: WorkflowEvalCase, issues: WorkflowQualityIssue[]): WorkflowDocumentationPlanMetrics {
+  const docsFiles = evalCase.expected.requiredFiles.filter((file) => isDocumentationEvidencePath(file));
+  if (evalCase.kind !== "review-only" || docsFiles.length === 0) {
+    return { checked: false, matched: [], missing: [], truncated: false };
+  }
+
+  const content = docsFiles.map((file) => readPattern(cwd, file)).join("\n\n");
+  if (!content.trim()) return { checked: true, matched: [], missing: ["content"], truncated: false };
+
+  const sections = documentationPlanSections(evalCase);
+  const matched = sections.filter((section) => section.patterns.every((pattern) => pattern.test(content))).map((section) => section.id);
+  const missing = sections.map((section) => section.id).filter((id) => !matched.includes(id));
+  const truncated = looksLikeTruncatedDocumentation(content);
+
+  if (missing.length > 0) {
+    issues.push({
+      id: "documentation-plan-incomplete",
+      severity: "warning",
+      message: "El documento de plan/review no cubre todas las secciones esperadas para una decisión productiva.",
+      evidence: missing.join(", "),
+      penalty: Math.min(18, missing.length * 4),
+    });
+  }
+  if (truncated) {
+    issues.push({
+      id: "documentation-plan-truncated",
+      severity: "warning",
+      message: "El documento parece terminar en una sección/lista incompleta.",
+      evidence: snippet(content.trim().slice(-240), 240),
+      penalty: 12,
+    });
+  }
+
+  return { checked: true, matched, missing, truncated };
+}
+
+function documentationPlanSections(evalCase: WorkflowEvalCase): Array<{ id: string; patterns: RegExp[] }> {
+  const promptAndChecks = [
+    evalCase.prompt,
+    ...evalCase.expected.requiredContent.map((check) => `${check.label} ${check.patterns.join(" ")}`),
+  ].join("\n");
+  const sections = [
+    { id: "current-state", patterns: [/estado actual|current|actual|hoy|as-is|existing|root cause|causa ra[ií]z/i, /src\/|crates\/|archivo|file/i] },
+    { id: "incremental-steps", patterns: [/pasos?|steps?|increment|plan|fase/i] },
+    { id: "validation", patterns: [/validaci(?:ó|o)n|tests?|pruebas?|verificaci(?:ó|o)n/i] },
+  ];
+  if (/arquitectura|architecture|boundary|frontera|cross-language|runtime/i.test(promptAndChecks)) {
+    sections.push({ id: "target-architecture", patterns: [/arquitectura|dise(?:ñ|n)o|target|objetivo|flujo|boundary|frontera/i] });
+  }
+  if (/riesgos?|risks?|compatibilidad|compat/i.test(promptAndChecks)) {
+    sections.push({ id: "risks", patterns: [/riesgos?|risks?|compatibilidad|compat/i] });
+  }
+  if (/rollback|revert|reversi(?:ó|o)n|backout/i.test(promptAndChecks)) {
+    sections.push({ id: "rollback", patterns: [/rollback|revert|reversi(?:ó|o)n|backout/i] });
+  }
+  return sections;
+}
+
+function looksLikeTruncatedDocumentation(content: string): boolean {
+  const trimmed = content.trim();
+  if (!trimmed) return false;
+  const lastLine = trimmed.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).at(-1) ?? "";
+  return /(?:^#+\s+\S.*|:\s*|-|\d+[.)])$/.test(lastLine)
+    || /\b(?:TODO|TBD|WIP)\b/.test(trimmed)
+    || /(?:^|\n)\s*(?:[-*]\s*)?pendiente\s*:/i.test(trimmed)
+    || /(?:rollback|validaci(?:ó|o)n|compatibilidad|riesgos?)\s*:\s*$/i.test(lastLine);
 }
 
 function exportedNames(content: string): Set<string> {
@@ -462,6 +636,15 @@ function exists(cwd: string, relativePath: string): boolean {
   return Boolean(resolvePath(cwd, relativePath));
 }
 
+function isTestEvidenceFile(file: string): boolean {
+  const normalized = file.replace(/\\/g, "/").toLowerCase();
+  return normalized.includes("/test/") || normalized.includes("/tests/") || /(^|[._-])test\.[^.]+$/.test(path.basename(normalized));
+}
+
+function isDocumentationEvidencePath(relativePath: string): boolean {
+  return relativePath.startsWith("docs/") || /\.(?:md|mdx|rst|adoc|txt)$/i.test(relativePath);
+}
+
 function existsAt(cwd: string, relativePath: string): boolean {
   return fs.existsSync(path.join(cwd, relativePath)) || alternatePaths(relativePath).some((item) => fs.existsSync(path.join(cwd, item)));
 }
@@ -486,9 +669,10 @@ function matchesFile(cwd: string, relativePathOrPattern: string): boolean {
 }
 
 function matchingFiles(cwd: string, relativePathOrPattern: string): string[] {
-  if (!relativePathOrPattern.includes("*")) return exists(cwd, relativePathOrPattern) ? [relativePathOrPattern] : [];
-  const pattern = new RegExp(`^${relativePathOrPattern.split("*").map((part) => RegExp.escape(part)).join(".*")}$`);
-  return listFiles(cwd).filter((file) => pattern.test(file)).sort();
+  const candidates = [relativePathOrPattern, ...alternatePaths(relativePathOrPattern)];
+  if (!relativePathOrPattern.includes("*")) return candidates.find((candidate) => exists(cwd, candidate)) ? [relativePathOrPattern] : [];
+  const patterns = candidates.map((candidate) => new RegExp(`^${candidate.split("*").map((part) => RegExp.escape(part)).join(".*")}$`));
+  return listFiles(cwd).filter((file) => patterns.some((pattern) => pattern.test(file))).sort();
 }
 
 function resolvePath(cwd: string, relativePath: string): string | undefined {

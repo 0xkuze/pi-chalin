@@ -105,7 +105,7 @@ The extension registers Pi tools for the primary agent. The primary agent stays 
 | `chalin_route` | Run a selected workflow with concrete agents, topology, risk, memory, and artifact needs. |
 | `chalin_resume` | Resume the latest paused or stale Chalin run. |
 | `chalin_interview` | Ask blocking clarification questions before planning or execution. |
-| `chalin_memory_search` | Retrieve compact durable memory during direct or routed work. |
+| `chalin_memory_search` | Retrieve or list compact durable memory during direct or routed work. |
 | `chalin_memory_write` | Save durable project or user knowledge through WriteGuard. |
 | `chalin_memory_revise` | Correct stale or inaccurate memory with evidence. |
 | `chalin_artifact_resume` | Load resumable task context from stored artifacts. |
@@ -247,9 +247,11 @@ bun run eval
 bun run eval:memory
 bun run eval:trace
 bun run eval:workflow
+bun run eval:workflow:harness
+bun run eval:workflow:complex
 ```
 
-Use the broader evaluator path when changing routing policy, runner behavior, child-tool budgets, memory semantics, or workflow scoring.
+Use the broader evaluator path when changing routing policy, runner behavior, child-tool budgets, memory semantics, or workflow scoring. `eval:workflow:harness` compares simple, Chalin, and Gentle harnesses on the standard suite; `eval:workflow:complex` runs the expanded real-OSS-inspired suite across Zig/Rust, Rust, C, and C++ planning/implementation cases.
 
 ## Design Principles
 

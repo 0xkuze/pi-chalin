@@ -469,9 +469,6 @@ function isDuplicateMemoryContent(a: string, b: string): boolean {
   const normalizedB = normalizeForDedupe(b);
   if (!normalizedA || !normalizedB) return false;
   if (normalizedA === normalizedB) return true;
-  const topicA = memoryTopicKey(normalizedA);
-  const topicB = memoryTopicKey(normalizedB);
-  if (topicA && topicA === topicB) return true;
   const tokensA = memoryTokens(normalizedA);
   const tokensB = memoryTokens(normalizedB);
   if (tokensA.size < 5 || tokensB.size < 5) return false;
@@ -485,33 +482,13 @@ function isDuplicateMemoryContent(a: string, b: string): boolean {
   return false;
 }
 
-function memoryTopicKey(normalized: string): string | undefined {
-  const tokens = memoryTokens(normalized);
-  if (tokens.has("bun") && tokens.has("test") && tokens.has("settimeout")) return "testing:bun-no-settimeout";
-  if ((tokens.has("buntest") || normalized.includes("bun:test")) && tokens.has("test")) return "testing:bun-test";
-  if ((tokens.has("nodetest") || normalized.includes("node:test")) && tokens.has("test")) return "testing:node-test";
-  if (tokens.has("checkpoint") && (tokens.has("handoff") || tokens.has("resume"))) return "workflow:handoff-checkpoints";
-  if (tokens.has("validation") && tokens.has("contract")) return "workflow:validation-contracts";
-  const has = (...items: string[]) => items.every((item) => tokens.has(item) || normalized.includes(item));
-  if (has("extension", "routing", "subagent")) return "extension-routing-subagents";
-  if (normalized.includes("memory.sqlite") || (has("memory") && (tokens.has("sqlite") || tokens.has("fts5") || normalized.includes("sql.js-fts5")))) return "memory-store";
-  if ((normalized.includes("agents/") || normalized.includes("agents*.md") || normalized.includes("agents/*.md")) && has("agent")) return "agent-catalog";
-  if (normalized.includes(".pi-chalin/runs") || normalized.includes("runs/<id>.json") || normalized.includes("runs/*.json")) return "run-persistence";
-  if (normalized.includes("src/commands.ts") || normalized.includes("/chalin")) return "chalin-commands";
-  if (normalized.includes("src/index.ts")) return "runtime-entrypoint";
-  if (normalized.includes("src/kernel.ts") || tokens.has("chalinkernel")) return "kernel-routing";
-  if (tokens.has("architecture") || tokens.has("monolith") || tokens.has("monolito")) return "architecture";
-  if (tokens.has("tui") && (tokens.has("modelos") || tokens.has("models") || tokens.has("rutas") || tokens.has("memory"))) return "tui-surface";
-  return undefined;
-}
-
 function memoryTokens(normalized: string): Set<string> {
   const stop = new Set([
     "the", "and", "for", "that", "this", "with", "from", "into", "using", "uses", "use", "under", "through", "when", "where", "should",
     "este", "esta", "esto", "para", "que", "con", "por", "desde", "hacia", "como", "usa", "usar", "usando", "debe", "deben", "del", "las", "los", "una", "uno", "mas", "más",
     "project", "proyecto", "pi", "chalin", "pi-chalin", "coding", "agent",
   ]);
-  return new Set(normalized.split(/\s+/).map(canonicalMemoryToken).filter((token) => token.length >= 3 && !stop.has(token)));
+  return new Set(splitWhitespace(normalized).map(canonicalMemoryToken).filter((token) => token.length >= 3 && !stop.has(token)));
 }
 
 function canonicalMemoryToken(token: string): string {
@@ -578,9 +555,51 @@ function canonicalMemoryToken(token: string): string {
   return aliases[token] ?? token;
 }
 
+function splitWhitespace(text: string): string[] {
+  const tokens: string[] = [];
+  let start: number | undefined;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const whitespace = char === " " || char === "\t" || char === "\n" || char === "\r";
+    if (whitespace) {
+      if (start !== undefined) tokens.push(text.slice(start, index));
+      start = undefined;
+    } else if (start === undefined) {
+      start = index;
+    }
+  }
+  if (start !== undefined) tokens.push(text.slice(start));
+  return tokens;
+}
+
+function trimEntityToken(token: string): string {
+  let start = 0;
+  let end = token.length;
+  while (start < end && "`'\"([{<".includes(token[start] ?? "")) start += 1;
+  while (end > start && "`'\".,:;!?)]}>".includes(token[end - 1] ?? "")) end -= 1;
+  return token.slice(start, end);
+}
+
+function isPathLikeMemoryEntity(entity: string): boolean {
+  if (!entity) return false;
+  if (entity.includes("/")) {
+    const parts = entity.split("/");
+    return parts.length >= 2 && parts.every((part) => part.length > 0);
+  }
+  return hasMemoryFileExtension(entity);
+}
+
+function hasMemoryFileExtension(entity: string): boolean {
+  const lower = entity.toLowerCase();
+  return [".ts", ".tsx", ".js", ".jsx", ".json", ".md", ".sqlite"].some((extension) => lower.endsWith(extension));
+}
+
 function memoryEntities(normalized: string): Set<string> {
   const entities = new Set<string>();
-  for (const match of normalized.matchAll(/[\w.-]+\/[\w./-]+|[\w.-]+\.(?:ts|tsx|js|jsx|json|md|sqlite)/g)) entities.add(match[0]);
+  for (const token of splitWhitespace(normalized)) {
+    const entity = trimEntityToken(token);
+    if (isPathLikeMemoryEntity(entity)) entities.add(entity);
+  }
   for (const token of ["chalinkernel", "agentcatalog", "memorystore", "typescript", "sqlite", "fts5", "tui", "sdk", "bun", "bun:test", "node:test"]) {
     if (normalized.includes(token)) entities.add(token);
   }
@@ -588,7 +607,7 @@ function memoryEntities(normalized: string): Set<string> {
 }
 
 function isStrongMemoryEntity(entity: string): boolean {
-  return entity.includes("/") || /\.(?:ts|tsx|js|jsx|json|md|sqlite)$/.test(entity) || ["chalinkernel", "agentcatalog", "memorystore", "sqlite", "fts5", "bun", "bun:test", "node:test"].includes(entity);
+  return entity.includes("/") || hasMemoryFileExtension(entity) || ["chalinkernel", "agentcatalog", "memorystore", "sqlite", "fts5", "bun", "bun:test", "node:test"].includes(entity);
 }
 
 function jaccard(a: Set<string>, b: Set<string>): number {
@@ -597,14 +616,77 @@ function jaccard(a: Set<string>, b: Set<string>): number {
   return intersection / (a.size + b.size - intersection);
 }
 
+function countLongWords(text: string): number {
+  let count = 0;
+  let length = 0;
+  for (let index = 0; index <= text.length; index += 1) {
+    const char = text[index] ?? " ";
+    if (isLetter(char)) {
+      length += 1;
+      continue;
+    }
+    if (length >= 3) count += 1;
+    length = 0;
+  }
+  return count;
+}
+
+function isLetter(char: string): boolean {
+  if (!char) return false;
+  return char.toLocaleLowerCase() !== char.toLocaleUpperCase();
+}
+
+function startsWithCodeLikePrefix(text: string): boolean {
+  const normalized = text.trimStart().toLowerCase();
+  return ["cmd", "env", "try", "except", "print", "return", "const", "let", "var", "import", "export", "function", "class", "if", "else", "for", "while", "sys.", "p =", "#"].some((prefix) => normalized.startsWith(prefix));
+}
+
+function containsAnyInsensitive(text: string, needles: string[]): boolean {
+  const lower = text.toLowerCase();
+  return needles.some((needle) => lower.includes(needle.toLowerCase()));
+}
+
+function containsCompletedStepNoise(text: string): boolean {
+  const lower = text.toLowerCase();
+  return lower.includes("completed a ") && lower.includes(" step for");
+}
+
+function countChars(text: string, chars: Set<string>): number {
+  let count = 0;
+  for (const char of text) if (chars.has(char)) count += 1;
+  return count;
+}
+
+function tokenizeSearchTerms(text: string): string[] {
+  const terms: string[] = [];
+  let current = "";
+  for (const char of text) {
+    if (isSearchTermChar(char)) {
+      current += char;
+      continue;
+    }
+    if (current) {
+      terms.push(current);
+      current = "";
+    }
+  }
+  if (current) terms.push(current);
+  return terms;
+}
+
+function isSearchTermChar(char: string): boolean {
+  return char === "_" || char === "-" || isLetter(char) || (char >= "0" && char <= "9");
+}
+
 function isUsefulMemoryContent(content: string): boolean {
   const normalized = normalizeContent(content);
   if (normalized.length < 48 || normalized.length > 600) return false;
-  if ((normalized.match(/[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]{3,}/g) ?? []).length < 6) return false;
-  if (/^(cmd|env|try|except|print|return|const|let|var|import|export|function|class|if|else|for|while|sys\.|p\s*=|#)/i.test(normalized)) return false;
-  if (/\b(subprocess|os\.environ|PI_OFFLINE|stdout|stderr|returncode|TimeoutExpired|sys\.exit|traceback|stack trace)\b/i.test(normalized)) return false;
-  if (/\b(completed a .* step for|mock handoff|previous handoff|task:)\b/i.test(normalized)) return false;
-  const codePunctuation = (normalized.match(/[=;{}()[\]]/g) ?? []).length;
+  if (countLongWords(normalized) < 6) return false;
+  if (startsWithCodeLikePrefix(normalized)) return false;
+  if (containsAnyInsensitive(normalized, ["subprocess", "os.environ", "PI_OFFLINE", "stdout", "stderr", "returncode", "TimeoutExpired", "sys.exit", "traceback", "stack trace"])) return false;
+  if (containsAnyInsensitive(normalized, ["mock handoff", "previous handoff", "task:"])) return false;
+  if (containsCompletedStepNoise(normalized)) return false;
+  const codePunctuation = countChars(normalized, new Set(["=", ";", "{", "}", "(", ")", "[", "]"]));
   if (codePunctuation >= 4) return false;
   return true;
 }
@@ -612,7 +694,7 @@ function isUsefulMemoryContent(content: string): boolean {
 
 function assessMemoryCandidate(candidate: MemoryCandidate): { status: MemoryRecord["status"]; importance: number; trigger: string; topicKey?: string } {
   const category = candidate.category.toLowerCase();
-  const topicKey = candidate.topicKey ?? memoryTopicKey(normalizeForDedupe(candidate.content)) ?? genericTopicKey(category, candidate.content);
+  const topicKey = candidate.topicKey ?? genericTopicKey(category, candidate.content);
   if (!isUsefulMemoryContent(candidate.content)) return { status: "rejected", importance: 0, trigger: "noise-rejected", topicKey };
   if (candidate.confidence < 0.35) return { status: "rejected", importance: 0.1, trigger: "low-confidence", topicKey };
   if (["decision", "preference", "security", "safety", "architecture", "agent-note"].includes(category)) {
@@ -655,7 +737,7 @@ function genericTopicKey(category: string, content: string): string | undefined 
 }
 
 function buildFtsQuery(query: string): string {
-  const terms = query.toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? [];
+  const terms = tokenizeSearchTerms(query.toLowerCase());
   return terms.map((term) => `"${term.replaceAll('"', '""')}"`).join(" OR ");
 }
 

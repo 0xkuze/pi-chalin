@@ -12,8 +12,19 @@ test("approvalDecision allows low risk under balanced mode", () => {
   assert.equal(approvalDecision(DEFAULT_CONFIG, route("low")).action, "allow");
 });
 
-test("approvalDecision asks for medium risk", () => {
-  assert.equal(approvalDecision(DEFAULT_CONFIG, route("medium")).action, "ask");
+test("approvalDecision allows medium risk by default", () => {
+  assert.equal(approvalDecision(DEFAULT_CONFIG, route("medium")).action, "allow");
+});
+
+test("approvalDecision can ask for medium risk when explicitly configured", () => {
+  const config = {
+    ...DEFAULT_CONFIG,
+    safety: {
+      ...DEFAULT_CONFIG.safety,
+      approvalRiskThreshold: "medium" as const,
+    },
+  };
+  assert.equal(approvalDecision(config, route("medium")).action, "ask");
 });
 
 test("approvalDecision blocks critical risk", () => {
@@ -59,10 +70,16 @@ test("child policy limits synthesis cross-step duplicate reads", () => {
   });
 
   assert.deepEqual(policy.beforeTool("read", { path: "src/index.ts" }), { allowed: true });
+  const warned = policy.beforeTool("read", { path: "src/index.ts" });
+  const stillAllowed = policy.beforeTool("read", { path: "src/index.ts" });
   const blocked = policy.beforeTool("read", { path: "src/index.ts" });
 
+  assert.equal(warned.allowed, true);
+  assert.equal(stillAllowed.allowed, true);
   assert.equal(blocked.allowed, false);
-  assert.match(blocked.reason, /cross_step_duplicate_reads=1:src\/index\.ts/);
+  assert.match(blocked.reason, /max_cross_step_duplicate_reads=1/);
   assert.equal(policy.metrics().budgetStopCount, 1);
-  assert.equal(policy.metrics().toolCalls, 1);
+  assert.ok(policy.metrics().budgetCapHits.some((hit) => hit.name === "max_cross_step_duplicate_reads" && hit.severity === "soft"));
+  assert.ok(policy.metrics().budgetCapHits.some((hit) => hit.name === "max_cross_step_duplicate_reads" && hit.severity === "hard"));
+  assert.equal(policy.metrics().toolCalls, 3);
 });

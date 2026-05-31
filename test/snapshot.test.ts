@@ -4,14 +4,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, test } from "bun:test";
 import { buildProjectSnapshot, formatProjectSnapshot } from "../src/snapshot.ts";
-import { classifyBashCommand, createChildToolPolicy, createChildTools, createProjectSnapshotTool } from "../src/child-tools.ts";
+import { createChildToolPolicy, createChildTools, createProjectSnapshotTool } from "../src/child-tools.ts";
 import { createMemoryCandidate, MemoryStore } from "../src/memory.ts";
 
 const tempDirs: string[] = [];
 afterEach(() => { while (tempDirs.length > 0) fs.rmSync(tempDirs.pop()!, { recursive: true, force: true }); });
 function tempDir(prefix: string): string { const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); tempDirs.push(dir); return dir; }
 
-test("project snapshot is stack-agnostic and detects Go projects without package.json", () => {
+test("project snapshot returns raw inventory without stack inference", () => {
   const dir = tempDir("pi-chalin-go-");
   fs.mkdirSync(path.join(dir, "cmd", "api"), { recursive: true });
   fs.mkdirSync(path.join(dir, "internal", "service"), { recursive: true });
@@ -22,34 +22,57 @@ test("project snapshot is stack-agnostic and detects Go projects without package
   const snapshot = buildProjectSnapshot({ cwd: dir, maxAgeMs: 60_000 });
   const text = formatProjectSnapshot(snapshot);
 
-  assert.ok(snapshot.stack.includes("go"));
-  assert.ok(snapshot.signals.includes("go.mod"));
-  assert.ok(snapshot.testCommands.includes("go test ./..."));
-  assert.ok(snapshot.entrypoints.includes("cmd/api/main.go"));
-  assert.match(text, /stack: go/);
+  assert.equal("stack" in snapshot, false);
+  assert.equal("entrypoints" in snapshot, false);
+  assert.ok(snapshot.entries.some((entry) => entry.path === "go.mod" && entry.type === "file"));
+  assert.ok(snapshot.entries.some((entry) => entry.path === "cmd/api/main.go" && entry.type === "file"));
+  assert.match(text, /Project discovery inventory/);
+  assert.doesNotMatch(text, /stack:/);
 });
 
-test("guarded child bash blocks ad-hoc scripts and file mutation", () => {
-  assert.equal(classifyBashCommand("git status --short").allowed, true);
-  assert.equal(classifyBashCommand("go test ./...").allowed, true);
-  assert.equal(classifyBashCommand("python3 /tmp/read.py").allowed, false);
-  assert.equal(classifyBashCommand("cat > script.py").allowed, false);
-  assert.equal(classifyBashCommand("node -e \"console.log(1)\"").allowed, false);
-  assert.equal(classifyBashCommand("sed -i 's/a/b/' file.ts").allowed, false);
+test("project snapshot surfaces nested layouts through uniform inventory", () => {
+  const dir = tempDir("pi-chalin-workspace-snapshot-");
+  fs.mkdirSync(path.join(dir, "crates", "resolver", "src"), { recursive: true });
+  fs.mkdirSync(path.join(dir, "src", "install"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "crates", "resolver", "src", "manifest.rs"), "pub struct PackageManifest;\n");
+  fs.writeFileSync(path.join(dir, "src", "install", "lockfile.zig"), "pub const Lockfile = struct {};\n");
+  fs.writeFileSync(path.join(dir, "README.md"), "# Workspace\n");
+
+  const snapshot = buildProjectSnapshot({ cwd: dir, maxAgeMs: 60_000 });
+  const text = formatProjectSnapshot(snapshot);
+
+  assert.ok(snapshot.entries.some((entry) => entry.path === "crates/resolver/src/manifest.rs" && entry.type === "file"));
+  assert.ok(snapshot.entries.some((entry) => entry.path === "src/install/lockfile.zig" && entry.type === "file"));
+  assert.match(text, /crates\/resolver/);
 });
 
-test("child tool policy enforces budget before executing tools", async () => {
+test("child bash policy allows arbitrary command text for bash-capable agents", () => {
+  const dir = tempDir("pi-chalin-bash-autonomy-");
+  const policy = createChildToolPolicy({ cwd: dir, maxToolCalls: 5, agentName: "scout", allowedTools: ["bash"] });
+
+  assert.deepEqual(policy.beforeTool("bash", { command: "gh pr comment 112 --body ok" }), { allowed: true });
+  assert.deepEqual(policy.beforeTool("bash", { command: "python3 /tmp/read.py" }), { allowed: true });
+  assert.deepEqual(policy.beforeTool("bash", { command: "sed -i 's/a/b/' file.ts" }), { allowed: true });
+  assert.deepEqual(policy.metrics().policyViolations, []);
+});
+
+test("child tool policy warns at soft budget and hard-stops only after adaptive grace", async () => {
   const dir = tempDir("pi-chalin-budget-");
   const policy = createChildToolPolicy({ cwd: dir, maxToolCalls: 1, agentName: "scout" });
   const tool = createProjectSnapshotTool(policy);
 
   const first = await tool.execute("call-1", {}, undefined, undefined, {} as never);
-  const second = await tool.execute("call-2", {}, undefined, undefined, {} as never);
+  let last = first;
+  for (let index = 2; index <= 14; index += 1) {
+    last = await tool.execute(`call-${index}`, {}, undefined, undefined, {} as never);
+  }
 
-  assert.match(first.content[0]?.type === "text" ? first.content[0].text : "", /stack:/i);
-  assert.equal(policy.metrics().toolCalls, 1);
-  assert.match(second.content[0]?.type === "text" ? second.content[0].text : "", /budget_exceeded/);
+  assert.match(first.content[0]?.type === "text" ? first.content[0].text : "", /Project discovery inventory/i);
+  assert.equal(policy.metrics().toolCalls, 13);
+  assert.match(last.content[0]?.type === "text" ? last.content[0].text : "", /budget_exceeded/);
   assert.equal(policy.metrics().budgetStopCount, 1);
+  assert.ok(policy.metrics().budgetCapHits.some((hit) => hit.name === "max_tool_calls" && hit.severity === "soft"));
+  assert.ok(policy.metrics().budgetCapHits.some((hit) => hit.name === "max_tool_calls" && hit.severity === "hard"));
   assert.deepEqual(policy.metrics().policyViolations, []);
 });
 
@@ -173,13 +196,10 @@ test("formatProjectSnapshot includes compact recent commits for branch summaries
     createdAt: new Date().toISOString(),
     cwd: "/tmp/project",
     cacheKey: "cache",
-    stack: ["node"],
-    signals: ["package.json"],
-    packageManagers: ["bun"],
-    testCommands: ["bun test"],
-    buildCommands: [],
-    entrypoints: [],
-    highSignalFiles: [],
+    entries: [],
+    truncated: false,
+    ignoredDirs: [],
+    extensionHistogram: {},
     git: { branch: "feature/auth", head: "abc123", changedFiles: ["M	src/auth.ts"], recentCommits: ["abc123 fix auth", "def456 add tests"] },
   });
 

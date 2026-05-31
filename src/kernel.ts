@@ -80,7 +80,7 @@ export class ChalinKernel {
   async handleRoute(route: RouteDecision, prompt: string, context: Omit<WorkerRunnerContext, "agents" | "modelOverrides"> = { cwd: this.cwd }, approvalOverride?: ApprovalDecision): Promise<ChalinHandleResult> {
     const approval = approvalOverride ?? approvalDecision(this.config, route);
     const diagnostics = [...this.catalog.diagnostics.warnings, ...this.catalog.diagnostics.errors];
-    const memories = route.needsMemory ? (await this.memory.retrieve({ query: prompt, sourceAgent: "primary-pi", limit: 5, tokenBudget: 900 })).results.map((result) => result.record) : [];
+    const memories = route.needsMemory ? await this.retrieveRouteMemories(route, prompt) : [];
     if (approval.action !== "allow" || !route.plan) return { route, approval, memories, diagnostics };
 
     const agents = this.resolvePlanAgents(route);
@@ -95,7 +95,7 @@ export class ChalinKernel {
     }
 
     const runner = context.extensionContext ? this.sdkRunner : this.runner;
-    const run = await runner.run(route, { ...context, cwd: this.cwd, agents, modelOverrides: this.modelOverrides, thinkingOverrides: this.thinkingOverrides });
+    const run = await runner.run(route, { ...context, cwd: this.cwd, rootTask: prompt, agents, modelOverrides: this.modelOverrides, thinkingOverrides: this.thinkingOverrides });
     const candidates = run.steps.flatMap((step) => step.output?.memoryCandidates ?? []);
     if (candidates.length > 0) {
       if (context.extensionContext) {
@@ -109,14 +109,14 @@ export class ChalinKernel {
   }
 
   async resumeRun(run: RunState, context: Omit<WorkerRunnerContext, "agents" | "modelOverrides" | "thinkingOverrides"> = { cwd: this.cwd }): Promise<ChalinHandleResult> {
-    const approval = approvalDecision(this.config, run.route);
+    const approval = resumeApprovalDecision(this.config, run.route);
     const diagnostics = [...this.catalog.diagnostics.warnings, ...this.catalog.diagnostics.errors];
     if (approval.action !== "allow" || !run.route.plan) return { route: run.route, approval, memories: [], diagnostics, run };
     const agents = this.resolvePlanAgents(run.route);
     const runner = context.extensionContext ? this.sdkRunner : this.runner;
     const resumed = runner.resume
-      ? await runner.resume(run, { ...context, cwd: this.cwd, agents, modelOverrides: this.modelOverrides, thinkingOverrides: this.thinkingOverrides })
-      : await runner.run(run.route, { ...context, cwd: this.cwd, agents, modelOverrides: this.modelOverrides, thinkingOverrides: this.thinkingOverrides });
+      ? await runner.resume(run, { ...context, cwd: this.cwd, rootTask: run.rootTask, agents, modelOverrides: this.modelOverrides, thinkingOverrides: this.thinkingOverrides })
+      : await runner.run(run.route, { ...context, cwd: this.cwd, rootTask: run.rootTask, agents, modelOverrides: this.modelOverrides, thinkingOverrides: this.thinkingOverrides });
     const candidates = resumed.steps.flatMap((step) => step.output?.memoryCandidates ?? []);
     if (candidates.length > 0) {
       if (context.extensionContext) this.persistMemoriesAfterToolResult(candidates, resumed.id, context.extensionContext.hasUI);
@@ -128,6 +128,11 @@ export class ChalinKernel {
 
   async approvalFor(route: RouteDecision): Promise<ApprovalDecision> {
     return approvalDecision(this.config, route);
+  }
+
+  private async retrieveRouteMemories(route: RouteDecision, prompt: string): Promise<MemoryRecord[]> {
+    if (route.kind === "memory-only" && isMemoryInventoryPrompt(prompt)) return this.memory.list();
+    return (await this.memory.retrieve({ query: prompt, sourceAgent: "primary-pi", limit: 5, tokenBudget: 900 })).results.map((result) => result.record);
   }
 
   resolvePlanAgents(route: RouteDecision): Map<string, AgentDefinition> {
@@ -152,6 +157,12 @@ export class ChalinKernel {
     }, delayMs);
     timer.unref?.();
   }
+}
+
+function resumeApprovalDecision(config: ChalinConfig, route: RouteDecision): ApprovalDecision {
+  const current = approvalDecision(config, route);
+  if (current.action === "block") return current;
+  return { action: "allow", reason: "Existing pi-chalin run resumes under the start-time approval gate; non-critical routes are not re-approved mid-run." };
 }
 
 function askUser(reason: string): RouteDecision {
@@ -247,4 +258,21 @@ function sanitizeBudget(value: AgentStep["budget"]): AgentStep["budget"] | undef
 function riskFromPlan(steps: Array<{ agent: string }>): RouteDecision["risk"] {
   if (steps.some((step) => step.agent === "worker")) return "medium";
   return "low";
+}
+
+function isMemoryInventoryPrompt(prompt: string): boolean {
+  const normalized = prompt.toLowerCase();
+  return [
+    "how many",
+    "how much",
+    "memory count",
+    "count memory",
+    "list memory",
+    "memory elements",
+    "memory records",
+    "what elements",
+    "what do you have in memory",
+    "what is in memory",
+    "what's in memory",
+  ].some((phrase) => normalized.includes(phrase));
 }
