@@ -9,9 +9,24 @@ Judge: `zai/glm-5.1`
 Comparative judge mode: `content-only`, con override de implementacion cuando un candidato falla validacion deterministica.  
 Gentle evaluado con `gentleRoot=/Users/cristianfonseca/Documents/personal/gentle-pi` y `gentleCompanionRoot=/private/tmp/gentle-harness-runtime/node_modules`.
 
+## Alcance exacto
+
+Este snapshot NO mide el harness completo de subagentes. Mide la calidad/costo del camino directo de Chalin contra Gentle full en 12 tareas de implementacion/docs donde el harness las trato como direct-eligible.
+
+Evidencia:
+
+- `chalin_route` calls: `0`
+- Gentle `subagent` calls observadas en esta matriz: `0`
+- Chalin resolvio con tools nativas (`write`, `bash`, etc.).
+- Gentle tambien resolvio con tools nativas aunque tenia cargado el companion bundle.
+
+La suite que valida decision/topologia de `chalin_route` existe separada: `evals/orchestration.eval.ts`. El ultimo reporte local preservado de esa familia, `.pi-chalin/evals/orchestration-2026-05-27T03-44-14-013Z.json`, paso `19/19` con `13` casos esperados usando `chalin_route` y `6` directos. Esa suite valida routing/topologia, pero no es el mismo blind judge de output contra Gentle.
+
+Conclusion honesta: estos resultados prueban que Chalin direct-mode fue superior a Gentle full en esta matriz final. No prueban por si solos que `chalin_route` sea superior a Gentle `pi-subagents`. Para esa afirmacion hace falta una matriz route-required especifica: mismas tareas, Chalin obligado/esperado a usar `chalin_route`, Gentle con `subagent`, y judge blind mirando output/codigo/validacion.
+
 ## Resultado ejecutivo
 
-Chalin gano la corrida final contra Gentle en los 12 casos comparados.
+Chalin gano esta corrida final directa contra Gentle en los 12 casos comparados.
 
 | Metrica | Chalin | Gentle |
 | --- | ---: | ---: |
@@ -25,7 +40,7 @@ Chalin gano la corrida final contra Gentle en los 12 casos comparados.
 | Promedio workspace quality | 99.3 | 82.0 |
 | Promedio efficiency score | 94.3 | 79.3 |
 | Promedio judge score | 95.8 | 87.6 |
-| `chalin_route` calls | 0 | 0 |
+| `chalin_route` / `subagent` calls observadas | 0 | 0 |
 | Agent retries | 0 | 0 |
 | Infra retries | 0 | 0 |
 
@@ -52,6 +67,7 @@ Lectura simple: en esta corrida final, Chalin uso 83.2% menos tokens, costo 83.2
 
 - Esta evidencia prueba la corrida final registrada, no una verdad universal sobre cualquier proyecto futuro.
 - La comparacion fue contra Gentle con companion bundle, no contra una instancia contaminada con extensiones de Chalin.
-- En esta corrida Chalin no uso `chalin_route` ni fan-out de subagentes; resolvio por caminos directos/native. Eso explica buena parte del ahorro de tokens.
+- En esta corrida Chalin no uso `chalin_route` ni fan-out de subagentes; resolvio por caminos directos/native. Gentle tampoco uso `subagent` en esta matriz. Eso explica buena parte del ahorro de tokens y limita el alcance de la conclusion.
 - El punto critico del judge actualizado es correcto: en tareas de implementacion, no basta con una explicacion bonita. El codigo, los tests, la validacion ejecutable y los hidden checks pesan por encima del texto.
+- Para comparar harness completo falta una suite nueva o extendida que fuerce/espere orquestacion en tareas amplias y compare `chalin_route` contra Gentle `subagent` con blind judge.
 - Los `.jsonl` se borran despues de este snapshot; el reporte JSON principal queda preservado en `.pi-chalin/evals`.
