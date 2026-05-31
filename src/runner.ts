@@ -62,10 +62,12 @@ export class MockWorkerRunner implements WorkerRunner {
         await runStep(run.steps[0]!, context, undefined, run);
       } else if (plan.kind === "chain") {
         let previous = "";
-        for (const step of run.steps) {
+        for (let index = 0; index < run.steps.length; index += 1) {
+          const step = run.steps[index]!;
           throwIfAborted(context.signal);
           const output = await runStep(step, context, previous, run);
           previous = output.handoff ?? output.text;
+          maybeAppendImplementationReviewRepair(run, step);
         }
       } else if (plan.kind === "parallel") {
         await Promise.all(run.steps.map((step) => runStep(step, context, undefined, run)));
@@ -89,14 +91,17 @@ export class MockWorkerRunner implements WorkerRunner {
       throwIfAborted(context.signal);
       if (plan.kind === "single" || plan.kind === "chain") {
         let previous = aggregateCompletedHandoffBefore(run.steps, run.steps.length);
-        for (const step of run.steps) {
+        for (let index = 0; index < run.steps.length; index += 1) {
+          const step = run.steps[index]!;
           if (isUsableStepHandoff(step)) {
             previous = aggregateHandoff([{ agent: step.agent, text: step.output?.handoff ?? step.output?.text ?? previous }]);
+            maybeAppendImplementationReviewRepair(run, step);
             continue;
           }
           throwIfAborted(context.signal);
           const output = await runStep(step, context, previous, run);
           previous = output.handoff ?? output.text;
+          maybeAppendImplementationReviewRepair(run, step);
         }
       } else if (plan.kind === "parallel") {
         await Promise.all(run.steps.filter((step) => !isUsableStepHandoff(step)).map((step) => runStep(step, context, undefined, run)));
@@ -138,10 +143,12 @@ export class SdkWorkerRunner implements WorkerRunner {
       await runSdkDag(run, plan.stages, context, extensionContext);
     } else {
       let previous = "";
-      for (const step of run.steps) {
+      for (let index = 0; index < run.steps.length; index += 1) {
+        const step = run.steps[index]!;
         const result = await runSdkStep(step, context, extensionContext, run, { previous, cwd: context.cwd });
         if (result.aborted || result.paused) break;
         previous = result.handoff ?? previous;
+        maybeAppendImplementationReviewRepair(run, step);
       }
     }
 
@@ -169,14 +176,17 @@ export class SdkWorkerRunner implements WorkerRunner {
       await runSdkDag(run, plan.stages, context, extensionContext);
     } else {
       let previous = "";
-      for (const step of run.steps) {
+      for (let index = 0; index < run.steps.length; index += 1) {
+        const step = run.steps[index]!;
         if (isUsableStepHandoff(step)) {
           previous = step.output?.handoff ?? step.output?.text ?? previous;
+          maybeAppendImplementationReviewRepair(run, step);
           continue;
         }
         const result = await runSdkStep(step, context, extensionContext, run, { previous, cwd: context.cwd });
         if (result.aborted || result.paused) break;
         previous = result.handoff ?? previous;
+        maybeAppendImplementationReviewRepair(run, step);
       }
     }
 
@@ -186,21 +196,25 @@ export class SdkWorkerRunner implements WorkerRunner {
 
 async function runMockDag(run: RunState, stages: Extract<RoutePlan, { kind: "dag" }>["stages"], context: WorkerRunnerContext): Promise<void> {
   let previous = "";
-  for (const stage of stages) {
+  for (let stageIndex = 0; stageIndex < stages.length; stageIndex += 1) {
+    const stage = stages[stageIndex]!;
     throwIfAborted(context.signal);
     const stageSteps = run.steps.filter((step) => step.id.startsWith(`${stage.id}:`));
     const outputs = await Promise.all(stageSteps.map((step) => runStep(step, context, previous, run)));
+    for (const step of stageSteps) maybeAppendImplementationReviewRepair(run, step);
     previous = aggregateHandoff(outputs.map((output) => ({ agent: output.agent, text: output.handoff ?? output.text })));
   }
 }
 
 async function resumeMockDag(run: RunState, stages: Extract<RoutePlan, { kind: "dag" }>["stages"], context: WorkerRunnerContext): Promise<void> {
   let previous = "";
-  for (const stage of stages) {
+  for (let stageIndex = 0; stageIndex < stages.length; stageIndex += 1) {
+    const stage = stages[stageIndex]!;
     throwIfAborted(context.signal);
     const stageSteps = run.steps.filter((step) => step.id.startsWith(`${stage.id}:`));
     if (stageSteps.every((step) => isUsableStepHandoff(step))) {
       previous = aggregateStageHandoff(stageSteps);
+      for (const step of stageSteps) maybeAppendImplementationReviewRepair(run, step);
       continue;
     }
     const outputs = await Promise.all(stageSteps
@@ -209,6 +223,7 @@ async function resumeMockDag(run: RunState, stages: Extract<RoutePlan, { kind: "
     const completedOutputs = stageSteps
       .filter((step) => isUsableStepHandoff(step))
       .map((step) => ({ agent: step.agent, text: step.output?.handoff ?? step.output?.text ?? "" }));
+    for (const step of stageSteps) maybeAppendImplementationReviewRepair(run, step);
     previous = aggregateHandoff([...completedOutputs, ...outputs.map((output) => ({ agent: output.agent, text: output.handoff ?? output.text }))]);
   }
 }
@@ -313,13 +328,15 @@ async function runSdkDag(
   extensionContext: ExtensionContext,
 ): Promise<void> {
   let previous = "";
-  for (const stage of stages) {
+  for (let stageIndex = 0; stageIndex < stages.length; stageIndex += 1) {
+    const stage = stages[stageIndex]!;
     if (context.signal?.aborted) {
       markRunAborted(run, context, "pi-chalin run stopped by user.");
       break;
     }
     const stageSteps = run.steps.filter((step) => step.id.startsWith(`${stage.id}:`));
     await runSdkStage(run, stage, stageSteps, context, extensionContext, previous);
+    for (const step of stageSteps) maybeAppendImplementationReviewRepair(run, step);
     previous = aggregateStageHandoff(stageSteps);
     if (shouldStopAfterDagStage(stageSteps, context.agents)) break;
     const failedSteps = stageSteps.filter((step) => step.status === "failed");
@@ -337,6 +354,211 @@ function aggregateStageHandoff(stageSteps: RunStepState[]): string {
     if (step.status === "failed") return { agent: step.agent, text: `FAILED: ${step.error ?? "unknown error"}. Treat this as a known coverage gap and make it explicit in downstream synthesis.` };
     return { agent: step.agent, text: "" };
   }));
+}
+
+function maybeAppendImplementationReviewRepair(run: RunState, step: RunStepState): boolean {
+  if (step.agent !== "reviewer" || !isUsableStepHandoff(step)) return false;
+  const stepIndex = run.steps.indexOf(step);
+  if (stepIndex < 0 || hasLaterImplementationRepair(run, stepIndex)) return false;
+  const workerIndex = findLastIndex(run.steps, (candidate, index) => index < stepIndex && candidate.agent === "worker" && isUsableStepHandoff(candidate));
+  if (workerIndex < 0) return false;
+  const reviewerGap = reviewerHandoffNeedsRepair(step);
+  const permanentTestGap = !reviewerGap && implementationPassNeedsPermanentTestRepair(run, workerIndex, stepIndex);
+  if (!reviewerGap && !permanentTestGap) return false;
+  const existingRepairCycles = implementationReviewRepairCycleCount(run);
+  const maxRepairCycles = maxImplementationReviewRepairCycles();
+  if (existingRepairCycles >= maxRepairCycles) {
+    const gap = reviewerGap ? "a blocking FAIL/GAP" : "missing permanent test coverage";
+    step.status = "failed";
+    step.error = `Implementation reviewer still reports ${gap} after ${existingRepairCycles} repair cycle(s).`;
+    run.warnings.push(`${step.error} Stopping instead of finalizing incomplete routed implementation.`);
+    persistRun(run);
+    return false;
+  }
+
+  const cycle = existingRepairCycles + 1;
+  const reviewText = truncateText(step.output?.handoff ?? step.output?.text ?? "", 1200);
+  const originalTask = run.rootTask ?? run.route.reason;
+  const repairIntro = reviewerGap
+    ? "Repair the blocking implementation-review findings from the Previous Handoff."
+    : "Repair the runtime coverage guard: product code changed while available permanent tests were not updated.";
+  const repairScope = reviewerGap
+    ? "Use the previous reviewer handoff as the gap list; do not repeat broad discovery unless a named file is missing."
+    : "Add/update permanent runner-discoverable tests for the changed behavior. Preserve the implementation unless the new tests reveal a bug. Ignore narrower step wording that prohibited tests unless the Original User Goal explicitly prohibited test edits.";
+  const repairWorker: RunStepState = {
+    id: `review-repair-${cycle}-worker`,
+    agent: "worker",
+    task: [
+      repairIntro,
+      "Read only the changed implementation/test files needed for the repair, apply the smallest corrective edit, add or update focused regression tests for the missed criteria, then run the requested or nearest verification command.",
+      "Handoff exact changed paths, tests added/updated, verification command, and any remaining risk.",
+      `Original task: ${originalTask}`,
+      repairScope,
+    ].join(" "),
+    budget: "tight",
+    status: "pending",
+  };
+  const repairReviewer: RunStepState = {
+    id: `review-repair-${cycle}-reviewer`,
+    agent: "reviewer",
+    task: [
+      "Re-review the repaired implementation against the original task and the previous reviewer findings.",
+      "Check actual changed files, test coverage for each missed criterion, and verification output.",
+      "Return PASS only if the blocking gaps are fixed; otherwise return FAIL/GAP with exact evidence.",
+      `Original task: ${originalTask}`,
+      `Previous reviewer findings: ${truncateText(reviewText, 700)}`,
+    ].join(" "),
+    budget: "tight",
+    status: "pending",
+  };
+
+  appendImplementationReviewRepair(
+    run,
+    cycle,
+    repairWorker,
+    repairReviewer,
+    reviewerGap
+      ? "because the reviewer reported a blocking FAIL/GAP"
+      : "because changed product code had no permanent test update despite an available test surface",
+  );
+  run.warnings.push(`${reviewerGap ? "Implementation reviewer reported a blocking gap" : "Implementation changed product code without permanent test coverage"}; queued repair cycle ${cycle}/${maxRepairCycles} with worker repair and reviewer re-check.`);
+  persistRun(run);
+  return true;
+}
+
+function implementationPassNeedsPermanentTestRepair(run: RunState, workerIndex: number, reviewerIndex: number): boolean {
+  if (rootTaskExplicitlyForbidsTestEdits(run.rootTask ?? "")) return false;
+  const inspectedSteps = run.steps.slice(0, reviewerIndex + 1);
+  const implementationSteps = run.steps.slice(workerIndex, reviewerIndex + 1);
+  const touchedPaths = implementationSteps.flatMap((candidate) => candidate.metrics?.filesTouched ?? []);
+  if (!touchedPaths.some(isProductImplementationPath)) return false;
+  if (touchedPaths.some(isTestPath)) return false;
+  const knownPaths = inspectedSteps.flatMap((candidate) => [
+    ...(candidate.metrics?.filesRead ?? []),
+    ...(candidate.metrics?.filesTouched ?? []),
+  ]);
+  return knownPaths.some(isTestPath);
+}
+
+function rootTaskExplicitlyForbidsTestEdits(task: string): boolean {
+  return /\b(?:do\s+not|don't|without)\s+(?:edit|modify|change|add|update|write|touch)\s+(?:the\s+)?(?:tests?|test\s+files?|test\s+suite)\b/i.test(task)
+    || /\bno\s+(?:edites?|modifiques?|cambies?|agregues?|anadas?|añadas?|toques?)\s+(?:los\s+|las\s+)?(?:tests?|pruebas?|archivos?\s+de\s+prueba|suite\s+de\s+tests?)\b/i.test(task);
+}
+
+function isProductImplementationPath(filePath: string): boolean {
+  const normalized = normalizeMetricFilePath(filePath);
+  if (!normalized || isTestPath(normalized) || isDocumentationPath(normalized)) return false;
+  return /\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx|m|mm|go|rs|zig|ts|tsx|js|jsx|mjs|cjs|py|rb|php|java|kt|kts|swift|cs)$/i.test(normalized);
+}
+
+function isTestPath(filePath: string): boolean {
+  const normalized = normalizeMetricFilePath(filePath);
+  if (!normalized) return false;
+  const base = normalized.split("/").pop() ?? normalized;
+  return /(?:^|\/)(?:tests?|__tests__|specs?|fixtures?)(?:\/|$)/i.test(normalized)
+    || /\.(?:test|spec)\.[cm]?[jt]sx?$/i.test(base)
+    || /(?:^|[_-])test[_-].+\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx|go|rs|zig|py|rb|php|java|kt|swift|cs)$/i.test(base)
+    || /.+[_-]test\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx|go|rs|zig|py|rb|php|java|kt|swift|cs)$/i.test(base);
+}
+
+function isDocumentationPath(filePath: string): boolean {
+  return /\.(?:md|mdx|txt|rst|adoc)$/i.test(normalizeMetricFilePath(filePath));
+}
+
+function normalizeMetricFilePath(filePath: string): string {
+  return filePath.replace(/\\/g, "/").replace(/^\.\//, "").trim();
+}
+
+export function reviewerHandoffNeedsRepair(step: Pick<RunStepState, "agent" | "status" | "output">): boolean {
+  if (step.agent !== "reviewer" || !isUsableStepHandoff(step)) return false;
+  const text = (step.output?.handoff?.trim() ? step.output.handoff : step.output?.text ?? "").trim();
+  if (!text) return false;
+  const explicitVerdict = /\bverdict\s*:\s*(PASS|FAIL|GAP|BLOCKER|BLOCKING)\b/i.exec(text)?.[1]?.toUpperCase();
+  const signalText = stripNonBlockingReviewerPhrases(text);
+  const blockingSignal = /\b(?:blocking\s+gap|bugs?\s+found|coverage\s+is\s+insufficient|tests?\s+miss|does\s+not\s+exercise|verification\s+blind\s+spot|bug remains|does not meet|missing acceptance|missing\s+tests?\s+for|insufficient tests|skipped scope|test\s+coverage\s+gap|permanent\s+test\s+suite\s+could\s+be\s+expanded|untested\s+in\s+the\s+permanent\s+suite|permanent\s+coverage\s+missing|ad[- ]hoc\s+(?:tests?|checks?|verification)[^.\n]{0,80}(?:not\s+a\s+substitute|only|instead|replace)|must fix|required[^.\n]{0,80}missing|no cumple|falta(?:n)?[^.\n]{0,80}(?:criteri|test|cobertura|validaci[oó]n|implementaci[oó]n|alcance|aceptaci[oó]n|required|coverage|verification|scope))\b/i.test(signalText);
+  if (explicitVerdict === "PASS" && !blockingSignal) return false;
+  if (explicitVerdict && explicitVerdict !== "PASS") return true;
+  return blockingSignal || /\b(?:FAIL|BLOCKER|BLOCKING)\b/i.test(signalText) || /^\s*[-*]?\s*GAP\b/im.test(signalText);
+}
+
+function appendImplementationReviewRepair(run: RunState, cycle: number, repairWorker: RunStepState, repairReviewer: RunStepState, reason: string): void {
+  const routeReason = run.route.reason.includes("Implementation review repair queued by pi-chalin")
+    ? run.route.reason
+    : `${run.route.reason} Implementation review repair queued by pi-chalin ${reason}.`;
+  const workerPlanStep = { agent: repairWorker.agent, task: repairWorker.task, budget: repairWorker.budget };
+  const reviewerPlanStep = { agent: repairReviewer.agent, task: repairReviewer.task, budget: repairReviewer.budget };
+
+  if (run.route.plan?.kind === "dag") {
+    const workerStageId = `review-repair-${cycle}-worker`;
+    const reviewerStageId = `review-repair-${cycle}-reviewer`;
+    run.steps.push(
+      { ...repairWorker, id: `${workerStageId}:step-1` },
+      { ...repairReviewer, id: `${reviewerStageId}:step-1` },
+    );
+    run.route.plan.stages.push(
+      { id: workerStageId, tasks: [workerPlanStep] },
+      { id: reviewerStageId, tasks: [reviewerPlanStep] },
+    );
+    run.route.agents = [...run.route.agents, "worker", "reviewer"];
+    run.route.needsArtifacts = true;
+    run.route.reason = routeReason;
+    return;
+  }
+
+  const existingPlanSteps: AgentStep[] = run.route.plan?.kind === "single"
+    ? [{ agent: run.route.plan.agent, task: run.route.plan.task, budget: run.route.plan.budget }]
+    : run.route.plan?.kind === "chain"
+      ? run.route.plan.steps
+      : run.route.plan?.kind === "parallel"
+        ? run.route.plan.tasks
+        : run.steps.map((candidate) => ({ agent: candidate.agent, task: candidate.task, budget: candidate.budget }));
+  run.steps.push(repairWorker, repairReviewer);
+  run.route = {
+    ...run.route,
+    kind: "multi-agent-chain",
+    agents: [...run.route.agents, "worker", "reviewer"],
+    needsArtifacts: true,
+    reason: routeReason,
+    plan: {
+      kind: "chain",
+      steps: [...existingPlanSteps, workerPlanStep, reviewerPlanStep],
+    },
+  };
+}
+
+function implementationReviewRepairCycleCount(run: RunState): number {
+  const cycles = new Set<string>();
+  for (const step of run.steps) {
+    const numbered = /^review-repair-(\d+)-(?:worker|reviewer)$/.exec(step.id);
+    if (numbered?.[1]) {
+      cycles.add(numbered[1]);
+      continue;
+    }
+    if (/^review-repair-(?:worker|reviewer)$/.test(step.id)) cycles.add("legacy");
+    const dagNumbered = /^review-repair-(\d+)-(?:worker|reviewer):/.exec(step.id);
+    if (dagNumbered?.[1]) cycles.add(dagNumbered[1]);
+  }
+  return cycles.size;
+}
+
+function hasLaterImplementationRepair(run: RunState, stepIndex: number): boolean {
+  return run.steps.some((candidate, index) => index > stepIndex && candidate.id.startsWith("review-repair-"));
+}
+
+function maxImplementationReviewRepairCycles(): number {
+  const parsed = Number(process.env.PI_CHALIN_IMPLEMENTATION_REVIEW_REPAIR_CYCLES);
+  if (!Number.isFinite(parsed)) return 2;
+  return Math.max(0, Math.min(4, Math.floor(parsed)));
+}
+
+function stripNonBlockingReviewerPhrases(text: string): string {
+  return text
+    .replace(/\bno\s+bugs?\s+found\b/gi, "")
+    .replace(/\bno\s+(?:blocking\s+)?gaps?\s+(?:remain|remaining|found)?\b/gi, "")
+    .replace(/\bno\s+remaining\s+(?:gaps?|blockers?|issues?)\b/gi, "")
+    .replace(/\bno\s+missing\s+(?:acceptance|criteria|coverage|tests?|verification|scope)[^.\n]*/gi, "")
+    .replace(/[^.\n]*(?:not required by (?:the )?(?:user )?goal|not required by (?:the )?(?:original )?request)[^.\n]*/gi, "")
+    .replace(/\bno\s+falta(?:n)?[^.\n]*/gi, "");
 }
 
 export function shouldStopAfterDagStage(stageSteps: Pick<RunStepState, "status" | "agent" | "output" | "error">[], agents: Map<string, AgentDefinition>): boolean {
@@ -1596,6 +1818,13 @@ function durationMs(startedAt: string, endedAt?: string): number {
 
 function truncateText(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+
+function findLastIndex<T>(items: T[], predicate: (item: T, index: number) => boolean): number {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (predicate(items[index]!, index)) return index;
+  }
+  return -1;
 }
 
 function handoffBudgetChars(agent?: string): number {

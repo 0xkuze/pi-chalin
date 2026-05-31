@@ -9,9 +9,9 @@ import { chalinChildSessionDir, createChalinChildSessionManager, hideLegacyTopLe
 import { policyForStep } from "../src/budget.ts";
 import { resolveAgentModel, resolveAgentThinking, resolveInheritedModelFallback } from "../src/model-resolution.ts";
 import { buildSdkPrompt, childToolNames, resolveStepCompletionStatus, toolBudgetForStep } from "../src/runner-prompt.ts";
-import { DEFAULT_SDK_STEP_IDLE_STALL_MS, MockWorkerRunner, budgetPolicyForSdkStep, buildConflictResolverTask, extractAssistantRuntimeError, hasUnrecoverableFailedSteps, normalizeThinkingForBudget, parseAgentOutput, runWithIdleStallMonitor, sdkStepIdleStallMs, shouldStopAfterDagStage } from "../src/runner.ts";
+import { DEFAULT_SDK_STEP_IDLE_STALL_MS, MockWorkerRunner, budgetPolicyForSdkStep, buildConflictResolverTask, extractAssistantRuntimeError, hasUnrecoverableFailedSteps, normalizeThinkingForBudget, parseAgentOutput, reviewerHandoffNeedsRepair, runWithIdleStallMonitor, sdkStepIdleStallMs, shouldStopAfterDagStage } from "../src/runner.ts";
 import { createRunState, loadResumableRunState, prepareRunForResume } from "../src/runner-state.ts";
-import type { AgentDefinition, RouteDecision, RunState } from "../src/schemas.ts";
+import type { AgentDefinition, RouteDecision, RunState, RunStepMetrics } from "../src/schemas.ts";
 
 const tempDirs: string[] = [];
 afterEach(() => { while (tempDirs.length > 0) fs.rmSync(tempDirs.pop()!, { recursive: true, force: true }); });
@@ -37,6 +37,16 @@ function readOnlyAgent(name: string, concern: AgentDefinition["concern"] = "cont
   return { name, scope: "built-in", concern, capabilities: ["inspect-files", "search-files"], description: name, model: "inherit", tools: [], memory: { read: false, write: "never", categories: [] }, systemPrompt: "", diagnostics: [] };
 }
 
+function stepMetrics(overrides: Partial<RunStepMetrics> = {}): RunStepMetrics {
+  return {
+    durationMs: 1,
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    toolCalls: 0,
+    toolCallsByName: {},
+    ...overrides,
+  };
+}
+
 test("parseAgentOutput extracts categorized human-readable memory candidates", () => {
   const output = parseAgentOutput("planner", "## Handoff\nUse worker next\n\n## Memory Candidates\n- tooling: This project uses Bun for tests, and tests should avoid setTimeout-based waits because they make the suite flaky.");
   assert.equal(output.handoff, "Use worker next");
@@ -58,6 +68,25 @@ test("parseAgentOutput ignores non-bullet memory blocks and None", () => {
   assert.equal(codeOutput.memoryCandidates.length, 0);
   assert.match(codeOutput.warnings.join("\n"), /no valid bullet candidates/);
   assert.equal(noneOutput.memoryCandidates.length, 0);
+});
+
+test("reviewerHandoffNeedsRepair detects blocking implementation review gaps", () => {
+  const failing = parseAgentOutput("reviewer", "## Handoff\nVerdict: FAIL — implementation does not meet the adjacent-token requirement; add missing regression tests.");
+  const passing = parseAgentOutput("reviewer", "## Handoff\nPASS — checked changed files, tests, and verification. No gaps remain.");
+  const passingWithLowRiskGap = parseAgentOutput("reviewer", "## Handoff\n- Implementation matches the request.\n- Single low-risk gap: empty literal is not explicitly tested, not required by the user goal.\n- Verdict: PASS — make test exits 0.");
+  const passingWithBlockingGap = parseAgentOutput("reviewer", "## Handoff\nVerdict: PASS — but a blocking gap remains: required parser behavior is missing.");
+  const bugsWithoutVerdict = parseAgentOutput("reviewer", "## Handoff\n- 3 bugs found in the implementation.\n- Existing tests miss EOF comment and adjacent-token behavior.\n- make test passes but does not exercise these edge cases.");
+  const noBugsFound = parseAgentOutput("reviewer", "## Handoff\nVerdict: PASS — checked changed files and verification. No bugs found, no blocking gaps remain.");
+  const passWithPermanentCoverageGap = parseAgentOutput("reviewer", "## Handoff\n- Verdict: PASS — implementation works in ad-hoc checks.\n- Low-severity gap: permanent test suite could be expanded with escaped quotes and adjacency cases.");
+
+  assert.equal(reviewerHandoffNeedsRepair({ agent: "reviewer", status: "complete", output: failing }), true);
+  assert.equal(reviewerHandoffNeedsRepair({ agent: "reviewer", status: "complete", output: passing }), false);
+  assert.equal(reviewerHandoffNeedsRepair({ agent: "reviewer", status: "complete", output: passingWithLowRiskGap }), false);
+  assert.equal(reviewerHandoffNeedsRepair({ agent: "reviewer", status: "complete", output: passingWithBlockingGap }), true);
+  assert.equal(reviewerHandoffNeedsRepair({ agent: "reviewer", status: "complete", output: bugsWithoutVerdict }), true);
+  assert.equal(reviewerHandoffNeedsRepair({ agent: "reviewer", status: "complete", output: noBugsFound }), false);
+  assert.equal(reviewerHandoffNeedsRepair({ agent: "reviewer", status: "complete", output: passWithPermanentCoverageGap }), true);
+  assert.equal(reviewerHandoffNeedsRepair({ agent: "worker", status: "complete", output: failing }), false);
 });
 
 test("buildConflictResolverTask creates a bounded surgical conflict task", () => {
@@ -89,6 +118,192 @@ test("MockWorkerRunner runs chain plans in order", async () => {
   assert.equal(run.status, "complete");
   assert.deepEqual(run.steps.map((step) => step.status), ["complete", "complete"]);
   assert.match(run.steps[1]?.output?.raw ?? "", /Previous handoff/);
+});
+
+test("MockWorkerRunner resumes reviewer FAIL/GAP with bounded repair cycles", async () => {
+  const cwd = tempDir("pi-chalin-review-repair-chain-");
+  const run = createRunState({
+    kind: "multi-agent-chain",
+    agents: ["worker", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    reason: "implementation route",
+    plan: { kind: "chain", steps: [{ agent: "worker", task: "implement" }, { agent: "reviewer", task: "review" }] },
+  }, cwd, "Implement parser behavior and tests.");
+  run.status = "paused";
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.output = parseAgentOutput("worker", "## Handoff\nChanged: src/parser.c. Verification: `make test` exits 0.");
+  run.steps[1]!.status = "complete";
+  run.steps[1]!.output = parseAgentOutput("reviewer", "## Handoff\nVerdict: FAIL — tests miss EOF comments and adjacent-token behavior.");
+
+  const resumed = await new MockWorkerRunner().resume(run, { cwd, agents: new Map() });
+
+  assert.equal(resumed.status, "complete");
+  assert.deepEqual(resumed.steps.map((step) => step.agent), ["worker", "reviewer", "worker", "reviewer"]);
+  assert.equal(resumed.steps[2]?.id, "review-repair-1-worker");
+  assert.equal(resumed.steps[3]?.id, "review-repair-1-reviewer");
+  assert.match(resumed.steps[2]?.task ?? "", /Read only the changed implementation\/test files/i);
+  assert.match(resumed.steps[3]?.task ?? "", /Previous reviewer findings/i);
+  assert.match(resumed.warnings.join("\n"), /queued repair cycle 1\/2/i);
+});
+
+test("MockWorkerRunner repairs implementation routes that changed code without permanent tests", async () => {
+  const cwd = tempDir("pi-chalin-review-permanent-tests-");
+  const run = createRunState({
+    kind: "multi-agent-chain",
+    agents: ["worker", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    reason: "implementation route",
+    plan: { kind: "chain", steps: [{ agent: "worker", task: "implement" }, { agent: "reviewer", task: "review" }] },
+  }, cwd, "Implement parser behavior and keep make test passing.");
+  run.status = "paused";
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.output = parseAgentOutput("worker", "## Handoff\nChanged: src/parser.c. Verification: `make test` exits 0.");
+  run.steps[0]!.metrics = stepMetrics({ filesRead: ["src/parser.c", "tests/test_parser.c"], filesTouched: ["src/parser.c"] });
+  run.steps[1]!.status = "complete";
+  run.steps[1]!.output = parseAgentOutput("reviewer", "## Handoff\nVerdict: PASS — code and ad-hoc checks look good. `make test` exits 0.");
+  run.steps[1]!.metrics = stepMetrics({ filesRead: ["src/parser.c", "tests/test_parser.c"] });
+
+  const resumed = await new MockWorkerRunner().resume(run, { cwd, agents: new Map() });
+
+  assert.equal(resumed.status, "complete");
+  assert.deepEqual(resumed.steps.map((step) => step.agent), ["worker", "reviewer", "worker", "reviewer"]);
+  assert.equal(resumed.steps[2]?.id, "review-repair-1-worker");
+  assert.match(resumed.steps[2]?.task ?? "", /permanent runner-discoverable tests/i);
+  assert.match(resumed.steps[2]?.task ?? "", /narrower step wording that prohibited tests/i);
+  assert.match(resumed.warnings.join("\n"), /without permanent test coverage; queued repair cycle 1\/2/i);
+});
+
+test("MockWorkerRunner allows no-test implementation only when tests changed or user forbids them", async () => {
+  const withTestEditCwd = tempDir("pi-chalin-review-tests-edited-");
+  const withTestEdit = createRunState({
+    kind: "multi-agent-chain",
+    agents: ["worker", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    reason: "implementation route",
+    plan: { kind: "chain", steps: [{ agent: "worker", task: "implement" }, { agent: "reviewer", task: "review" }] },
+  }, withTestEditCwd, "Implement parser behavior.");
+  withTestEdit.status = "paused";
+  withTestEdit.steps[0]!.status = "complete";
+  withTestEdit.steps[0]!.output = parseAgentOutput("worker", "## Handoff\nChanged: src/parser.c, tests/test_parser.c. Verification: `make test` exits 0.");
+  withTestEdit.steps[0]!.metrics = stepMetrics({ filesRead: ["src/parser.c", "tests/test_parser.c"], filesTouched: ["src/parser.c", "tests/test_parser.c"] });
+  withTestEdit.steps[1]!.status = "complete";
+  withTestEdit.steps[1]!.output = parseAgentOutput("reviewer", "## Handoff\nVerdict: PASS — implementation and permanent tests match the request.");
+  withTestEdit.steps[1]!.metrics = stepMetrics({ filesRead: ["src/parser.c", "tests/test_parser.c"] });
+
+  const resumedWithTestEdit = await new MockWorkerRunner().resume(withTestEdit, { cwd: withTestEditCwd, agents: new Map() });
+  assert.deepEqual(resumedWithTestEdit.steps.map((step) => step.agent), ["worker", "reviewer"]);
+
+  const forbiddenCwd = tempDir("pi-chalin-review-tests-forbidden-");
+  const forbidden = createRunState({
+    kind: "multi-agent-chain",
+    agents: ["worker", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    reason: "implementation route",
+    plan: { kind: "chain", steps: [{ agent: "worker", task: "implement" }, { agent: "reviewer", task: "review" }] },
+  }, forbiddenCwd, "Do not edit tests; implement the parser fix only.");
+  forbidden.status = "paused";
+  forbidden.steps[0]!.status = "complete";
+  forbidden.steps[0]!.output = parseAgentOutput("worker", "## Handoff\nChanged: src/parser.c. Verification: `make test` exits 0.");
+  forbidden.steps[0]!.metrics = stepMetrics({ filesRead: ["src/parser.c", "tests/test_parser.c"], filesTouched: ["src/parser.c"] });
+  forbidden.steps[1]!.status = "complete";
+  forbidden.steps[1]!.output = parseAgentOutput("reviewer", "## Handoff\nVerdict: PASS — implementation matches the no-test-edit constraint.");
+  forbidden.steps[1]!.metrics = stepMetrics({ filesRead: ["src/parser.c", "tests/test_parser.c"] });
+
+  const resumedForbidden = await new MockWorkerRunner().resume(forbidden, { cwd: forbiddenCwd, agents: new Map() });
+  assert.deepEqual(resumedForbidden.steps.map((step) => step.agent), ["worker", "reviewer"]);
+});
+
+test("MockWorkerRunner fails instead of finalizing after repeated reviewer repair gaps", async () => {
+  const cwd = tempDir("pi-chalin-review-repair-max-");
+  const run = createRunState({
+    kind: "multi-agent-chain",
+    agents: ["worker", "reviewer", "worker", "reviewer", "worker", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    reason: "implementation route",
+    plan: {
+      kind: "chain",
+      steps: [
+        { agent: "worker", task: "implement" },
+        { agent: "reviewer", task: "review" },
+        { agent: "worker", task: "repair once" },
+        { agent: "reviewer", task: "review repair once" },
+        { agent: "worker", task: "repair twice" },
+        { agent: "reviewer", task: "review repair twice" },
+      ],
+    },
+  }, cwd, "Implement parser behavior and tests.");
+  const ids = ["step-1", "step-2", "review-repair-1-worker", "review-repair-1-reviewer", "review-repair-2-worker", "review-repair-2-reviewer"];
+  run.status = "paused";
+  run.steps.forEach((step, index) => {
+    step.id = ids[index]!;
+    step.status = "complete";
+    step.output = parseAgentOutput(step.agent, step.agent === "reviewer"
+      ? "## Handoff\nVerdict: FAIL — blocking gap remains: required parser behavior is missing."
+      : "## Handoff\nChanged: src/parser.c. Verification: `make test` exits 0.");
+  });
+
+  const resumed = await new MockWorkerRunner().resume(run, { cwd, agents: new Map() });
+
+  assert.equal(resumed.status, "failed");
+  assert.equal(resumed.steps.at(-1)?.status, "failed");
+  assert.match(resumed.steps.at(-1)?.error ?? "", /after 2 repair cycle/i);
+  assert.match(resumed.warnings.join("\n"), /Stopping instead of finalizing incomplete routed implementation/i);
+});
+
+test("MockWorkerRunner queues reviewer repair stages for DAG implementation routes", async () => {
+  const cwd = tempDir("pi-chalin-review-repair-dag-");
+  const run = createRunState({
+    kind: "multi-agent-dag",
+    agents: ["worker", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    reason: "dag implementation route",
+    plan: {
+      kind: "dag",
+      stages: [
+        { id: "implement", tasks: [{ agent: "worker", task: "implement" }] },
+        { id: "review", tasks: [{ agent: "reviewer", task: "review" }] },
+      ],
+    },
+  }, cwd, "Implement parser behavior and tests.");
+  run.status = "paused";
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.output = parseAgentOutput("worker", "## Handoff\nChanged: src/parser.c. Verification: `make test` exits 0.");
+  run.steps[1]!.status = "complete";
+  run.steps[1]!.output = parseAgentOutput("reviewer", "## Handoff\nVerdict: FAIL — coverage is insufficient for EOF comments.");
+
+  const resumed = await new MockWorkerRunner().resume(run, { cwd, agents: new Map() });
+
+  assert.equal(resumed.status, "complete");
+  assert.deepEqual(resumed.route.plan?.kind === "dag" ? resumed.route.plan.stages.map((stage) => stage.id) : [], [
+    "implement",
+    "review",
+    "review-repair-1-worker",
+    "review-repair-1-reviewer",
+  ]);
+  assert.deepEqual(resumed.steps.map((step) => step.id), [
+    "implement:step-1",
+    "review:step-1",
+    "review-repair-1-worker:step-1",
+    "review-repair-1-reviewer:step-1",
+  ]);
 });
 
 test("MockWorkerRunner stops promptly when Pi abort signal is raised", async () => {
@@ -600,6 +815,7 @@ test("buildSdkPrompt injects compact memory context without bloating discovery",
     { memoryContext: "Memory context (1 records, <=120 token budget). Treat as guidance; current repo evidence wins.\n- [memory-1 · testing · 95%] Project tests use Bun and avoid setTimeout sleeps." },
   );
 
+  assert.match(prompt, /edit existing files; write new paths only/i);
   assert.match(prompt, /autonomous memory policy/i);
   assert.match(prompt, /Compact Memory Context/);
   assert.match(prompt, /Changed:/);
@@ -611,24 +827,21 @@ test("buildSdkPrompt injects compact memory context without bloating discovery",
   assert.match(prompt, /one boundary\/counterexample/i);
   assert.match(prompt, /preservation\/no-op\/composition paths/i);
   assert.match(prompt, /Preserve public compatibility/i);
-  assert.match(prompt, /capture normalized config/i);
-  assert.match(prompt, /caller-side object mutation/i);
   assert.match(prompt, /internal test seams or runner-native fake time/i);
   assert.match(prompt, /without expanding public APIs/i);
   assert.match(prompt, /Bun `setSystemTime`/i);
   assert.match(prompt, /scoped Date\.now restore/i);
   assert.match(prompt, /ad hoc sleeps/i);
   assert.match(prompt, /Code behavior changes update nearest tests/i);
+  assert.match(prompt, /Coverage breadth/i);
+  assert.match(prompt, /separate compact tests per rule/i);
   assert.match(prompt, /evidence-only tests/i);
   assert.match(prompt, /runner-discoverable cases/i);
   assert.match(prompt, /zero-test assertion scripts/i);
-  assert.match(prompt, /runner's discoverable API/i);
-  assert.match(prompt, /real command path/i);
-  assert.match(prompt, /args\/no-input/i);
-  assert.match(prompt, /Parser\/scanner\/state-machine\/normalization changes follow repo grammar evidence/i);
-  assert.match(prompt, /EOF\/error behavior/i);
-  assert.match(prompt, /docs\/plans tie validation to evidence/i);
-  assert.match(prompt, /responsibility\/ownership maps/i);
+  assert.doesNotMatch(prompt, /Scaffold\/package work/i);
+  assert.doesNotMatch(prompt, /Parser\/scanner\/state-machine changes/i);
+  assert.doesNotMatch(prompt, /Sorting\/normalization contracts/i);
+  assert.doesNotMatch(prompt, /Normalization\/key APIs need 8-12/i);
   assert.match(prompt, /resource escape hatches/i);
   assert.match(prompt, /arbitrary fixed caps/i);
   assert.match(prompt, /small evidence/i);
@@ -640,6 +853,35 @@ test("buildSdkPrompt injects compact memory context without bloating discovery",
   assert.match(prompt, /exact named command/i);
   assert.match(prompt, /Project tests use Bun/);
   assert.ok(prompt.length < 7000, `prompt should stay compact, got ${prompt.length}`);
+});
+
+test("buildSdkPrompt loads domain contracts only when the implementation surface needs them", () => {
+  const agent: AgentDefinition = {
+    name: "worker",
+    scope: "built-in",
+    concern: "implementation",
+    capabilities: ["inspect-files", "search-files", "edit-files", "run-safe-bash", "validate"],
+    description: "Implements scoped changes.",
+    model: "inherit",
+    tools: [],
+    memory: { read: false, write: "never", categories: [] },
+    systemPrompt: "",
+    diagnostics: [],
+  };
+
+  const scaffoldPrompt = buildSdkPrompt(agent, "Scaffold a TypeScript CLI package with bin, README, build, and tests.", tempDir("pi-chalin-scaffold-contract-"));
+  assert.match(scaffoldPrompt, /Scaffold\/package work/i);
+  assert.match(scaffoldPrompt, /runner's discoverable API/i);
+  assert.match(scaffoldPrompt, /real command path/i);
+  assert.match(scaffoldPrompt, /args\/no-input/i);
+  assert.doesNotMatch(scaffoldPrompt, /Parser\/scanner\/state-machine changes/i);
+
+  const parserPrompt = buildSdkPrompt(agent, "Fix SQL tokenizer string literal comments, delimiter adjacency, and EOF behavior.", tempDir("pi-chalin-parser-contract-"));
+  assert.match(parserPrompt, /Parser\/scanner\/state-machine changes follow repo grammar evidence/i);
+  assert.match(parserPrompt, /EOF\/error behavior/i);
+  assert.match(parserPrompt, /adjacency before and after non-whitespace must be tested as separation/i);
+  assert.match(parserPrompt, /Permanent repo tests must cover changed transitions/i);
+  assert.doesNotMatch(parserPrompt, /Scaffold\/package work/i);
 });
 
 test("buildSdkPrompt preserves the original user goal across routed step prompts", () => {
@@ -735,6 +977,109 @@ test("buildSdkPrompt puts reviewer into sampled audit mode after handoff", () =>
   assert.match(prompt, /at most 5 gap reads/i);
   assert.match(prompt, /Already Covered Evidence Paths/);
   assert.match(prompt, /middleware\/auth\.js/);
+});
+
+test("buildSdkPrompt gives implementation workers a preserved-value sorting contract", () => {
+  const agent: AgentDefinition = {
+    name: "worker",
+    scope: "built-in",
+    concern: "implementation",
+    capabilities: ["inspect-files", "edit-files", "run-safe-bash", "validate"],
+    description: "Implements bounded changes.",
+    model: "inherit",
+    tools: [],
+    memory: { read: false, write: "never", categories: [] },
+    systemPrompt: "",
+    diagnostics: [],
+  };
+
+  const prompt = buildSdkPrompt(
+    agent,
+    "Implement a deterministic key builder that sorts markers while preserving case and duplicates.",
+    tempDir("pi-chalin-impl-sort-contract-"),
+    undefined,
+    80,
+    "normal",
+    { rootTask: "Sort markers, preserve case and duplicates, and cover it with tests." },
+  );
+
+  assert.match(prompt, /Sorting\/normalization contracts/i);
+  assert.match(prompt, /language's normal lexicographic\/ordinal comparison/i);
+  assert.match(prompt, /Do not lowercase\/casefold a preserved value/i);
+  assert.match(prompt, /mixed-case ordering/i);
+  assert.match(prompt, /Public API contract comments/i);
+});
+
+test("buildSdkPrompt makes implementation scouting and worker handoffs audit test sufficiency", () => {
+  const scout: AgentDefinition = {
+    name: "scout",
+    scope: "built-in",
+    concern: "recon",
+    capabilities: ["inspect-files", "search-files", "run-safe-bash"],
+    description: "Maps implementation evidence.",
+    model: "inherit",
+    tools: [],
+    memory: { read: false, write: "never", categories: [] },
+    systemPrompt: "",
+    diagnostics: [],
+  };
+  const worker: AgentDefinition = {
+    name: "worker",
+    scope: "built-in",
+    concern: "implementation",
+    capabilities: ["inspect-files", "search-files", "edit-files", "run-safe-bash", "validate"],
+    description: "Implements scoped changes.",
+    model: "inherit",
+    tools: [],
+    memory: { read: false, write: "never", categories: [] },
+    systemPrompt: "",
+    diagnostics: [],
+  };
+
+  const rootTask = "Fix parser handling and add tests for comments, quoted strings, adjacency, and EOF behavior.";
+  const scoutPrompt = buildSdkPrompt(scout, "Map source and tests before implementation.", tempDir("pi-chalin-scout-test-map-"), undefined, 40, "normal", { rootTask });
+  assert.match(scoutPrompt, /Implementation scouting/i);
+  assert.match(scoutPrompt, /map source\+test evidence per requested behavior/i);
+  assert.match(scoutPrompt, /Do not call tests sufficient\/as-is/i);
+
+  const workerPrompt = buildSdkPrompt(worker, "Implement from scout handoff.", tempDir("pi-chalin-worker-test-map-"), "Scout says tests are correct as-is.", 40, "normal", { rootTask });
+  assert.match(workerPrompt, /Upstream handoffs are context, not authority/i);
+  assert.match(workerPrompt, /compare Original User Goal criteria/i);
+});
+
+test("buildSdkPrompt makes implementation reviewers audit plan gaps instead of rubber-stamping tests", () => {
+  const agent: AgentDefinition = {
+    name: "reviewer",
+    scope: "built-in",
+    concern: "review",
+    capabilities: ["inspect-files", "search-files", "validate"],
+    description: "Reviews implementation output.",
+    model: "inherit",
+    tools: [],
+    memory: { read: false, write: "never", categories: [] },
+    systemPrompt: "",
+    diagnostics: [],
+  };
+
+  const prompt = buildSdkPrompt(
+    agent,
+    "Verify the worker implementation and tests.",
+    tempDir("pi-chalin-review-impl-contract-"),
+    "Worker changed src/key.rs and says tests pass. Planner contract said sort original values lexicographically.",
+    80,
+    "normal",
+    { rootTask: "Implement a key builder that preserves marker case and duplicates." },
+  );
+
+  assert.match(prompt, /Implementation review gate/i);
+  assert.match(prompt, /worker deviation from a locked plan is a finding/i);
+  assert.match(prompt, /Passing visible tests prove only observed behavior/i);
+  assert.match(prompt, /If you find bugs, insufficient requested-criteria coverage/i);
+  assert.match(prompt, /Do not downgrade missing permanent tests/i);
+  assert.match(prompt, /Review economy/i);
+  assert.match(prompt, /re-read only changed\/high-risk files/i);
+  assert.match(prompt, /lowercased helper keys, casefolding/i);
+  assert.match(prompt, /Reviewer handoff says PASS only after checking changed file contents/i);
 });
 
 test("buildSdkPrompt adds a coverage and evidence contract for deep project analysis", () => {
@@ -848,6 +1193,8 @@ test("childToolNames exposes nested delegation only to coordinating subagents be
   assert.equal(childToolNames(worker, "Implement broad change.", true, false, { delegationDepth: 2, maxDelegationDepth: 2 }).includes("chalin_delegate"), false);
   assert.equal(childToolNames(worker, "Synthesize previous handoff.", true, true, { delegationDepth: 1, maxDelegationDepth: 2 }).includes("chalin_delegate"), false);
   assert.equal(childToolNames(noCoordinate, "Implement broad change.", true, false, { delegationDepth: 1, maxDelegationDepth: 2 }).includes("chalin_delegate"), false);
+  assert.equal(childToolNames(worker, "Implement focused change.", true, false, { budgetProfile: "normal" }).includes("chalin_artifact_write"), false);
+  assert.equal(childToolNames(worker, "Implement long checkpointed change.", true, false, { budgetProfile: "extended" }).includes("chalin_artifact_write"), true);
 });
 
 test("childToolNames respects route-level memory gating", () => {

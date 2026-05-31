@@ -16,7 +16,7 @@ import { clearLegacyChalinControlWidget, setChalinStatus } from "./ui-status.ts"
 import { chalinRouteUpdateDetails, colorizeChalinWidget, footerStateForRun, formatChalinRoutePlanWidget, formatChalinRunWidget, formatChalinRunWidgetFromDetails, isUsableStepStatus, plannedWidgetRun, routeIntent, type ChalinRouteWidgetDetails } from "./route-widget.ts";
 import { fetchWebUrls, formatWebBundle, searchWeb } from "./webfetch.ts";
 import type { MemoryRecord, RouteDecision, RunState } from "./schemas.ts";
-import { collapseReadOnlyScoutContextRoute, ensureMutationRouteHasWorker } from "./route-guards.ts";
+import { collapseReadOnlyScoutContextRoute, ensureMutationRouteHasWorkerAndReviewer, inferRouteRequiresWorkspaceMutation } from "./route-guards.ts";
 import { compactRouteDetails, finalAnswerMaterial, formatRoute, outcomeForResult } from "./route-format.ts";
 import { buildProjectDiscoveryIndex, formatProjectDiscoveryIndex } from "./discovery.ts";
 import { buildProjectSnapshot, formatProjectSnapshot } from "./snapshot.ts";
@@ -65,7 +65,7 @@ const ChalinRouteParams = Type.Object({
   task: Type.String({ description: "Original user goal rewritten as an executable workflow objective." }),
   topology: Type.Union([
     Type.Literal("single", { description: "One agent executes a bounded delegated task." }),
-    Type.Literal("chain", { description: "Agents run sequentially, usually scout/planner/worker/reviewer." }),
+    Type.Literal("chain", { description: "Agents run sequentially in the order chosen by the orchestrator." }),
     Type.Literal("parallel", { description: "Independent agents analyze alternatives in parallel." }),
     Type.Literal("dag", { description: "Staged workflow with explicit stage dependencies." }),
     Type.Literal("memory-only", { description: "Only retrieve pi-chalin memory; no steps/stages." }),
@@ -75,7 +75,7 @@ const ChalinRouteParams = Type.Object({
   risk: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"), Type.Literal("critical")])),
   needsMemory: Type.Optional(Type.Boolean()),
   needsArtifacts: Type.Optional(Type.Boolean()),
-  requiresWorkspaceMutation: Type.Optional(Type.Boolean()),
+  requiresWorkspaceMutation: Type.Optional(Type.Boolean({ description: "Set true when any routed step is expected to edit, write, create, delete, or otherwise mutate workspace files. Implementation/file-mutation routes require an executor plus final reviewer." })),
   reason: Type.Optional(Type.String({ description: "Why delegation improves correctness, confidence, isolation, or review for this specific task." })),
   dryRun: Type.Optional(Type.Boolean()),
 });
@@ -275,8 +275,9 @@ export function registerChalinTools(pi: ExtensionAPI): void {
       "Keep single docs-only/no-code artifacts with an explicit docs path direct when evidence is cheap; route them only when substantial synthesis or independent review across surfaces is worth the latency.",
       "Keep bounded read-only mini-project reviews direct when the user forbids modification; answer with path evidence.",
       "Valid topology values are exactly: single, chain, parallel, dag, memory-only. Use single/chain/parallel with steps; use dag with stages; use memory-only without steps.",
-      "For explicit docs-only artifact routes, prefer a low-cost chain: scout with `budget: \"tight\"` evidence mapping, then worker with `budget: \"tight\"` to edit only the requested docs file and read it back. Add planner/reviewer only for real ambiguity, coupling, or safety risk.",
-      "Choose the smallest topology and concrete success criteria; set requiresWorkspaceMutation for any routed file edit, including docs artifacts, and include a worker step when files must change.",
+      "For routed implementation, choose the topology from the task evidence and available agents; do not force a prewritten chain when a smaller or different workflow is enough.",
+      "Set requiresWorkspaceMutation for any routed file edit, including docs artifacts. Any routed implementation or file mutation must include an editing/executing worker and a later reviewer who checks the original request, plan/claims, repository standards, gaps, and test/readback evidence.",
+      "Add scout/planner/researcher/context-builder only when they materially improve evidence, ownership, alternatives, risk control, or parallelization; otherwise keep the route compact.",
       "Use risk low for explicit docs-only artifact edits; reserve medium/high/critical for product-code mutation, secrets, destructive actions, or security-sensitive execution.",
       "After the result, answer from Final answer material; call more tools only for an explicit critical gap.",
     ],
@@ -294,10 +295,11 @@ export function registerChalinTools(pi: ExtensionAPI): void {
         thinkingOverrides: mergedSessionThinkingOverrides(loaded.config.agents.thinkingOverrides),
       });
       let route = routeFromPlan(params);
+      const requiresWorkspaceMutation = Boolean(params.requiresWorkspaceMutation) || inferRouteRequiresWorkspaceMutation(route, params.task);
       if (loaded.config.safety.mutationExpectationGuard) {
-        route = ensureMutationRouteHasWorker(route, Boolean(params.requiresWorkspaceMutation), params.task);
+        route = ensureMutationRouteHasWorkerAndReviewer(route, requiresWorkspaceMutation, params.task);
       }
-      route = collapseReadOnlyScoutContextRoute(route, Boolean(params.requiresWorkspaceMutation));
+      route = collapseReadOnlyScoutContextRoute(route, requiresWorkspaceMutation);
       const agents = catalog.list();
       const unknownAgents = route.agents.filter((agent) => !catalog.resolve(agent).agent);
 

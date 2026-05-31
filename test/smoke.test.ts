@@ -274,13 +274,12 @@ test("compact global orchestration requires routing for broad analysis and keeps
   assert.match(promptResult?.message?.content ?? "", /chalin_memory_search/i);
   assert.match(promptResult?.message?.content ?? "", /mode=list/i);
   assert.match(promptResult?.message?.content ?? "", /auth\/security\/token\/session behavior with tests/i);
-  assert.match(promptResult?.message?.content ?? "", /choose topology deliberately/i);
-  assert.match(promptResult?.message?.content ?? "", /single scout for branch\/project\/service structure, entrypoints, and testing map/i);
-  assert.match(promptResult?.message?.content ?? "", /chain scout -> planner -> reviewer/i);
-  assert.match(promptResult?.message?.content ?? "", /parallel planners\/reviewers/i);
-  assert.match(promptResult?.message?.content ?? "", /DAG scout\/planner -> parallel non-overlapping workers -> reviewer/i);
+  assert.match(promptResult?.message?.content ?? "", /choose topology deliberately from the prompt, agent roster, and evidence/i);
+  assert.match(promptResult?.message?.content ?? "", /smallest workflow that can prove the result/i);
+  assert.match(promptResult?.message?.content ?? "", /add discovery, planning, parallelism, or synthesis only when/i);
   assert.match(promptResult?.message?.content ?? "", /Do not route plain memory recall\/inventory/i);
-  assert.match(promptResult?.message?.content ?? "", /Planner is required for risky implementation and surgical long-file chains/i);
+  assert.match(promptResult?.message?.content ?? "", /Routed implementation\/file mutation must include worker execution plus a later reviewer/i);
+  assert.match(promptResult?.message?.content ?? "", /reviewer FAIL\/GAP requires focused repair/i);
   assert.match(promptResult?.message?.content ?? "", /Bounded greenfield\/scaffold efficiency/i);
   assert.match(promptResult?.message?.content ?? "", /repeated bash without an intervening edit is invalid/i);
   assert.match(promptResult?.message?.content ?? "", /explicitly asks for direct\/native\/no-subagent work/i);
@@ -980,28 +979,15 @@ test("pi-chalin uses compact orchestration context for bounded scaffold prompts"
     systemPromptOptions: {},
   }, ctx);
   assert.equal(uvPrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(uvPrompt?.message?.content ?? "", /minimal bounded path/i);
-  assert.match(uvPrompt?.message?.content ?? "", /Prompt path: `crates\/index-url\/src\/lib\.rs`/i);
-  assert.match(uvPrompt?.message?.content ?? "", /named runner/i);
-  assert.match(uvPrompt?.message?.content ?? "", /First tool `read` the prompt path/i);
-  assert.match(uvPrompt?.message?.content ?? "", /No ls\/grep\/find\/manifest/i);
-  assert.match(uvPrompt?.message?.content ?? "", /Large\/partial edit/i);
-  assert.match(uvPrompt?.message?.content ?? "", /tiny stubs replace once/i);
-  assert.match(uvPrompt?.message?.content ?? "", /No baseline loop/i);
-  assert.match(uvPrompt?.message?.content ?? "", /assert changed behavior/i);
-  assert.match(uvPrompt?.message?.content ?? "", /one boundary\/counterexample/i);
-  assert.match(uvPrompt?.message?.content ?? "", /public fns get `\/\/\/`/i);
-  assert.match(uvPrompt?.message?.content ?? "", /no leaks\/unsafe/i);
-  assert.match(uvPrompt?.message?.content ?? "", /URL\/path normalizers/i);
-  assert.match(uvPrompt?.message?.content ?? "", /query\/fragment/i);
-  assert.match(uvPrompt?.message?.content ?? "", /exact target path/i);
-  assert.match(uvPrompt?.message?.content ?? "", /adjacent non-target path containing the same suffix/i);
-  assert.match(uvPrompt?.message?.content ?? "", /no-path \?\/# tails/i);
-  assert.match(uvPrompt?.message?.content ?? "", /small helpers for authority and path\/query\/fragment split/i);
-  assert.match(uvPrompt?.message?.content ?? "", /do not use suffix-family matching/i);
-  assert.match(uvPrompt?.message?.content ?? "", /Read back changed files only for concrete missing evidence/i);
+  assert.match(uvPrompt?.message?.content ?? "", /route-required path preflight/i);
+  assert.match(uvPrompt?.message?.content ?? "", /Prompt paths: `crates\/index-url\/src\/lib\.rs`/i);
+  assert.match(uvPrompt?.message?.content ?? "", /First tool must be `chalin_route`/i);
+  assert.match(uvPrompt?.message?.content ?? "", /Implementation topology/i);
+  assert.match(uvPrompt?.message?.content ?? "", /choose the smallest agent set/i);
+  assert.match(uvPrompt?.message?.content ?? "", /Worker execution and a later reviewer are mandatory/i);
+  assert.match(uvPrompt?.message?.content ?? "", /requested runner or nearest focused verification/i);
   assert.ok((uvPrompt?.message?.content?.length ?? Infinity) < 2200);
-  assert.doesNotMatch(uvPrompt?.message?.content ?? "", /normalization\/canonicalization|path\/query\/fragment\/port\/identity|non-target input/i);
+  assert.deepEqual(fake.activeTools, ["chalin_route"]);
 
   const cachePrompt = await beforeAgentStart({
     type: "before_agent_start",
@@ -1010,40 +996,13 @@ test("pi-chalin uses compact orchestration context for bounded scaffold prompts"
     systemPromptOptions: {},
   }, ctx);
   assert.equal(cachePrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(cachePrompt?.message?.content ?? "", /preserve public behavior/i);
-  assert.match(cachePrompt?.message?.content ?? "", /boundary\/counterexample/i);
-  assert.match(cachePrompt?.message?.content ?? "", /minimal bounded path/i);
-  assert.match(cachePrompt?.message?.content ?? "", /Prompt path: `crates\/cache-key\/src\/lib\.rs`/i);
-  assert.match(cachePrompt?.message?.content ?? "", /read direct test path/i);
-  assert.match(cachePrompt?.message?.content ?? "", /no duplicate test file/i);
-  assert.match(cachePrompt?.message?.content ?? "", /Inline tests\/test module/);
-  assert.match(cachePrompt?.message?.content ?? "", /full serialized key format/i);
-  assert.match(cachePrompt?.message?.content ?? "", /conventional comma-separated list segments/i);
-  assert.match(cachePrompt?.message?.content ?? "", /default lexicographic order/i);
-  assert.match(cachePrompt?.message?.content ?? "", /never lowercase\/casefold the sort key just for determinism/i);
-  assert.match(cachePrompt?.message?.content ?? "", /case preservation/i);
-  assert.match(cachePrompt?.message?.content ?? "", /reorder determinism/i);
-  assert.match(cachePrompt?.message?.content ?? "", /separate named cases/i);
-  assert.match(cachePrompt?.message?.content ?? "", /empty collection\/segment shape/i);
-  assert.match(cachePrompt?.message?.content ?? "", /multiple empty\/whitespace filtering/i);
-  assert.match(cachePrompt?.message?.content ?? "", /version trim plus case\/content retention/i);
-  assert.match(cachePrompt?.message?.content ?? "", /case preservation, duplicate retention/i);
-  assert.match(cachePrompt?.message?.content ?? "", /Do not hide case\+duplicates or trim\+filter\+sort/i);
-  assert.doesNotMatch(cachePrompt?.message?.content ?? "", /Cache\/TTL/i);
-  assert.doesNotMatch(cachePrompt?.message?.content ?? "", /Stable sorts:/i);
-  assert.match(cachePrompt?.message?.content ?? "", /duplicate retention/i);
-  assert.match(cachePrompt?.message?.content ?? "", /version trim plus case\/content retention/i);
-  assert.match(cachePrompt?.message?.content ?? "", /Rust:/i);
-  assert.match(cachePrompt?.message?.content ?? "", /public fns get `\/\/\/`/i);
-  assert.match(cachePrompt?.message?.content ?? "", /borrowed &str/i);
-  assert.match(cachePrompt?.message?.content ?? "", /full `cargo test` or `cargo test --workspace`/i);
-  assert.match(cachePrompt?.message?.content ?? "", /package-filtered command/i);
-  assert.match(cachePrompt?.message?.content ?? "", /do not lowercase preserved values just to sort/i);
-  assert.doesNotMatch(cachePrompt?.message?.content ?? "", /sort_unstable/i);
-  assert.match(cachePrompt?.message?.content ?? "", /warnings are defects/i);
-  assert.match(cachePrompt?.message?.content ?? "", /Fail\/warn/i);
+  assert.match(cachePrompt?.message?.content ?? "", /route-required path preflight/i);
+  assert.match(cachePrompt?.message?.content ?? "", /Prompt paths: `crates\/cache-key\/src\/lib\.rs`/i);
+  assert.match(cachePrompt?.message?.content ?? "", /First tool must be `chalin_route`/i);
+  assert.match(cachePrompt?.message?.content ?? "", /choose the smallest agent set/i);
+  assert.match(cachePrompt?.message?.content ?? "", /Worker execution and a later reviewer are mandatory/i);
   assert.ok((cachePrompt?.message?.content?.length ?? Infinity) < 2600);
-  assert.doesNotMatch(cachePrompt?.message?.content ?? "", /deterministic key builder|semantic content\/case/i);
+  assert.deepEqual(fake.activeTools, ["chalin_route"]);
 
   const ttlPrompt = await beforeAgentStart({
     type: "before_agent_start",
@@ -1196,7 +1155,7 @@ test("pi-chalin leaves surgical no-path routing to the model instead of a regex 
   assert.match(promptResult?.systemPrompt ?? "", /You are the primary Pi agent/i);
 });
 
-test("pi-chalin keeps bounded path prompts compact without hiding route autonomy", async () => {
+test("pi-chalin forces route-only tools for complex routed prompts while preserving bounded direct work", async () => {
   const prompt = "En esta base multi-lenguaje inspirada en Bun, haz un analisis profundo cross-language del fallo de `sync` con paquetes duplicados entre Zig y Rust. No cambies codigo: actualiza docs/lockfile-triage.md.";
   assert.equal(shouldUseCompactDirectOrchestrationPrompt(prompt), true);
   assert.equal(shouldUseCompactDirectOrchestrationPrompt("En este workspace Rust, implementa build_cache_key en crates/cache-key/src/lib.rs y deja cargo test pasando."), true);
@@ -1208,7 +1167,7 @@ test("pi-chalin keeps bounded path prompts compact without hiding route autonomy
   const agentEnd = fake.handlers.get("agent_end")?.[0] as (event: unknown, ctx: unknown) => void;
   const ctx = { cwd: tempDir("pi-chalin-cross-language-"), hasUI: false, model: undefined, modelRegistry: { getAvailable: () => [] } };
   const activeToolSet = ["chalin_project_discovery", "chalin_project_snapshot", "read", "bash", "grep", "find", "ls", "edit", "write", "chalin_interview", "chalin_route", "chalin_resume", "chalin_web_search", "chalin_memory_search"];
-  const routeFirstToolSet = ["read", "bash", "grep", "find", "ls", "edit", "write", "chalin_route"];
+  const routeFirstToolSet = ["chalin_route"];
   fake.activeTools = [...activeToolSet];
   const inputResult = await inputHandler({ type: "input", text: prompt, source: "interactive" }, ctx);
   assert.equal(inputResult.action, "continue");
@@ -1225,8 +1184,8 @@ test("pi-chalin keeps bounded path prompts compact without hiding route autonomy
   assert.match(promptResult?.message?.content ?? "", /compact docs-artifact preflight/i);
   assert.match(promptResult?.message?.content ?? "", /Route-required architecture docs/i);
   assert.match(promptResult?.message?.content ?? "", /call `chalin_route` as the first tool/i);
-  assert.match(promptResult?.message?.content ?? "", /scout -> planner -> worker/i);
-  assert.match(promptResult?.message?.content ?? "", /worker's docs readback is the default validation/i);
+  assert.match(promptResult?.message?.content ?? "", /choose the smallest agent set/i);
+  assert.match(promptResult?.message?.content ?? "", /review evidence\/contract\/gaps\/readback/i);
   assert.match(promptResult?.message?.content ?? "", /not substitutes for route/i);
   assert.match(promptResult?.message?.content ?? "", /Do not start native just because the mutation target is one docs file/i);
   assert.match(promptResult?.message?.content ?? "", /The routed workflow still updates only the requested docs artifact/i);
@@ -1251,6 +1210,20 @@ test("pi-chalin keeps bounded path prompts compact without hiding route autonomy
   agentEnd({}, ctx);
   assert.deepEqual(fake.activeTools, activeToolSet);
 
+  const broadNoPath = await beforeAgentStart({
+    type: "before_agent_start",
+    prompt: "Revisa este proyecto en profundidad y compara opciones de mejora de arquitectura con riesgos, tradeoffs y proximos pasos.",
+    systemPrompt: "base",
+    systemPromptOptions: {},
+  }, ctx);
+  assert.equal(broadNoPath?.message?.customType, "pi-chalin-compact-orchestration");
+  assert.match(broadNoPath?.message?.content ?? "", /Call `chalin_route` as the first tool/i);
+  assert.match(broadNoPath?.message?.content ?? "", /deep project analysis/i);
+  assert.deepEqual(fake.activeTools, routeFirstToolSet);
+
+  agentEnd({}, ctx);
+  assert.deepEqual(fake.activeTools, activeToolSet);
+
   const runtimePlan = await beforeAgentStart({
     type: "before_agent_start",
     prompt: "En esta base multi-lenguaje inspirada en Bun, planifica una implementacion segura y cross-language para propagar un nuevo runtime flag `--deny-net` desde CLI Zig hasta el runtime Rust. No escribas codigo: actualiza docs/deny-net-plan.md con arquitectura, archivos tocados, riesgos, pasos incrementales y validacion.",
@@ -1265,6 +1238,23 @@ test("pi-chalin keeps bounded path prompts compact without hiding route autonomy
   assert.match(runtimePlan?.message?.content ?? "", /Cross-language\/runtime plans/i);
   assert.match(runtimePlan?.message?.content ?? "", /ABI-stable fixed-width integers or bitfields/i);
   assert.match(runtimePlan?.message?.content ?? "", /compatibility wrappers/i);
+  assert.deepEqual(fake.activeTools, routeFirstToolSet);
+
+  agentEnd({}, ctx);
+  assert.deepEqual(fake.activeTools, activeToolSet);
+
+  const rustWorkspaceFeature = await beforeAgentStart({
+    type: "before_agent_start",
+    prompt: "En este workspace Rust, implementa build_cache_key en crates/cache-key/src/lib.rs y deja cargo test pasando.",
+    systemPrompt: "base",
+    systemPromptOptions: {},
+  }, ctx);
+  assert.equal(rustWorkspaceFeature?.message?.customType, "pi-chalin-path-compact-orchestration");
+  assert.match(rustWorkspaceFeature?.message?.content ?? "", /route-required path preflight/i);
+  assert.match(rustWorkspaceFeature?.message?.content ?? "", /First tool must be `chalin_route`/i);
+  assert.match(rustWorkspaceFeature?.message?.content ?? "", /choose the smallest agent set/i);
+  assert.match(rustWorkspaceFeature?.message?.content ?? "", /Worker execution and a later reviewer are mandatory/i);
+  assert.match(rustWorkspaceFeature?.message?.content ?? "", /requested runner or nearest focused verification/i);
   assert.deepEqual(fake.activeTools, routeFirstToolSet);
 
   agentEnd({}, ctx);
@@ -2788,13 +2778,14 @@ test("chalin_route executes the workflow chosen by the primary Pi agent", async 
   assert.match(text, /pi-chalin completed: scout → reviewer/);
   assert.match(text, /status: complete/);
   assert.match(text, /Final answer material:/);
-  assert.match(text, /Supporting findings:/);
+  assert.doesNotMatch(text, /Supporting findings:/);
   assert.ok(statuses.some((status) => status.startsWith("chalin ")));
   assert.ok(statuses.some((status) => status.includes("review")));
   assert.ok(widgets.every((args) => args[1] === undefined), "chalin_route may clear the legacy widget but must not create a duplicate persistent widget");
 });
 
 test("finalAnswerMaterial preserves multi-agent analysis evidence instead of only last handoff", () => {
+  const cwd = tempDir("pi-chalin-final-material-evidence-");
   const run = createRunState({
     kind: "multi-agent-dag",
     agents: ["scout", "context-builder", "reviewer"],
@@ -2855,6 +2846,50 @@ test("finalAnswerMaterial preserves single scout analysis instead of compact han
   assert.match(material ?? "", /Coverage Matrix/);
   assert.match(material ?? "", /cmd\/api\/main\.go/);
   assert.doesNotMatch(material ?? "", /compact risk-only handoff/);
+});
+
+test("finalAnswerMaterial appends implementation evidence omitted by final reviewer wording", () => {
+  const cwd = tempDir("pi-chalin-final-material-evidence-");
+  const run = createRunState({
+    kind: "multi-agent-chain",
+    agents: ["scout", "worker", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    reason: "Routed implementation.",
+    plan: { kind: "chain", steps: [{ agent: "scout", task: "Map." }, { agent: "worker", task: "Implement." }, { agent: "reviewer", task: "Review." }] },
+  }, cwd);
+  run.status = "complete";
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.output = { agent: "scout", text: "mapped", handoff: "mapped", raw: "", memoryCandidates: [], warnings: [] };
+  run.steps[1]!.status = "complete";
+  run.steps[1]!.output = { agent: "worker", text: "Changed code and tests.", handoff: "Changed code and tests.", raw: "", memoryCandidates: [], warnings: [] };
+  run.steps[1]!.metrics = {
+    durationMs: 1,
+    usage: emptyTestUsage(),
+    toolCalls: 3,
+    toolCallsByName: { edit: 2, bash: 1 },
+    filesTouched: ["src/sql_tokenizer.c", "tests/test_sql_tokenizer.c"],
+    shellCommands: [`cd ${cwd} && make clean && make test 2>&1`, "make clean && make test"],
+  };
+  run.steps[2]!.status = "complete";
+  run.steps[2]!.output = {
+    agent: "reviewer",
+    text: "Verdict: PASS. All criteria are covered.",
+    handoff: "Verdict: PASS. All criteria are covered.",
+    raw: "",
+    memoryCandidates: [],
+    warnings: [],
+  };
+
+  const material = finalAnswerMaterial(run);
+
+  assert.match(material ?? "", /Verdict: PASS/);
+  assert.match(material ?? "", /src\/sql_tokenizer\.c/);
+  assert.match(material ?? "", /tests\/test_sql_tokenizer\.c/);
+  assert.match(material ?? "", /make clean && make test/);
+  assert.doesNotMatch(material ?? "", /pi-chalin-final-material-evidence-/);
 });
 
 test("chalin_route completion nudges the parent agent to synthesize", async () => {

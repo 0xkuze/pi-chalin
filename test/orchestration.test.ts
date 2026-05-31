@@ -6,7 +6,7 @@ import {
   summarizeOrchestrationEvalCases,
 } from "../evals/orchestration-cases.ts";
 import { buildChalinOrchestratorSystemPrompt } from "../src/orchestration.ts";
-import { collapseReadOnlyScoutContextRoute, ensureMutationRouteHasWorker } from "../src/route-guards.ts";
+import { collapseReadOnlyScoutContextRoute, ensureMutationRouteHasWorkerAndReviewer, inferRouteRequiresWorkspaceMutation } from "../src/route-guards.ts";
 import type { RouteDecision } from "../src/schemas.ts";
 
 const expectedTopologyMap = new Map([
@@ -52,7 +52,7 @@ test("orchestrator prompt teaches LLM-first routing without prompt keyword class
   assert.match(prompt, /Gate/i);
   assert.match(prompt, /branch\/diff\/PR/i);
   assert.match(prompt, /Architecture\/migration/i);
-  assert.match(prompt, /named-file refactor implementation is not this category/i);
+  assert.match(prompt, /Do not treat an explicit named-file refactor implementation as project strategy/i);
   assert.match(prompt, /Direct bias/i);
   assert.match(prompt, /small target set of files/i);
   assert.match(prompt, /specific function\/symbol\/API plus a local verifier/i);
@@ -80,33 +80,26 @@ test("orchestrator prompt teaches LLM-first routing without prompt keyword class
   assert.doesNotMatch(prompt, /bun test|dependency-free TypeScript|Bun CLI|tsx|vitest|jest/i);
   assert.match(prompt, /explicit memory recall\/remembrance or memory inventory\/counts/i);
   assert.match(prompt, /call `chalin_memory_search` first/i);
-  assert.match(prompt, /Default recipes/i);
-  assert.match(prompt, /single` scout/i);
-  assert.match(prompt, /scout → parallel folder agents → reviewer/i);
+  assert.match(prompt, /Routing principles/i);
+  assert.match(prompt, /Use the available agent roster as tools/i);
+  assert.match(prompt, /fixed recipe book/i);
   assert.match(prompt, /staged fan-out\/fan-in/i);
   assert.match(prompt, /Coverage Matrix/i);
-  assert.match(prompt, /covered with evidence, not present with evidence, or unknown\/gap/i);
-  assert.match(prompt, /prefer `single` scout with `budget: "deep"`/i);
-  assert.match(prompt, /Reserve `dag` for explicit staged fan-out\/fan-in requests/i);
-  assert.match(prompt, /scout → planner → reviewer/i);
-  assert.match(prompt, /Docs-only artifacts should route only/i);
-  assert.match(prompt, /test\/tooling\/command\/policy audits/i);
-  assert.match(prompt, /Multi-runtime\/API-boundary/i);
-  assert.match(prompt, /scout → reviewer for root-cause triage/i);
-  assert.match(prompt, /parallel worker/i);
-  assert.match(prompt, /worktree/i);
+  assert.match(prompt, /covered, not-present with evidence, or marked unknown\/gap/i);
+  assert.match(prompt, /derive domain-critical surfaces/i);
+  assert.match(prompt, /Routed implementation\/file mutation must include at least one worker-capable executor and a later reviewer/i);
+  assert.match(prompt, /reviewer reports FAIL\/GAP/i);
   assert.match(prompt, /non-overlapping/i);
   assert.match(prompt, /Direct answer when/i);
   assert.match(prompt, /named-file bugfixes/i);
   assert.match(prompt, /named-file bugfixes\/refactors/i);
-  assert.match(prompt, /do not convert safe bounded edits into dry-run reports/i);
   assert.match(prompt, /After a passing verification, perform one changed-file readback and stop/i);
   assert.match(prompt, /scout/);
   assert.match(prompt, /reviewer/);
   assert.doesNotMatch(prompt, /regex|if the prompt contains|hard-coded prompt/i);
 });
 
-test("chalin mutation routes without workers are normalized before execution", () => {
+test("chalin mutation routes without workers are normalized before execution and review", () => {
   const route: RouteDecision = {
     kind: "multi-agent-chain",
     agents: ["scout", "planner", "reviewer"],
@@ -125,7 +118,7 @@ test("chalin mutation routes without workers are normalized before execution", (
     },
   };
 
-  const normalized = ensureMutationRouteHasWorker(route, true, "Refactoriza src/pricing.ts para extraer funciones puras y añade tests.");
+  const normalized = ensureMutationRouteHasWorkerAndReviewer(route, true, "Refactoriza src/pricing.ts para extraer funciones puras y añade tests.");
 
   assert.deepEqual(normalized.agents, ["scout", "planner", "worker", "reviewer"]);
   assert.equal(normalized.plan?.kind, "chain");
@@ -144,12 +137,12 @@ test("mutation normalization is driven by structured route metadata, not prompt 
     plan: { kind: "chain", steps: [{ agent: "scout", task: "inspect" }, { agent: "planner", task: "plan" }, { agent: "reviewer", task: "review" }] },
   };
 
-  const withoutFlag = ensureMutationRouteHasWorker(
+  const withoutFlag = ensureMutationRouteHasWorkerAndReviewer(
     route,
     false,
     "Refactoriza src/pricing.ts para extraer funciones puras pequeñas y corre tests.",
   );
-  const withFlag = ensureMutationRouteHasWorker(
+  const withFlag = ensureMutationRouteHasWorkerAndReviewer(
     route,
     true,
     "Analiza sin palabras de implementación; la intención de mutar viene del campo estructurado.",
@@ -157,6 +150,102 @@ test("mutation normalization is driven by structured route metadata, not prompt 
 
   assert.deepEqual(withoutFlag.agents, ["scout", "planner", "reviewer"]);
   assert.deepEqual(withFlag.agents, ["scout", "planner", "worker", "reviewer"]);
+});
+
+test("route tool infers mutation intent when a routed implementation omits the mutation flag", () => {
+  const route: RouteDecision = {
+    kind: "single-agent",
+    agents: ["scout"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    reason: "Tokenizer bugfix with make test verification.",
+    plan: { kind: "single", agent: "scout", task: "Inspect source and return a patch plan." },
+  };
+
+  assert.equal(inferRouteRequiresWorkspaceMutation(route, "Fix the tokenizer and make test must pass."), true);
+  assert.equal(inferRouteRequiresWorkspaceMutation(route, "Read-only analysis only; do not modify files."), false);
+});
+
+test("implementation routes with workers are normalized to include a post-worker reviewer", () => {
+  const route: RouteDecision = {
+    kind: "multi-agent-chain",
+    agents: ["scout", "planner", "worker"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    reason: "parent chose implementation chain",
+    plan: {
+      kind: "chain",
+      steps: [
+        { agent: "scout", task: "inspect implementation surface" },
+        { agent: "planner", task: "plan the change" },
+        { agent: "worker", task: "implement the change" },
+      ],
+    },
+  };
+
+  const normalized = ensureMutationRouteHasWorkerAndReviewer(route, false, "Implementa la mejora y corre tests.");
+
+  assert.deepEqual(normalized.agents, ["scout", "planner", "worker", "reviewer"]);
+  assert.equal(normalized.plan?.kind, "chain");
+  assert.match(normalized.reason, /added a reviewer/i);
+  assert.match(normalized.reason, /plan, standards, gaps, and verification evidence/i);
+});
+
+test("dag implementation routes add final reviewer after worker stages", () => {
+  const route: RouteDecision = {
+    kind: "multi-agent-dag",
+    agents: ["scout", "worker", "worker"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    reason: "parent chose independent implementation slices",
+    plan: {
+      kind: "dag",
+      stages: [
+        { id: "discover", tasks: [{ agent: "scout", task: "map ownership" }] },
+        { id: "implement", tasks: [{ agent: "worker", task: "edit package a" }, { agent: "worker", task: "edit package b" }] },
+      ],
+    },
+  };
+
+  const normalized = ensureMutationRouteHasWorkerAndReviewer(route, true, "Implementa cambios independientes en dos paquetes.");
+
+  assert.deepEqual(normalized.agents, ["scout", "worker", "worker", "reviewer"]);
+  assert.equal(normalized.plan?.kind, "dag");
+  assert.equal(normalized.plan?.kind === "dag" ? normalized.plan.stages.at(-1)?.tasks[0]?.agent : undefined, "reviewer");
+  assert.match(normalized.reason, /added a reviewer/i);
+});
+
+test("implementation normalization preserves the orchestrator-selected evidence and planning agents", () => {
+  const route: RouteDecision = {
+    kind: "multi-agent-chain",
+    agents: ["scout", "planner", "worker", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    reason: "parent selected a richer implementation workflow",
+    plan: {
+      kind: "chain",
+      steps: [
+        { agent: "scout", task: "inspect ownership" },
+        { agent: "planner", task: "plan risk controls" },
+        { agent: "worker", task: "implement" },
+        { agent: "reviewer", task: "review" },
+      ],
+    },
+  };
+
+  const normalized = ensureMutationRouteHasWorkerAndReviewer(route, true, "Implementa una mejora con revisión.");
+
+  assert.deepEqual(normalized.agents, ["scout", "planner", "worker", "reviewer"]);
+  assert.equal(normalized.plan?.kind, "chain");
+  assert.deepEqual(normalized.plan?.kind === "chain" ? normalized.plan.steps.map((step) => step.agent) : [], ["scout", "planner", "worker", "reviewer"]);
 });
 
 test("read-only scout/context-builder normalization is driven by route shape", () => {

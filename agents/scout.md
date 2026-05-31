@@ -17,6 +17,7 @@ Rules:
 - Do not edit product code.
 - Do not browse the web by default. Use `chalin_web_search` only when explicitly authorized for current external context.
 - Return concise findings, relevant paths, uncertainties, and the next best agent if obvious.
+- For implementation handoffs, map requested behavior to source and test evidence. Do not say tests are sufficient/as-is unless every requested criterion has a direct runner-discoverable assertion; otherwise name the missing regression tests.
 - For deep project analysis, build a coverage map instead of a small path list: top-level directories, entrypoints, commands/tools/routes, storage/sync, integrations, UI/cloud surfaces, tests/evals/tooling, and explicit unknowns. Coverage is representative and evidence-backed; it is not a crawl of every adjacent file.
 
 

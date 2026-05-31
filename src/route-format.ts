@@ -15,7 +15,7 @@ export function formatRoute(route: RouteDecision, result: ChalinHandleResult | u
 
   const finalMaterial = finalAnswerMaterial(result.run);
   const memoryMaterial = !finalMaterial && result.memories.length > 0 ? formatMemoryMaterial(result.memories) : undefined;
-  const supportingFindings = supportingAgentFindings(result.run);
+  const supportingFindings = finalMaterial ? undefined : supportingAgentFindings(result.run);
   const lines = [
     `pi-chalin completed: ${route.agents.join(" → ") || route.kind}`,
     `status: ${result.run?.status ?? result.approval.action}`,
@@ -47,6 +47,7 @@ function formatMemoryMaterial(memories: ChalinHandleResult["memories"]): string 
 export function finalAnswerMaterial(run: RunState | undefined): string | undefined {
   if (!run) return undefined;
   const completeSteps = run.steps.filter((step) => isUsableStepStatus(step.status));
+  const budget = finalAnswerMaterialBudget(run);
   if (shouldAggregateFinalMaterial(run, completeSteps)) {
     const material = completeSteps
       .map((step) => {
@@ -55,11 +56,51 @@ export function finalAnswerMaterial(run: RunState | undefined): string | undefin
       })
       .filter((item): item is string => Boolean(item))
       .join("\n\n");
-    return material ? truncate(material, finalAnswerMaterialBudget(run)) : undefined;
+    return material ? finalMaterialWithEvidence(run, material, budget) : undefined;
   }
   const primary = completeSteps.at(-1) ?? run.steps.at(-1);
   const output = primary ? primaryFinalOutput(run, primary) : undefined;
-  return output ? truncate(output, finalAnswerMaterialBudget(run)) : undefined;
+  return output ? finalMaterialWithEvidence(run, output, budget) : undefined;
+}
+
+function finalMaterialWithEvidence(run: RunState, material: string, max: number): string {
+  const footer = implementationEvidenceFooter(run, material);
+  if (!footer) return truncate(material, max);
+  const separator = material.trim() ? "\n\n" : "";
+  const availableForMaterial = max - footer.length - separator.length;
+  if (availableForMaterial < 240) return truncate(`${material}${separator}${footer}`, max);
+  return `${truncate(material, availableForMaterial)}${separator}${footer}`;
+}
+
+function implementationEvidenceFooter(run: RunState, material: string): string | undefined {
+  if (!run.steps.some((step) => step.agent === "worker")) return undefined;
+  const changedPaths = uniqueStrings(run.steps.flatMap((step) => step.metrics?.filesTouched ?? []));
+  const verificationCommands = uniqueStrings(run.steps
+    .flatMap((step) => step.metrics?.shellCommands ?? [])
+    .map((command) => formatVerificationCommand(command))
+    .filter((command) => command.length > 0));
+  const lines: string[] = [];
+  if (changedPaths.length > 0 && changedPaths.some((filePath) => !material.includes(filePath))) {
+    lines.push(`Changed paths: ${changedPaths.slice(0, 10).join(", ")}`);
+  }
+  if (verificationCommands.length > 0 && verificationCommands.some((command) => !material.includes(command))) {
+    lines.push(`Verification: ${verificationCommands.slice(0, 3).join("; ")}`);
+  }
+  return lines.length > 0 ? `Evidence:\n${lines.map((line) => `- ${line}`).join("\n")}` : undefined;
+}
+
+function formatVerificationCommand(command: string): string {
+  const normalized = command
+    .replace(/\s*2>&1\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const parts = normalized.split(/\s+&&\s+/);
+  while (parts[0]?.startsWith("cd ")) parts.shift();
+  return parts.join(" && ").slice(0, 180);
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
 
 function shouldAggregateFinalMaterial(run: RunState, completeSteps: RunState["steps"]): boolean {
