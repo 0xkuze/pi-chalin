@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { setDefaultTimeout, test } from "bun:test";
 import { WORKFLOW_ORACLE_DIR, createWorkflowFixture, getWorkflowEvalCase, listWorkflowCommunityCases, listWorkflowComplexCases, listWorkflowEvalCases, listWorkflowHoldoutCases, selectWorkflowPrompt } from "../evals/workflow-cases.ts";
 import { buildWorkflowShardChildArgs, resolveWorkflowShardArgs } from "../evals/workflow-sharded.eval.ts";
-import { appendWorkflowTail, assertSdkRunBudget, auditWorkflowProductionFastPaths, auditWorkflowTraceForCheating, buildWorkflowComparativeJudgeInfrastructureSkip, buildWorkflowComparativeJudgePrompt, buildWorkflowContentOnlyComparativeJudgePrompt, buildWorkflowJudgePrompt, collectWorkflowEvidence, detectWorkflowInfrastructureFailure, detectWorkflowVerification, effectiveWorkflowFinalText, enforceWorkflowImplementationComparativeWinner, evaluateWorkflowRegressionGates, extractFinalText, extractTokenTotal, extractWorkflowUsage, observeTerminalAssistantAnswer, parseJsonObjectFromText, resolveCaseIds, resolveComparativeJudgeMode, resolveGentleCompanionRoot, resolveGentlePiRoot, resolveVariants, resolveWorkflowArgs, resolveWorkflowIdleTimeoutMs, resolveWorkflowInfraRetries, resolveWorkflowOutputStoragePolicy, resolveWorkflowRunCount, resolveWorkflowThinking, resolveWorkflowTimeoutMs, shouldRequireChalinRoute, shouldRetainWorkflowFixture, shouldRetryWorkflowRun, shouldRunWorkflowJudge, shouldStoreFullWorkflowOutput, summarizeComparison, summarizeWorkflowBlindJudgeStability, summarizeWorkflowFailures, toolsForWorkflowVariant, workflowAgentHistory, workflowDiagnostics, workflowFixtureFingerprint, workflowPromptVariantIndexForRun, workflowRegressionGatesEnabled, workflowReportFilename, workflowToolHistory, writeWorkflowReport, DEFAULT_WORKFLOW_IDLE_TIMEOUT_MS, MAX_WORKFLOW_RUNS, MAX_WORKFLOW_TIMEOUT_MS } from "../evals/workflow-quality.eval.ts";
+import { appendWorkflowTail, assertSdkRunBudget, auditWorkflowProductionFastPaths, auditWorkflowTraceForCheating, buildWorkflowComparativeJudgeInfrastructureSkip, buildWorkflowComparativeJudgePrompt, buildWorkflowContentOnlyComparativeJudgePrompt, buildWorkflowJudgePrompt, collectWorkflowEvidence, detectWorkflowInfrastructureFailure, detectWorkflowVerification, effectiveWorkflowFinalText, enforceWorkflowImplementationComparativeWinner, evaluateWorkflowRegressionGates, extractFinalText, extractTokenTotal, extractWorkflowUsage, observeTerminalAssistantAnswer, parseJsonObjectFromText, resolveCaseIds, resolveComparativeJudgeMode, resolveGentleCompanionRoot, resolveGentlePiRoot, resolveVariants, resolveWorkflowArgs, resolveWorkflowIdleTimeoutMs, resolveWorkflowInfraRetries, resolveWorkflowOutputStoragePolicy, resolveWorkflowRunCount, resolveWorkflowThinking, resolveWorkflowTimeoutMs, shouldRequireChalinRoute, shouldRequireGentleSubagent, shouldRetainWorkflowFixture, shouldRetryWorkflowRun, shouldRunWorkflowJudge, shouldStoreFullWorkflowOutput, summarizeComparison, summarizeWorkflowBlindJudgeStability, summarizeWorkflowFailures, toolsForWorkflowVariant, workflowAgentHistory, workflowDiagnostics, workflowFixtureFingerprint, workflowPromptVariantIndexForRun, workflowRegressionGatesEnabled, workflowReportFilename, workflowToolHistory, writeWorkflowReport, DEFAULT_WORKFLOW_IDLE_TIMEOUT_MS, MAX_WORKFLOW_RUNS, MAX_WORKFLOW_TIMEOUT_MS } from "../evals/workflow-quality.eval.ts";
 import { scoreWorkflowWorkspace } from "../evals/workflow-quality-lib.ts";
 
 setDefaultTimeout(60_000);
@@ -1205,12 +1205,20 @@ test("workflow eval CLI helpers keep live runs bounded", () => {
   assert.deepEqual(resolveCaseIds("a,b"), ["a", "b"]);
 });
 
-test("workflow eval does not force subagents for small docs fixtures", () => {
-  assert.equal(shouldRequireChalinRoute(getWorkflowEvalCase("complex-llvm-cpp-diagnostic-plan")), false);
-  assert.equal(shouldRequireChalinRoute(getWorkflowEvalCase("complex-bun-zig-rust-lockfile-triage")), false);
-  assert.equal(shouldRequireChalinRoute(getWorkflowEvalCase("complex-bun-zig-runtime-plan")), false);
+test("workflow eval separates route-required broad work from bounded complex edits", () => {
+  assert.equal(shouldRequireChalinRoute(getWorkflowEvalCase("complex-llvm-cpp-diagnostic-plan")), true);
+  assert.equal(shouldRequireGentleSubagent(getWorkflowEvalCase("complex-llvm-cpp-diagnostic-plan")), true);
+  assert.equal(shouldRequireChalinRoute(getWorkflowEvalCase("complex-bun-zig-rust-lockfile-triage")), true);
+  assert.equal(shouldRequireGentleSubagent(getWorkflowEvalCase("complex-bun-zig-rust-lockfile-triage")), true);
+  assert.equal(shouldRequireChalinRoute(getWorkflowEvalCase("complex-bun-zig-runtime-plan")), true);
+  assert.equal(shouldRequireGentleSubagent(getWorkflowEvalCase("complex-bun-zig-runtime-plan")), true);
   assert.equal(shouldRequireChalinRoute(getWorkflowEvalCase("complex-uv-rust-index-url-bugfix")), false);
   assert.equal(shouldRequireChalinRoute(getWorkflowEvalCase("complex-sqlite-c-tokenizer-bugfix")), false);
+  assert.deepEqual(resolveCaseIds("route-required"), [
+    "complex-bun-zig-rust-lockfile-triage",
+    "complex-bun-zig-runtime-plan",
+    "complex-llvm-cpp-diagnostic-plan",
+  ]);
 });
 
 test("workflow eval keeps bounded docs evidence shell available for chalin", () => {
@@ -1401,6 +1409,41 @@ test("workflow regression gates catch direct-eligible chalin route regressions",
   assert.ok(gates.failures.some((item) => /direct-eligible case called chalin_route/.test(item)));
 });
 
+test("workflow regression gates require routed tools for route-required harness cases", () => {
+  const baseOutput = {
+    variant: "chalin",
+    runIndex: 1,
+    workspace: { caseId: "complex-bun-zig-runtime-plan", pass: true, score: 100 },
+    trace: { pass: true, score: 100, warnings: [], critical: [] },
+    diagnostics: {
+      infrastructureFailure: undefined,
+      finalAnswerMissing: false,
+      objectiveStopReason: undefined,
+      duplicateToolCalls: 0,
+      chalinRouteCalls: 0,
+      subagentCalls: 0,
+      verificationPassed: true,
+    },
+    judge: undefined,
+  };
+  const chalinMissingRoute = baseOutput as never;
+  const gentleMissingSubagent = {
+    ...baseOutput,
+    variant: "gentle",
+  } as never;
+
+  const gates = evaluateWorkflowRegressionGates([chalinMissingRoute, gentleMissingSubagent], [{
+    caseId: "complex-bun-zig-runtime-plan",
+    pass: true,
+    reason: "ok",
+    variants: { chalin: { passRate: 1, avgWorkspaceScore: 100, avgWorkspaceQualityScore: 100, avgTraceScore: 100, p95DurationMs: 1_000 } },
+  }] as never);
+
+  assert.equal(gates.pass, false);
+  assert.ok(gates.failures.some((item) => /route-required case did not call chalin_route/.test(item)));
+  assert.ok(gates.failures.some((item) => /route-required case did not call Gentle subagent/.test(item)));
+});
+
 test("workflow regression gates fail if harnesses receive different prompt variants", () => {
   const output = (variant: "simple" | "chalin" | "gentle", promptVariantIndex: number) => ({
     variant,
@@ -1414,7 +1457,8 @@ test("workflow regression gates fail if harnesses receive different prompt varia
       finalAnswerMissing: false,
       verificationPassed: true,
       duplicateToolCalls: 0,
-      chalinRouteCalls: 0,
+      chalinRouteCalls: 1,
+      subagentCalls: 0,
       chalinRouteNonExecutable: 0,
       toolEvents: 4,
       readCalls: 1,
@@ -1706,7 +1750,7 @@ test("workflow comparison does not let recovered chalin infra hide token regress
     variant,
     runIndex: 1,
     durationMs,
-    workspace: { caseId: "complex-bun-zig-runtime-plan", pass: true, score: 100 },
+    workspace: { caseId: "holdout-docs-runbook", pass: true, score: 100 },
     trace: { pass: true, score: 100, warnings: [], critical: [] },
     diagnostics: {
       recoveredInfrastructureFailures: recovered ? [{ kind: "agent-stall", message: "workflow variant timeout after 60000ms" }] : undefined,
@@ -2111,7 +2155,7 @@ test("workflow comparison accepts major token savings against gentle when latenc
     variant,
     runIndex: 1,
     durationMs,
-    workspace: { caseId: "complex-bun-zig-runtime-plan", pass: true, score: 100 },
+    workspace: { caseId: "holdout-docs-runbook", pass: true, score: 100 },
     trace: { pass: true, score: 100, warnings: [], critical: [] },
     diagnostics: {
       infrastructureFailure: undefined,
@@ -2133,7 +2177,7 @@ test("workflow comparison accepts major token savings against gentle when latenc
     output("simple", 21_000, 36_000),
     output("chalin", 32_000, 62_000),
     output("gentle", 16_000, 118_000),
-  ] as never, [comparativeJudgeVerdict("complex-bun-zig-runtime-plan", [
+  ] as never, [comparativeJudgeVerdict("holdout-docs-runbook", [
     { variant: "simple", durationMs: 21_000, tokens: 36_000 },
     { variant: "chalin", durationMs: 32_000, tokens: 62_000 },
     { variant: "gentle", durationMs: 16_000, tokens: 118_000 },
@@ -2368,7 +2412,7 @@ test("workflow comparison applies blind judge quality lead against simple baseli
     variant,
     runIndex: 1,
     durationMs,
-    workspace: { caseId: "complex-bun-zig-runtime-plan", pass: true, score: 100 },
+    workspace: { caseId: "holdout-docs-runbook", pass: true, score: 100 },
     trace: { pass: true, score: 100, warnings: [], critical: [] },
     diagnostics: {
       infrastructureFailure: undefined,
@@ -2390,7 +2434,7 @@ test("workflow comparison applies blind judge quality lead against simple baseli
     output("simple", 15_000, 42_000),
     output("chalin", 30_000, 61_000),
   ] as never, [{
-    caseId: "complex-bun-zig-runtime-plan",
+    caseId: "holdout-docs-runbook",
     runIndex: 1,
     target: "chalin",
     candidates: [
@@ -2417,7 +2461,7 @@ test("workflow comparison accepts a token premium when blind judge prefers chali
     variant,
     runIndex: 1,
     durationMs,
-    workspace: { caseId: "complex-bun-zig-rust-lockfile-triage", pass: true, score: workspaceScore },
+    workspace: { caseId: "holdout-docs-runbook", pass: true, score: workspaceScore },
     trace: { pass: true, score: 100, warnings: [], critical: [] },
     diagnostics: {
       infrastructureFailure: undefined,
@@ -2439,7 +2483,7 @@ test("workflow comparison accepts a token premium when blind judge prefers chali
     output("simple", 100, 14_900, 43_000),
     output("chalin", 100, 21_700, 86_000),
     output("gentle", 94, 14_100, 75_000),
-  ] as never, [comparativeJudgeVerdict("complex-bun-zig-rust-lockfile-triage", [
+  ] as never, [comparativeJudgeVerdict("holdout-docs-runbook", [
     { variant: "simple", durationMs: 14_900, tokens: 43_000 },
     { variant: "chalin", durationMs: 21_700, tokens: 86_000 },
     { variant: "gentle", durationMs: 14_100, tokens: 75_000, workspaceScore: 94 },
@@ -2458,7 +2502,7 @@ test("workflow comparison follows blind judge recommendation over deterministic 
     variant,
     runIndex: 1,
     durationMs,
-    workspace: { caseId: "complex-bun-zig-rust-lockfile-triage", pass: true, score: workspaceScore },
+    workspace: { caseId: "holdout-docs-runbook", pass: true, score: workspaceScore },
     trace: { pass: true, score: 100, warnings: [], critical: [] },
     diagnostics: {
       infrastructureFailure: undefined,
@@ -2480,7 +2524,7 @@ test("workflow comparison follows blind judge recommendation over deterministic 
     output("simple", 94, 18_000, 28_000),
     output("chalin", 100, 22_000, 38_000),
     output("gentle", 95, 17_000, 34_000),
-  ] as never, [comparativeJudgeVerdict("complex-bun-zig-rust-lockfile-triage", [
+  ] as never, [comparativeJudgeVerdict("holdout-docs-runbook", [
     { variant: "simple", durationMs: 18_000, tokens: 28_000, workspaceScore: 94 },
     { variant: "chalin", durationMs: 22_000, tokens: 38_000, workspaceScore: 100 },
     { variant: "gentle", durationMs: 17_000, tokens: 34_000, workspaceScore: 95 },
@@ -2814,7 +2858,7 @@ test("workflow gates warn on single-sample blind judge wins and fail split case 
     variant,
     runIndex,
     durationMs: variant === "chalin" ? 9_000 : 12_000,
-    workspace: { caseId: "complex-bun-zig-runtime-plan", pass: true, score: 100 },
+    workspace: { caseId: "holdout-docs-runbook", pass: true, score: 100 },
     trace: { pass: true, score: 100, warnings: [], critical: [] },
     diagnostics: {
       infrastructureFailure: undefined,
@@ -2836,7 +2880,7 @@ test("workflow gates warn on single-sample blind judge wins and fail split case 
   const single = summarizeComparison([
     output("simple", 1),
     output("chalin", 1),
-  ] as never, [comparativeJudgeVerdict("complex-bun-zig-runtime-plan", [
+  ] as never, [comparativeJudgeVerdict("holdout-docs-runbook", [
     { variant: "simple", durationMs: 12_000, tokens: 55_000 },
     { variant: "chalin", durationMs: 9_000, tokens: 50_000 },
   ], "chalin")]);
@@ -2856,11 +2900,11 @@ test("workflow gates warn on single-sample blind judge wins and fail split case 
     output("simple", 2),
     output("chalin", 2),
   ] as never, [
-    comparativeJudgeVerdict("complex-bun-zig-runtime-plan", [
+    comparativeJudgeVerdict("holdout-docs-runbook", [
       { variant: "simple", durationMs: 12_000, tokens: 55_000 },
       { variant: "chalin", durationMs: 9_000, tokens: 50_000 },
     ], "chalin"),
-    Object.assign(comparativeJudgeVerdict("complex-bun-zig-runtime-plan", [
+    Object.assign(comparativeJudgeVerdict("holdout-docs-runbook", [
       { variant: "simple", durationMs: 11_000, tokens: 45_000 },
       { variant: "chalin", durationMs: 10_000, tokens: 72_000 },
     ], "simple") as object, { runIndex: 2 }) as never,
@@ -3192,7 +3236,8 @@ test("workflow gates report late provider errors as infra warnings when output i
       finalAnswerMissing: false,
       verificationPassed: false,
       duplicateToolCalls: 0,
-      chalinRouteCalls: 0,
+      chalinRouteCalls: 1,
+      subagentCalls: 0,
       chalinRouteValidationErrors: 0,
       antiCheat: { pass: true, critical: [], warnings: [], accessed: [] },
     },
@@ -3495,6 +3540,7 @@ test("workflow eval uses executable chalin_route material as effective final ans
   assert.equal(extractFinalText(stdout), "");
   assert.equal(effectiveWorkflowFinalText(stdout, "", "chalin"), routeMaterial);
   assert.equal(effectiveWorkflowFinalText(stdout, "", "simple"), "");
+  assert.equal(detectWorkflowInfrastructureFailure(stdout, "", "workflow empty assistant response without final evidence"), undefined);
 });
 
 test("workflow diagnostics count tool execution updates as progress, not duplicate calls", () => {
@@ -3503,10 +3549,13 @@ test("workflow diagnostics count tool execution updates as progress, not duplica
     JSON.stringify({ type: "tool_execution_update", toolName: "chalin_route", args: { topology: "chain", task: "docs" } }),
     JSON.stringify({ type: "tool_execution_update", toolName: "chalin_route", args: { topology: "chain", task: "docs" } }),
     JSON.stringify({ type: "tool_execution_end", toolName: "chalin_route", isError: false, result: { content: [{ type: "text", text: "Final answer material: done" }] } }),
+    JSON.stringify({ type: "tool_execution_start", toolName: "subagent", args: { description: "analyze docs" } }),
+    JSON.stringify({ type: "tool_execution_end", toolName: "subagent", isError: false, result: { content: [{ type: "text", text: "done" }] } }),
   ].join("\n");
 
   const diagnostics = workflowDiagnostics(getWorkflowEvalCase("complex-bun-zig-rust-lockfile-triage"), stdout, "", undefined, undefined, undefined, false);
   assert.equal(diagnostics.chalinRouteCalls, 1);
+  assert.equal(diagnostics.subagentCalls, 1);
   assert.equal(diagnostics.duplicateToolCalls, 0);
 });
 
@@ -4005,6 +4054,7 @@ test("workflow sharded eval forwards full-output storage args to shard workers",
       judge: "pi",
       comparativeJudge: "pi",
       judgeModel: "zai/glm-5.1",
+      gentleCompanionRoot: "/tmp/gentle-companions",
       storeFullOutput: "1",
       storeFailedOutput: "0",
     },
@@ -4014,6 +4064,7 @@ test("workflow sharded eval forwards full-output storage args to shard workers",
   assert.ok(childArgs.includes("--storeFailedOutput=0"));
   assert.ok(childArgs.includes("--comparativeJudge=pi"));
   assert.ok(childArgs.includes("--judgeModel=zai/glm-5.1"));
+  assert.ok(childArgs.includes("--gentleCompanionRoot=/tmp/gentle-companions"));
 });
 
 test("workflow matrix aggregate uses latest row per case and reports variant efficiency", async () => {

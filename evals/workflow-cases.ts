@@ -75,6 +75,7 @@ export interface WorkflowAntiCheatExpectation {
 
 export interface WorkflowOrchestrationExpectation {
   requireChalinRoute?: boolean;
+  requireGentleSubagent?: boolean;
   rationale?: string;
 }
 
@@ -1356,6 +1357,11 @@ function complexBunZigRustLockfileTriageCase(): WorkflowEvalCase {
       maxFiles: 10,
       maxDurationMs: 75_000,
       validation: { runTests: false, allowSkip: true },
+      orchestration: {
+        requireChalinRoute: true,
+        requireGentleSubagent: true,
+        rationale: "Cross-language root-cause triage spans multiple ownership surfaces and should exercise each harness's subagent/router path.",
+      },
     },
     setup(cwd) {
       write(cwd, "README.md", "# Bun-inspired installer fixture\n\nSynthetic fixture for lockfile/resolver triage.\n");
@@ -1378,13 +1384,18 @@ function complexBunZigRuntimePlanCase(): WorkflowEvalCase {
       requiredFiles: ["docs/deny-net-plan.md", "src/cli.zig", "src/bindings/runtime.zig", "crates/runtime/src/permissions.rs"],
       requiredContent: [
         check("docs/deny-net-plan.md", "maps Zig to Rust boundary", ["src/cli\\.zig", "runtime\\.zig", "permissions\\.rs", "FFI|binding|boundary|frontera", "deny-net"], 46),
-        check("docs/deny-net-plan.md", "contains incremental implementation and validation plan", ["Paso|Step|increment", "risk|riesgo", "tests|validaci", "CLI|runtime", "rollback|compat"], 34),
+        check("docs/deny-net-plan.md", "contains incremental implementation and validation plan", ["Paso|Step|Stage|Fase|Etapa|increment|staged|S[0-9]", "risk|riesgo", "tests|valid|verif", "CLI|runtime", "rollback|compat"], 34),
       ],
       forbiddenFiles: ["src/**/*.test.zig", "crates/runtime/tests/*"],
-      finalAnswerPatterns: ["docs/deny-net-plan.md", "deny-net", "valid|verificaci|prueba|test"],
+      finalAnswerPatterns: ["docs/deny-net-plan.md", "deny-net", "valid|verif|verificaci|prueba|test"],
       maxFiles: 10,
       maxDurationMs: 75_000,
       validation: { runTests: false, allowSkip: true },
+      orchestration: {
+        requireChalinRoute: true,
+        requireGentleSubagent: true,
+        rationale: "Cross-runtime architecture planning should use routed/subagent context isolation instead of direct parent-only work.",
+      },
     },
     setup(cwd) {
       write(cwd, "src/cli.zig", `pub const CliOptions = struct {\n    script: []const u8,\n};\n\npub fn parseArgs(script: []const u8) CliOptions {\n    return .{ .script = script };\n}\n`);
@@ -1638,6 +1649,11 @@ function complexLlvmCppDiagnosticPlanCase(): WorkflowEvalCase {
       maxFiles: 10,
       maxDurationMs: 75_000,
       validation: { runTests: false, allowSkip: true },
+      orchestration: {
+        requireChalinRoute: true,
+        requireGentleSubagent: true,
+        rationale: "Large refactor planning across parser and diagnostics ownership should exercise routed analysis.",
+      },
     },
     setup(cwd) {
       write(cwd, "include/DiagnosticEngine.h", `#pragma once\n#include <string>\n\nclass DiagnosticEngine {\npublic:\n  void report(int line, const std::string &message);\n};\n`);

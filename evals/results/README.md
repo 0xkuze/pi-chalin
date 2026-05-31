@@ -26,4 +26,12 @@ bun run eval:workflow:harness
 
 That preset runs `simple`, `chalin`, and `gentle` on the same synthetic cases and uses `openai-codex/gpt-5.5` as both worker and Pi judge model by default. It combines deterministic workspace/trace scoring with a blind comparative judge: candidate labels are shuffled, harness names are hidden from the judge prompt, and the target harness must win the comparative rank. Override the external checkout with `--gentleRoot=/path/to/gentle-pi` or `PI_CHALIN_GENTLE_PI_ROOT`.
 
+For routed harness comparison, use:
+
+```bash
+bun run eval:workflow:routed
+```
+
+That preset selects route-required cases only and uses a longer timeout for multi-agent work. Chalin must call `chalin_route`; Gentle must call its `subagent` tool from the companion bundle. Override the companion bundle with `--gentleCompanionRoot=/path/to/node_modules` or `PI_CHALIN_GENTLE_COMPANIONS_ROOT`.
+
 Keep only compact release evidence JSONL/JSON files in this directory. Temporary shard folders (`.workflow-shards-*`) and ad-hoc exploratory JSONL files should be cleaned before commit.

@@ -40,6 +40,7 @@ interface WorkflowEfficiencyDiagnostics {
   toolEvents: number;
   toolCallsByName: Record<string, number>;
   chalinRouteCalls: number;
+  subagentCalls: number;
   chalinRouteNonExecutable: number;
   chalinRouteValidationErrors: number;
   toolValidationErrors: number;
@@ -226,6 +227,7 @@ interface VariantStats {
   avgInfraRetries: number;
   avgAntiCheatCriticals: number;
   avgChalinRouteCalls: number;
+  avgSubagentCalls: number;
   avgChalinRouteNonExecutable: number;
   avgChalinRouteValidationErrors: number;
   avgDuplicateToolCalls: number;
@@ -431,6 +433,22 @@ const workflowPresetArgs = {
     thinking: "adaptive",
     matrixPath: "evals/results/workflow-quality-complex-harness.jsonl",
   },
+  routed: {
+    mode: "sdk",
+    case: "route-required",
+    variant: "harnesses",
+    runs: "1",
+    timeoutMs: "420000",
+    allowMulti: "1",
+    allowLong: "1",
+    gates: "1",
+    judge: "pi",
+    comparativeJudge: "content-only",
+    judgeModel: "openai-codex/gpt-5.5",
+    model: "openai-codex/gpt-5.5",
+    thinking: "adaptive",
+    matrixPath: "evals/results/workflow-quality-routed-harness.jsonl",
+  },
 } satisfies Record<string, Record<string, string>>;
 
 if (isMain()) await main();
@@ -623,6 +641,11 @@ export function resolveCaseIds(value: string | undefined): string[] {
   if (value === "holdout" || value === "holdout-all") return listWorkflowHoldoutCases().map((item) => item.id);
   if (value === "community" || value === "community-all") return listWorkflowCommunityCases().map((item) => item.id);
   if (value === "complex" || value === "complex-all") return listWorkflowComplexCases().map((item) => item.id);
+  if (value === "route-required" || value === "routed" || value === "routed-harness") {
+    return listWorkflowEvalCases({ includeHoldout: true, includeCommunity: true, includeComplex: true })
+      .filter((item) => shouldRequireChalinRoute(item) || shouldRequireGentleSubagent(item))
+      .map((item) => item.id);
+  }
   if (value === "all-with-holdout") return listWorkflowEvalCases({ includeHoldout: true }).map((item) => item.id);
   if (value === "all-realistic" || value === "all-with-community") return listWorkflowEvalCases({ includeHoldout: true, includeCommunity: true }).map((item) => item.id);
   if (value === "all-expanded" || value === "all-with-complex") return listWorkflowEvalCases({ includeHoldout: true, includeCommunity: true, includeComplex: true }).map((item) => item.id);
@@ -873,6 +896,12 @@ export function evaluateWorkflowRegressionGates(outputs: WorkflowRunOutput[], gr
     if (output.variant === "chalin" && !shouldRequireChalinRoute(evalCase) && output.diagnostics.chalinRouteCalls > thresholds.maxDirectChalinRouteCalls) {
       failures.push(`${label}: direct-eligible case called chalin_route ${output.diagnostics.chalinRouteCalls} time(s)`);
     }
+    if (output.variant === "chalin" && shouldRequireChalinRoute(evalCase) && (output.diagnostics.chalinRouteCalls ?? 0) < 1) {
+      failures.push(`${label}: route-required case did not call chalin_route`);
+    }
+    if (output.variant === "gentle" && shouldRequireGentleSubagent(evalCase) && (output.diagnostics.subagentCalls ?? 0) < 1) {
+      failures.push(`${label}: route-required case did not call Gentle subagent`);
+    }
   }
 
   for (const group of grouped) {
@@ -1036,13 +1065,19 @@ function blockingInfrastructureFailure(output: WorkflowRunOutput): boolean {
 }
 
 function outputContentPass(output: WorkflowRunOutput): boolean {
-  const requiresVerification = typeof output.workspace.caseId === "string"
-    ? Boolean(getWorkflowEvalCase(output.workspace.caseId).expected.validation?.runTests)
-    : false;
+  const evalCase = typeof output.workspace.caseId === "string" ? getWorkflowEvalCase(output.workspace.caseId) : undefined;
+  const requiresVerification = Boolean(evalCase?.expected.validation?.runTests);
+  const orchestrationPass = !evalCase
+    || (output.variant === "chalin"
+      ? !shouldRequireChalinRoute(evalCase) || (output.diagnostics.chalinRouteCalls ?? 0) > 0
+      : output.variant === "gentle"
+        ? !shouldRequireGentleSubagent(evalCase) || (output.diagnostics.subagentCalls ?? 0) > 0
+        : true);
   return (output.workspace.pass || evidenceResolvedWorkspaceFailure(output))
     && output.trace.pass
     && !output.diagnostics.finalAnswerMissing
     && (output.diagnostics.antiCheat?.pass ?? true)
+    && orchestrationPass
     && (!requiresVerification || output.diagnostics.verificationPassed)
     && (output.judge ? output.judge.pass : true);
 }
@@ -1355,6 +1390,7 @@ function summarizeVariant(items: WorkflowRunOutput[]): VariantStats | undefined 
     avgInfraRetries: avg(items.map((item) => item.diagnostics.infraRetries)),
     avgAntiCheatCriticals: avg(items.map((item) => item.diagnostics.antiCheat?.critical.length ?? 0)),
     avgChalinRouteCalls: avg(items.map((item) => item.diagnostics.chalinRouteCalls)),
+    avgSubagentCalls: avg(items.map((item) => item.diagnostics.subagentCalls ?? 0)),
     avgChalinRouteNonExecutable: avg(items.map((item) => item.diagnostics.chalinRouteNonExecutable)),
     avgChalinRouteValidationErrors: avg(items.map((item) => item.diagnostics.chalinRouteValidationErrors)),
     avgDuplicateToolCalls: avg(items.map((item) => item.diagnostics.duplicateToolCalls)),
@@ -1551,6 +1587,10 @@ function withRetryDiagnostics(output: WorkflowRunOutput, failedAttempts: Workflo
 
 export function shouldRequireChalinRoute(evalCase: WorkflowEvalCase): boolean {
   return evalCase.expected.orchestration?.requireChalinRoute === true;
+}
+
+export function shouldRequireGentleSubagent(evalCase: WorkflowEvalCase): boolean {
+  return evalCase.expected.orchestration?.requireGentleSubagent === true;
 }
 
 function isBoundedDirectWorkflowCase(evalCase: WorkflowEvalCase): boolean {
@@ -1971,6 +2011,10 @@ function runPi(args: string[], cwd: string, timeoutMs: number, options: { observ
     };
     const finishAfterEmptyTerminalAnswer = () => {
       if (terminalEventTimer || settled) return;
+      if (hasExecutableChalinRouteResult(stdoutChunks.join(""))) {
+        finishAfterTerminalAnswer();
+        return;
+      }
       timeoutReason = "workflow empty assistant response without final evidence";
       terminalEventTimer = setTimeout(() => {
         if (child.exitCode === null) killProcessTree(child.pid, "SIGTERM");
@@ -2048,6 +2092,7 @@ export function workflowDiagnostics(evalCase: WorkflowEvalCase, stdout: string, 
     toolEvents: parsed.toolEvents.length,
     toolCallsByName,
     chalinRouteCalls: toolCallsByName.chalin_route ?? 0,
+    subagentCalls: toolCallsByName.subagent ?? 0,
     chalinRouteNonExecutable: parsed.toolEvents.filter((item) => item.name === "chalin_route" && item.phase === "end" && /approval is required|status:\s*(ask|block)|Approval:\s*(ask|block)/i.test(item.resultText)).length,
     chalinRouteValidationErrors,
     toolValidationErrors,
@@ -2275,7 +2320,7 @@ export function detectWorkflowInfrastructureFailure(stdout: string, stderr = "",
   if (stderr.trim() && isCliInfrastructureError(stderr)) {
     return { kind: "cli-error", message: snippet(stderr.trim(), 220) };
   }
-  if (timeoutReason && /empty assistant response|without final evidence/i.test(timeoutReason)) {
+  if (timeoutReason && /empty assistant response|without final evidence/i.test(timeoutReason) && !hasExecutableChalinRouteResult(stdout)) {
     return { kind: "agent-stall", message: timeoutReason };
   }
   if (timeoutReason && /idle timeout|without SDK events|stall/i.test(timeoutReason)) {
@@ -2875,8 +2920,16 @@ export function extractFinalText(stdout: string): string {
 export function effectiveWorkflowFinalText(stdout: string, finalText: string, variant: WorkflowVariant): string {
   if (finalText.trim()) return finalText;
   if (variant !== "chalin") return finalText;
+  return executableChalinRouteResult(stdout) ?? finalText;
+}
+
+function hasExecutableChalinRouteResult(stdout: string): boolean {
+  return executableChalinRouteResult(stdout) !== undefined;
+}
+
+function executableChalinRouteResult(stdout: string): string | undefined {
   const routeResult = parsePiJsonTrace(stdout).chalinRouteResults.at(-1)?.trim() ?? "";
-  if (!routeResult || isNonExecutableChalinRouteResult(routeResult)) return finalText;
+  if (!routeResult || isNonExecutableChalinRouteResult(routeResult)) return undefined;
   return routeResult;
 }
 
@@ -2985,7 +3038,7 @@ export function resolveComparativeJudgeMode(value: string): WorkflowComparativeJ
 }
 
 function emptyDiagnostics(): WorkflowEfficiencyDiagnostics {
-  return { jsonEvents: 0, toolEvents: 0, toolCallsByName: {}, chalinRouteCalls: 0, chalinRouteNonExecutable: 0, chalinRouteValidationErrors: 0, toolValidationErrors: 0, duplicateToolCalls: 0, readCalls: 0, writeCalls: 0, editCalls: 0, retries: 0, agentRetries: 0, infraRetries: 0, usage: emptyUsage(), tokenTotal: 0, verificationPassed: false, verificationToolCalls: 0, traceSummary: { directEligible: true, postVerificationExplorationCalls: 0, postVerificationShellCalls: 0, postVerificationToolCallsByName: {}, toolCallSequence: [] }, finalAnswerMissing: false, antiCheat: { pass: true, critical: [], warnings: [], accessed: [] } };
+  return { jsonEvents: 0, toolEvents: 0, toolCallsByName: {}, chalinRouteCalls: 0, subagentCalls: 0, chalinRouteNonExecutable: 0, chalinRouteValidationErrors: 0, toolValidationErrors: 0, duplicateToolCalls: 0, readCalls: 0, writeCalls: 0, editCalls: 0, retries: 0, agentRetries: 0, infraRetries: 0, usage: emptyUsage(), tokenTotal: 0, verificationPassed: false, verificationToolCalls: 0, traceSummary: { directEligible: true, postVerificationExplorationCalls: 0, postVerificationShellCalls: 0, postVerificationToolCallsByName: {}, toolCallSequence: [] }, finalAnswerMissing: false, antiCheat: { pass: true, critical: [], warnings: [], accessed: [] } };
 }
 
 export function extractWorkflowUsage(stdout: string): WorkflowUsageTotals {

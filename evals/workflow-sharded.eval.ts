@@ -179,7 +179,7 @@ export function buildWorkflowShardChildArgs(options: { caseIds: string[]; varian
   if (options.extraArgs.judge) childArgs.push(`--judge=${options.extraArgs.judge}`);
   const comparativeJudge = options.extraArgs.comparativeJudge ?? options.extraArgs.comparisonJudge;
   if (comparativeJudge) childArgs.push(`--comparativeJudge=${comparativeJudge}`);
-  for (const key of ["judgeModel", "judgeTimeoutMs", "gentleRoot", "storeFullOutput", "storeFullWorkflowOutput", "storeFailedOutput", "storeFailedWorkflowOutput"]) {
+  for (const key of ["judgeModel", "judgeTimeoutMs", "gentleRoot", "gentleCompanionRoot", "storeFullOutput", "storeFullWorkflowOutput", "storeFailedOutput", "storeFailedWorkflowOutput"]) {
     const value = options.extraArgs[key];
     if (value !== undefined) childArgs.push(`--${key}=${value}`);
   }
