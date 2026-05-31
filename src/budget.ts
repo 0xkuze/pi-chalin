@@ -1,3 +1,4 @@
+import { Context, Effect, Layer, Schedule } from "effect";
 import type { ArtifactCheckpoint, ArtifactStore } from "./artifacts.ts";
 import type { AgentDefinition, BudgetCapHit, BudgetCapName, RouteKind, RouteRisk, RunStepState, ToolBudgetProfile } from "./schemas.ts";
 
@@ -82,6 +83,39 @@ export interface ToolUtilityMetrics {
   toolCallsBeforeFirstSignal: number;
   verificationDone: boolean;
   memoryCandidatesQuality: number;
+}
+
+interface BudgetPolicyServiceShape {
+  readonly policyForStep: typeof policyForStep;
+  readonly evaluateUsage: typeof evaluateBudgetUsage;
+  readonly checkpointSchedule: BudgetCheckpointSchedule;
+  readonly checkpointWriteSchedule: BudgetCheckpointWriteSchedule;
+  readonly recordCheckpoint: (store: ArtifactStore, featureId: string, step: RunStepState, reason: string) => Effect.Effect<ArtifactCheckpoint, unknown>;
+}
+
+class BudgetPolicyService extends Context.Tag("pi-chalin/BudgetPolicy")<BudgetPolicyService, BudgetPolicyServiceShape>() {}
+
+function makeCheckpointSchedule() {
+  return Schedule.spaced("5 minutes");
+}
+
+function makeCheckpointWriteSchedule() {
+  return Schedule.recurs(0);
+}
+
+type BudgetCheckpointSchedule = ReturnType<typeof makeCheckpointSchedule>;
+type BudgetCheckpointWriteSchedule = ReturnType<typeof makeCheckpointWriteSchedule>;
+
+const BudgetLayer = Layer.succeed(BudgetPolicyService, {
+  policyForStep,
+  evaluateUsage: evaluateBudgetUsage,
+  checkpointSchedule: makeCheckpointSchedule(),
+  checkpointWriteSchedule: makeCheckpointWriteSchedule(),
+  recordCheckpoint: recordBudgetCheckpointEffect,
+});
+
+export function budgetCheckpointSchedule(): BudgetCheckpointSchedule {
+  return makeCheckpointSchedule();
 }
 
 export function policyForStep(
@@ -174,19 +208,36 @@ export function summarizeToolUtility(input: ToolUtilityInput): ToolUtilityMetric
 }
 
 export async function recordBudgetCheckpoint(store: ArtifactStore, featureId: string, step: RunStepState, reason: string): Promise<ArtifactCheckpoint> {
-  await store.initFeature({
-    featureId,
-    goal: `Continue budget-capped pi-chalin step ${step.agent}`,
-    chain: [step.agent],
-    currentStep: step.task,
-  });
-  return store.appendCheckpoint(featureId, {
-    agent: step.agent,
-    title: `${step.agent} budget-capped`,
-    summary: compact([step.output?.handoff, step.output?.text, reason].filter(Boolean).join(" "), 900),
-    status: "paused",
-    stage: step.id,
-  });
+  return Effect.runPromise(Effect.gen(function* () {
+    const budget = yield* BudgetPolicyService;
+    return yield* checkpointWriteWithSchedule(budget.recordCheckpoint(store, featureId, step, reason), budget.checkpointWriteSchedule);
+  }).pipe(Effect.provide(BudgetLayer), Effect.withSpan("budget.recordCheckpoint")));
+}
+
+function checkpointWriteWithSchedule<A>(effect: Effect.Effect<A, unknown>, schedule: BudgetCheckpointWriteSchedule): Effect.Effect<A, unknown> {
+  return Effect.gen(function* () {
+    const result = yield* effect;
+    yield* Effect.repeat(Effect.void, { schedule });
+    return result;
+  }).pipe(Effect.withSpan("budget.checkpointSchedule"));
+}
+
+function recordBudgetCheckpointEffect(store: ArtifactStore, featureId: string, step: RunStepState, reason: string): Effect.Effect<ArtifactCheckpoint, unknown> {
+  return Effect.gen(function* () {
+    yield* Effect.tryPromise(() => store.initFeature({
+      featureId,
+      goal: `Continue budget-capped pi-chalin step ${step.agent}`,
+      chain: [step.agent],
+      currentStep: step.task,
+    }));
+    return yield* Effect.tryPromise(() => store.appendCheckpoint(featureId, {
+      agent: step.agent,
+      title: `${step.agent} budget-capped`,
+      summary: compact([step.output?.handoff, step.output?.text, reason].filter(Boolean).join(" "), 900),
+      status: "paused",
+      stage: step.id,
+    }));
+  }).pipe(Effect.withSpan("budget.recordCheckpoint.write"));
 }
 
 function compare(caps: BudgetCapHit[], name: BudgetCapName, used: number, limit: number): void {

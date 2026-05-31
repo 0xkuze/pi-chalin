@@ -1,9 +1,10 @@
+import { Context, Effect, Layer } from "effect";
 import { AgentCatalog } from "./agents.ts";
-import { ArtifactStore } from "./artifacts.ts";
+import { ArtifactStore, recordRunArtifactEffect } from "./artifacts.ts";
 import { DEFAULT_CONFIG, approvalDecision, type ChalinConfig } from "./config.ts";
 import type { MemoryStoreLike } from "./memory.ts";
 import { createConfiguredMemoryStore } from "./memory-provider.ts";
-import { MockWorkerRunner, SdkWorkerRunner, type WorkerRunner, type WorkerRunnerContext } from "./runner.ts";
+import { MockWorkerRunner, SdkWorkerRunner, resumeWorkerRunnerEffect, runWorkerRunnerEffect, type WorkerRunner, type WorkerRunnerContext } from "./runner.ts";
 import type { AgentDefinition, AgentStage, AgentStep, AgentThinkingLevel, ApprovalDecision, MemoryRecord, RouteDecision, RoutePlan, RunState } from "./schemas.ts";
 
 export interface ChalinKernelOptions {
@@ -24,6 +25,26 @@ export interface ChalinHandleResult {
   run?: RunState;
   memories: MemoryRecord[];
   diagnostics: string[];
+}
+
+interface KernelServiceShape {
+  readonly kernel: ChalinKernel;
+  readonly handleRoute: (route: RouteDecision, prompt: string, context?: Omit<WorkerRunnerContext, "agents" | "modelOverrides">, approvalOverride?: ApprovalDecision) => Effect.Effect<ChalinHandleResult, unknown>;
+  readonly handlePrompt: (prompt: string, context?: Omit<WorkerRunnerContext, "agents" | "modelOverrides">) => Effect.Effect<ChalinHandleResult, unknown>;
+}
+
+class KernelService extends Context.Tag("pi-chalin/Kernel")<KernelService, KernelServiceShape>() {}
+
+export function kernelLayer(kernel: ChalinKernel): Layer.Layer<KernelService> {
+  return Layer.succeed(KernelService, {
+    kernel,
+    handleRoute: (route, prompt, context, approvalOverride) => Effect.tryPromise(() => kernel.handleRoute(route, prompt, context, approvalOverride)),
+    handlePrompt: (prompt, context) => Effect.tryPromise(() => kernel.handlePrompt(prompt, context)),
+  });
+}
+
+export function createKernelLayer(options?: ChalinKernelOptions): Layer.Layer<KernelService> {
+  return kernelLayer(new ChalinKernel(options));
 }
 
 export class ChalinKernel {
@@ -78,34 +99,47 @@ export class ChalinKernel {
   }
 
   async handleRoute(route: RouteDecision, prompt: string, context: Omit<WorkerRunnerContext, "agents" | "modelOverrides"> = { cwd: this.cwd }, approvalOverride?: ApprovalDecision): Promise<ChalinHandleResult> {
-    const approval = approvalOverride ?? approvalDecision(this.config, route);
-    const diagnostics = [...this.catalog.diagnostics.warnings, ...this.catalog.diagnostics.errors];
-    const memories = route.needsMemory ? await this.retrieveRouteMemories(route, prompt) : [];
-    if (approval.action !== "allow" || !route.plan) return { route, approval, memories, diagnostics };
+    return Effect.runPromise(this.handleRouteEffect(route, prompt, context, approvalOverride));
+  }
 
-    const agents = this.resolvePlanAgents(route);
-    const missing = route.agents.filter((ref) => !agents.has(ref));
-    if (missing.length > 0) {
-      return {
-        route,
-        approval: { action: "block", reason: `Unknown pi-chalin agent(s): ${missing.join(", ")}.` },
-        memories,
-        diagnostics: [...diagnostics, `Unknown pi-chalin agent(s): ${missing.join(", ")}.`],
-      };
-    }
+  private handleRouteEffect(
+    route: RouteDecision,
+    prompt: string,
+    context: Omit<WorkerRunnerContext, "agents" | "modelOverrides">,
+    approvalOverride?: ApprovalDecision,
+  ): Effect.Effect<ChalinHandleResult, unknown> {
+    const self = this;
+    return Effect.gen(function* () {
+      const approval = approvalOverride ?? approvalDecision(self.config, route);
+      const diagnostics = [...self.catalog.diagnostics.warnings, ...self.catalog.diagnostics.errors];
+      const memories = route.needsMemory ? yield* Effect.tryPromise(() => self.retrieveRouteMemories(route, prompt)) : [];
+      if (approval.action !== "allow" || !route.plan) return { route, approval, memories, diagnostics };
 
-    const runner = context.extensionContext ? this.sdkRunner : this.runner;
-    const run = await runner.run(route, { ...context, cwd: this.cwd, rootTask: prompt, agents, modelOverrides: this.modelOverrides, thinkingOverrides: this.thinkingOverrides });
-    const candidates = run.steps.flatMap((step) => step.output?.memoryCandidates ?? []);
-    if (candidates.length > 0) {
-      if (context.extensionContext) {
-        this.persistMemoriesAfterToolResult(candidates, run.id, context.extensionContext.hasUI);
-      } else {
-        await this.memory.submitCandidates(candidates);
+      const agents = self.resolvePlanAgents(route);
+      const missing = route.agents.filter((ref) => !agents.has(ref));
+      if (missing.length > 0) {
+        const blockedApproval: ApprovalDecision = { action: "block", reason: `Unknown pi-chalin agent(s): ${missing.join(", ")}.` };
+        return {
+          route,
+          approval: blockedApproval,
+          memories,
+          diagnostics: [...diagnostics, `Unknown pi-chalin agent(s): ${missing.join(", ")}.`],
+        };
       }
-    }
-    if (route.needsArtifacts || run.steps.length > 1) await this.artifacts.recordRun(run);
-    return { route, approval, run, memories, diagnostics };
+
+      const runner = context.extensionContext ? self.sdkRunner : self.runner;
+      const run = yield* runWorkerRunnerEffect(runner, route, { ...context, cwd: self.cwd, rootTask: prompt, agents, modelOverrides: self.modelOverrides, thinkingOverrides: self.thinkingOverrides });
+      const candidates = run.steps.flatMap((step) => step.output?.memoryCandidates ?? []);
+      if (candidates.length > 0) {
+        if (context.extensionContext) {
+          self.persistMemoriesAfterToolResult(candidates, run.id, context.extensionContext.hasUI);
+        } else {
+          yield* Effect.tryPromise(() => self.memory.submitCandidates(candidates));
+        }
+      }
+      if (route.needsArtifacts || run.steps.length > 1) yield* recordRunArtifactEffect(self.artifacts, run);
+      return { route, approval, run, memories, diagnostics };
+    }).pipe(Effect.withSpan("kernel.handleRoute"));
   }
 
   async resumeRun(run: RunState, context: Omit<WorkerRunnerContext, "agents" | "modelOverrides" | "thinkingOverrides"> = { cwd: this.cwd }): Promise<ChalinHandleResult> {
@@ -114,9 +148,7 @@ export class ChalinKernel {
     if (approval.action !== "allow" || !run.route.plan) return { route: run.route, approval, memories: [], diagnostics, run };
     const agents = this.resolvePlanAgents(run.route);
     const runner = context.extensionContext ? this.sdkRunner : this.runner;
-    const resumed = runner.resume
-      ? await runner.resume(run, { ...context, cwd: this.cwd, rootTask: run.rootTask, agents, modelOverrides: this.modelOverrides, thinkingOverrides: this.thinkingOverrides })
-      : await runner.run(run.route, { ...context, cwd: this.cwd, rootTask: run.rootTask, agents, modelOverrides: this.modelOverrides, thinkingOverrides: this.thinkingOverrides });
+    const resumed = await Effect.runPromise(resumeWorkerRunnerEffect(runner, run, { ...context, cwd: this.cwd, rootTask: run.rootTask, agents, modelOverrides: this.modelOverrides, thinkingOverrides: this.thinkingOverrides }));
     const candidates = resumed.steps.flatMap((step) => step.output?.memoryCandidates ?? []);
     if (candidates.length > 0) {
       if (context.extensionContext) this.persistMemoriesAfterToolResult(candidates, resumed.id, context.extensionContext.hasUI);

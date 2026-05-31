@@ -11,6 +11,7 @@ import {
   defineTool,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { Effect } from "effect";
 import { Type } from "typebox";
 import { ArtifactStore, type ArtifactFeatureStatus } from "./artifacts.ts";
 import type { BudgetPolicy } from "./budget.ts";
@@ -449,7 +450,11 @@ export function createChildTools(policy: ChildToolPolicy): ToolDefinition[] {
     ["chalin_memory_write", createChalinMemoryWriteTool(policy)],
     ["chalin_memory_revise", createChalinMemoryReviseTool(policy)],
   ];
-  return tools.filter(([name]) => policy.allowedTools.has(name)).map(([, tool]) => tool);
+  return Effect.runSync(Effect.forEach(
+    tools.filter(([name]) => policy.allowedTools.has(name)),
+    ([, tool]) => Effect.succeed(tool),
+    { concurrency: 4 },
+  ).pipe(Effect.withSpan("child-tools.create")));
 }
 
 export function createProjectDiscoveryTool(policy: ChildToolPolicy): ToolDefinition {

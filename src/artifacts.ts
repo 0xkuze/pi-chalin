@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { Context, Effect, Layer } from "effect";
 import { resolveChalinPaths, type ChalinPathsOptions } from "./paths.ts";
 import type { RunState } from "./schemas.ts";
 
@@ -89,6 +90,27 @@ export interface RunArtifactSummary {
   warnings: string[];
   metrics?: RunState["metrics"];
   createdAt: string;
+}
+
+interface ArtifactServiceShape {
+  readonly store: ArtifactStore;
+  readonly recordRun: (run: RunState) => Effect.Effect<RunArtifactSummary, unknown>;
+}
+
+class ArtifactService extends Context.Tag("pi-chalin/Artifacts")<ArtifactService, ArtifactServiceShape>() {}
+
+export function artifactStoreLayer(store: ArtifactStore): Layer.Layer<ArtifactService> {
+  return Layer.succeed(ArtifactService, {
+    store,
+    recordRun: (run) => Effect.tryPromise(() => store.recordRun(run)),
+  });
+}
+
+export function recordRunArtifactEffect(store: ArtifactStore, run: RunState): Effect.Effect<RunArtifactSummary, unknown> {
+  return Effect.gen(function* () {
+    const artifacts = yield* ArtifactService;
+    return yield* artifacts.recordRun(run);
+  }).pipe(Effect.provide(artifactStoreLayer(store)), Effect.withSpan("artifacts.recordRun"));
 }
 
 export class ArtifactStore {

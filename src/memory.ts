@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import initSqlJs from "sql.js-fts5/dist/sql-asm.js";
+import { Context, Effect, Layer } from "effect";
 import { resolveChalinPaths, type ChalinPathsOptions } from "./paths.ts";
 import type { AgentConcern, MemoryAuditEvent, MemoryAuditEventType, MemoryCandidate, MemoryRecord } from "./schemas.ts";
 
@@ -54,7 +55,50 @@ export interface MemoryStoreLike {
 type SqlJsStatic = any;
 type SqlJsDatabase = any;
 
-let sqlModulePromise: Promise<SqlJsStatic> | undefined;
+interface SqlJsService {
+  readonly module: Effect.Effect<SqlJsStatic, unknown>;
+}
+
+class SqlJs extends Context.Tag("pi-chalin/SqlJs")<SqlJs, SqlJsService>() {}
+
+const cachedSqlModule = Effect.runSync(Effect.cached(Effect.tryPromise(() => initSqlJs())));
+const SqlJsLive = Layer.succeed(SqlJs, { module: cachedSqlModule });
+
+interface MemoryStoreServiceShape {
+  readonly store: MemoryStoreLike;
+  readonly submitCandidates: (candidates: MemoryCandidate[]) => Effect.Effect<MemoryRecord[], unknown>;
+  readonly list: (status?: MemoryRecord["status"]) => Effect.Effect<MemoryRecord[], unknown>;
+  readonly pendingCount: Effect.Effect<number, unknown>;
+  readonly approve: (id: string) => Effect.Effect<MemoryRecord | undefined, unknown>;
+  readonly reject: (id: string) => Effect.Effect<MemoryRecord | undefined, unknown>;
+  readonly delete: (id: string) => Effect.Effect<boolean, unknown>;
+  readonly search: (query: string, limit?: number) => Effect.Effect<MemorySearchResult[], unknown>;
+  readonly retrieve: (request: MemoryContextRequest) => Effect.Effect<MemoryContextBundle, unknown>;
+  readonly revise: (id: string, input: MemoryRevisionInput) => Effect.Effect<MemoryRecord | undefined, unknown>;
+  readonly events: (recordId?: string) => Effect.Effect<MemoryAuditEvent[], unknown>;
+}
+
+class MemoryStoreService extends Context.Tag("pi-chalin/MemoryStore")<MemoryStoreService, MemoryStoreServiceShape>() {}
+
+export function memoryStoreLayer(store: MemoryStoreLike): Layer.Layer<MemoryStoreService> {
+  return Layer.succeed(MemoryStoreService, {
+    store,
+    submitCandidates: (candidates) => Effect.tryPromise(() => store.submitCandidates(candidates)),
+    list: (status) => Effect.tryPromise(() => store.list(status)),
+    pendingCount: Effect.tryPromise(() => store.pendingCount()),
+    approve: (id) => Effect.tryPromise(() => store.approve(id)),
+    reject: (id) => Effect.tryPromise(() => store.reject(id)),
+    delete: (id) => Effect.tryPromise(() => store.delete(id)),
+    search: (query, limit) => Effect.tryPromise(() => store.search(query, limit)),
+    retrieve: (request) => Effect.tryPromise(() => store.retrieve(request)),
+    revise: (id, input) => Effect.tryPromise(() => store.revise(id, input)),
+    events: (recordId) => Effect.tryPromise(() => store.events(recordId)),
+  });
+}
+
+export function createMemoryStoreLayer(options: ChalinPathsOptions): Layer.Layer<MemoryStoreService> {
+  return memoryStoreLayer(new MemoryStore(options));
+}
 
 export class MemoryStore {
   private readonly dbPath: string;
@@ -305,17 +349,24 @@ export class MemoryStore {
   }
 
   private async withDb<T>(write: boolean, fn: (db: SqlJsDatabase) => T): Promise<T> {
-    fs.mkdirSync(path.dirname(this.dbPath), { recursive: true });
-    const SQL = await getSqlModule();
-    const db = fs.existsSync(this.dbPath) ? new SQL.Database(fs.readFileSync(this.dbPath)) : new SQL.Database();
-    try {
-      migrate(db);
-      const result = fn(db);
-      if (write) fs.writeFileSync(this.dbPath, Buffer.from(db.export()));
-      return result;
-    } finally {
-      db.close();
-    }
+    return Effect.runPromise(this.withDbEffect(write, fn));
+  }
+
+  private withDbEffect<T>(write: boolean, fn: (db: SqlJsDatabase) => T): Effect.Effect<T, unknown> {
+    const self = this;
+    return Effect.gen(function* () {
+      fs.mkdirSync(path.dirname(self.dbPath), { recursive: true });
+      const SQL = yield* getSqlModuleEffect();
+      const db = fs.existsSync(self.dbPath) ? new SQL.Database(fs.readFileSync(self.dbPath)) : new SQL.Database();
+      try {
+        migrate(db);
+        const result = fn(db);
+        if (write) fs.writeFileSync(self.dbPath, Buffer.from(db.export()));
+        return result;
+      } finally {
+        db.close();
+      }
+    }).pipe(Effect.withSpan("memory.withDb"));
   }
 }
 
@@ -334,9 +385,11 @@ export function prepareMemoryRecords(candidates: MemoryCandidate[], now = new Da
   return dedupeCandidates(candidates).map((candidate) => buildMemoryRecord(candidate, now));
 }
 
-async function getSqlModule(): Promise<SqlJsStatic> {
-  sqlModulePromise ??= initSqlJs();
-  return sqlModulePromise;
+function getSqlModuleEffect(): Effect.Effect<SqlJsStatic, unknown> {
+  return Effect.gen(function* () {
+    const sql = yield* SqlJs;
+    return yield* sql.module;
+  }).pipe(Effect.provide(SqlJsLive), Effect.withSpan("memory.sql.init"));
 }
 
 function migrate(db: SqlJsDatabase): void {
