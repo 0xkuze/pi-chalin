@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -76,7 +77,46 @@ test("workflow eval case bank covers real task types", () => {
   assert.ok(listWorkflowHoldoutCases().some((item) => item.id === "holdout-python-slugify"));
   assert.ok(listWorkflowHoldoutCases().some((item) => item.id === "holdout-go-ttl-cache"));
   assert.ok(listWorkflowHoldoutCases().some((item) => item.id === "holdout-docs-runbook"));
+  assert.ok(listWorkflowHoldoutCases().some((item) => item.id === "holdout-terminal-pr-body-loop"));
   assert.ok(listWorkflowHoldoutCases().every((item) => item.suite === "holdout"));
+});
+
+test("terminal PR holdout fixture is synthetic and scores only after fake gh create", () => {
+  const fixture = createWorkflowFixture("holdout-terminal-pr-body-loop");
+  const before = scoreWorkflowWorkspace(fixture.cwd, fixture.case, {
+    finalText: "",
+    validateTests: false,
+  });
+  assert.equal(before.pass, false);
+  assert.ok(before.missing.includes("file:outputs/pr-created.json"));
+
+  fs.mkdirSync(path.join(fixture.cwd, "outputs"), { recursive: true });
+  fs.writeFileSync(path.join(fixture.cwd, "outputs", "pr-body.md"), "## Summary\n\nTerminal PR guard.\n", "utf-8");
+  const created = spawnSync("./bin/gh", [
+    "pr",
+    "create",
+    "--base",
+    "main",
+    "--head",
+    "feat/pi-terminal-pr",
+    "--title",
+    "feat: improve terminal PR guard",
+    "--body-file",
+    "outputs/pr-body.md",
+    "--label",
+    "enhancement",
+    "--label",
+    "documentation",
+  ], { cwd: fixture.cwd, encoding: "utf-8" });
+  assert.equal(created.status, 0, created.stderr);
+  assert.match(created.stdout, /https:\/\/example\.test\/0xkuze\/pi-chalin\/pull\/42/);
+
+  const report = scoreWorkflowWorkspace(fixture.cwd, fixture.case, {
+    finalText: "PR: https://example.test/0xkuze/pi-chalin/pull/42. Verification: bun test. Body: outputs/pr-body.md.",
+    validateTests: true,
+  });
+  assert.equal(report.pass, true, JSON.stringify(report.critical, null, 2));
+  assert.ok(report.matched.includes("content:outputs/pr-created.json:fake gh recorded PR creation"));
 });
 
 test("workflow community case bank uses synthetic community-inspired projects only", () => {
@@ -3981,6 +4021,34 @@ test("workflow diagnostics summarize post-verification exploration waste", () =>
   assert.equal(gates.pass, false);
   assert.ok(gates.failures.some((item) => /post-verification shell calls 1/.test(item)));
   assert.ok(gates.failures.some((item) => /post-verification exploration 1/.test(item)));
+});
+
+test("workflow diagnostics summarize post-terminal PR body rewrite waste", () => {
+  const stdout = [
+    JSON.stringify({ type: "tool_execution_start", toolName: "bash", args: { command: "bun test" } }),
+    JSON.stringify({ type: "tool_execution_end", toolName: "bash", isError: false, result: { content: "pass" } }),
+    JSON.stringify({ type: "tool_execution_start", toolName: "write", args: { path: "outputs/pr-body.md", content: "body" } }),
+    JSON.stringify({ type: "tool_execution_end", toolName: "write", isError: false, result: { content: "ok" } }),
+    JSON.stringify({ type: "tool_execution_start", toolName: "bash", args: { command: "./bin/gh pr create --base main --head feat/pi-terminal-pr --title \"feat: improve terminal PR guard\" --body-file outputs/pr-body.md --label enhancement" } }),
+    JSON.stringify({ type: "tool_execution_end", toolName: "bash", isError: false, result: { content: "https://example.test/0xkuze/pi-chalin/pull/42" } }),
+    JSON.stringify({ type: "tool_execution_start", toolName: "write", args: { path: "outputs/pr-body.md", content: "body again" } }),
+  ].join("\n");
+
+  const diagnostics = workflowDiagnostics(getWorkflowEvalCase("holdout-terminal-pr-body-loop"), stdout, "", undefined, undefined, undefined, false);
+  assert.equal(diagnostics.traceSummary.firstTerminalActionEventIndex, 5);
+  assert.equal(diagnostics.traceSummary.postTerminalToolCalls, 1);
+  assert.deepEqual(diagnostics.traceSummary.postTerminalToolCallsByName, { write: 1 });
+
+  const gates = evaluateWorkflowRegressionGates([{
+    variant: "chalin",
+    runIndex: 1,
+    workspace: { caseId: "holdout-terminal-pr-body-loop", pass: true, score: 100 },
+    trace: { pass: true, score: 100, warnings: [], critical: [] },
+    diagnostics: { ...diagnostics, verificationPassed: true, finalAnswerMissing: false, antiCheat: { pass: true, critical: [], warnings: [], accessed: [] } },
+    judge: undefined,
+  } as never], []);
+  assert.equal(gates.pass, false);
+  assert.ok(gates.failures.some((item) => /post-terminal tool calls 1/.test(item)));
 });
 
 test("workflow verification detector requires a passing verification bash call", () => {

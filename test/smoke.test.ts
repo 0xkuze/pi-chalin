@@ -706,6 +706,54 @@ test("direct bounded edits get one completion nudge after verification", async (
   assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-completion-nudge").length, 3, "new edits after verification require a new completion nudge");
 });
 
+test("direct PR creation is terminal and stops pr body rewrite loops", async () => {
+  const fake = createFakePi();
+  registerPiChalin(fake.api as never);
+  const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
+  const contextHandler = fake.handlers.get("context")?.[0] as (event: { type: "context"; messages: unknown[] }, ctx: unknown) => unknown;
+  const toolExecutionEnd = fake.handlers.get("tool_execution_end")?.[0] as (event: { toolName: string; isError?: boolean; args?: Record<string, unknown> }, ctx: unknown) => void;
+  const ctx = {
+    cwd: tempDir("pi-chalin-pr-terminal-"),
+    hasUI: false,
+    model: undefined,
+    modelRegistry: { getAvailable: () => [] },
+  };
+  await beforeAgentStart({
+    type: "before_agent_start",
+    prompt: "open a pull request fully detailed pointing main branch put labels and all the recommended thing in the description",
+    systemPrompt: "base",
+    systemPromptOptions: {},
+  }, ctx);
+
+  toolExecutionEnd({ toolName: "bash", isError: false, args: { command: "bun test" } }, ctx);
+  toolExecutionEnd({ toolName: "write", isError: false, args: { path: "outputs/pr-body.md", content: "## Summary\n\nReady.\n" } }, ctx);
+  toolExecutionEnd({
+    toolName: "bash",
+    isError: false,
+    args: {
+      command: "gh pr create --base main --head feat/smarter-orchestration-token-prompts --title \"feat: improve orchestration\" --body-file outputs/pr-body.md --label enhancement",
+    },
+  }, ctx);
+
+  const terminalNudges = fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-terminal-completion-nudge");
+  assert.equal(terminalNudges.length, 1);
+  assert.match((terminalNudges[0]?.message as { content?: string }).content ?? "", /external workflow completed successfully/i);
+  assert.match((terminalNudges[0]?.message as { content?: string }).content ?? "", /Final now/i);
+  assert.match((terminalNudges[0]?.message as { content?: string }).content ?? "", /rewrite PR body files/i);
+
+  const terminalContext = contextHandler({ type: "context", messages: [] }, ctx) as { messages?: Array<{ customType?: string; content?: string }> } | undefined;
+  const terminalGuard = terminalContext?.messages?.find((message) => message.customType === "pi-chalin-direct-critical-guard");
+  assert.match(terminalGuard?.content ?? "", /external workflow already completed/i);
+  assert.match(terminalGuard?.content ?? "", /gh pr create/i);
+  assert.match(terminalGuard?.content ?? "", /Do not call more tools/i);
+
+  toolExecutionEnd({ toolName: "write", isError: false, args: { path: "outputs/pr-body.md", content: "## Summary\n\nReady again.\n" } }, ctx);
+  const driftNudges = fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-post-terminal-drift-nudge");
+  assert.equal(driftNudges.length, 1);
+  assert.match((driftNudges[0]?.message as { content?: string }).content ?? "", /terminal external action already completed/i);
+  assert.match((driftNudges[0]?.message as { content?: string }).content ?? "", /Do not mutate or rewrite support artifacts/i);
+});
+
 
 test("bounded direct prompts do not hide orchestration tools programmatically", async () => {
   const fake = createFakePi();

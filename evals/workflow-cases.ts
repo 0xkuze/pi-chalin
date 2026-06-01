@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { spawnSync } from "node:child_process";
 
 export type WorkflowCaseKind = "refactor" | "test-writing" | "small-feature" | "large-feature" | "scaffold" | "greenfield" | "bugfix" | "review-only";
 export type WorkflowCaseSuite = "calibration" | "holdout" | "community" | "complex";
@@ -124,6 +125,7 @@ export function listWorkflowHoldoutCases(): WorkflowEvalCase[] {
     holdoutLegacyCjsCase(),
     holdoutDocsRunbookCase(),
     holdoutBrokenTestsTriageCase(),
+    holdoutTerminalPrBodyLoopCase(),
   ];
 }
 
@@ -744,6 +746,100 @@ function holdoutBrokenTestsTriageCase(): WorkflowEvalCase {
       writeBaseBunProject(cwd);
       write(cwd, "src/normalizeEmail.ts", `export function normalizeEmail(input: string): string {\n  return input;\n}\n`);
       write(cwd, "test/normalizeEmail.test.ts", `import { test } from "bun:test";\nimport assert from "node:assert/strict";\nimport { normalizeEmail } from "../src/normalizeEmail.ts";\n\ntest("normalizes email whitespace and case", () => {\n  assert.equal(normalizeEmail(" USER@EXAMPLE.COM "), "user@example.com");\n});\n`);
+    },
+  };
+}
+
+function holdoutTerminalPrBodyLoopCase(): WorkflowEvalCase {
+  return {
+    id: "holdout-terminal-pr-body-loop",
+    kind: "review-only",
+    suite: "holdout",
+    title: "Create a simulated PR and stop after terminal success",
+    prompt: [
+      "Abre un pull request simulado hacia main para la rama feat/pi-terminal-pr usando el CLI local `./bin/gh`.",
+      "Primero verifica con `bun test`. Si necesitas un body profesional, escríbelo en `outputs/pr-body.md` y úsalo con `--body-file`.",
+      "Ejecuta `./bin/gh pr create --base main --head feat/pi-terminal-pr --title \"feat: improve terminal PR guard\" --body-file outputs/pr-body.md --label enhancement --label documentation`.",
+      "Cuando el comando devuelva la URL del PR, responde final inmediatamente con la URL y la verificación. NO vuelvas a escribir `outputs/pr-body.md` ni sigas puliendo artifacts después de crear el PR.",
+    ].join(" "),
+    sourceProfile: { kind: "synthetic", privateData: false },
+    expected: {
+      requiredFiles: ["package.json", "src/orchestration.ts", "test/orchestration.test.ts", "bin/gh", "outputs/pr-created.json"],
+      requiredContent: [
+        check("package.json", "test script is available", ["scripts", "test", "bun test"], 10),
+        check("src/orchestration.ts", "source exposes summarizer", ["export function summarizeChange", "terminal", "direct"], 12),
+        check("test/orchestration.test.ts", "tests summarizer", ["summarizeChange", "assert|expect", "terminal"], 12),
+        check("outputs/pr-created.json", "fake gh recorded PR creation", ["https://example.test/0xkuze/pi-chalin/pull/42", "feat/pi-terminal-pr", "outputs/pr-body.md", "enhancement", "documentation"], 34),
+      ],
+      finalAnswerPatterns: ["https://example\\.test/0xkuze/pi-chalin/pull/42", "bun test", "outputs/pr-body.md|PR"],
+      maxFiles: 9,
+      maxDurationMs: 45_000,
+      validation: { runTests: true, allowSkip: false },
+      antiCheat: { notes: ["The local fake ./bin/gh is the only allowed GitHub surface; the case must not require network access."] },
+    },
+    setup(cwd) {
+      writeBaseBunProject(cwd);
+      write(cwd, "src/orchestration.ts", `export function summarizeChange(topic: string): string {\n  return \`terminal direct workflow: \${topic.trim()}\`;\n}\n`);
+      write(cwd, "test/orchestration.test.ts", `import { test } from "bun:test";\nimport assert from "node:assert/strict";\nimport { summarizeChange } from "../src/orchestration.ts";\n\ntest("summarizes terminal direct workflow", () => {\n  assert.equal(summarizeChange("PR guard"), "terminal direct workflow: PR guard");\n});\n`);
+      write(cwd, "README.md", `# Terminal PR Guard Fixture\n\nUse \`bun test\`, then create a simulated PR with \`./bin/gh pr create\`.\n`);
+      write(cwd, "bin/gh", `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" != "pr" ]]; then
+  echo "unsupported gh surface" >&2
+  exit 2
+fi
+subcommand="\${2:-}"
+shift 2
+case "$subcommand" in
+  create)
+    body_file=""
+    title=""
+    base=""
+    head=""
+    labels=()
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --body-file) body_file="\${2:-}"; shift 2 ;;
+        --title) title="\${2:-}"; shift 2 ;;
+        --base) base="\${2:-}"; shift 2 ;;
+        --head) head="\${2:-}"; shift 2 ;;
+        --label) labels+=("\${2:-}"); shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    if [[ -z "$body_file" || ! -s "$body_file" ]]; then
+      echo "missing --body-file content" >&2
+      exit 1
+    fi
+    mkdir -p outputs
+    labels_json="["
+    for label in "\${labels[@]}"; do
+      escaped_label="\${label//\\"/\\\\\\"}"
+      if [[ "$labels_json" != "[" ]]; then labels_json+=","; fi
+      labels_json+="\\"$escaped_label\\""
+    done
+    labels_json+="]"
+    cat > outputs/pr-created.json <<EOF
+{"url":"https://example.test/0xkuze/pi-chalin/pull/42","base":"$base","head":"$head","title":"$title","bodyFile":"$body_file","labels":$labels_json}
+EOF
+    echo "https://example.test/0xkuze/pi-chalin/pull/42"
+    ;;
+  view)
+    echo "https://example.test/0xkuze/pi-chalin/pull/42"
+    ;;
+  *)
+    echo "unsupported gh pr subcommand: $subcommand" >&2
+    exit 2
+    ;;
+esac
+`);
+      fs.chmodSync(path.join(cwd, "bin/gh"), 0o755);
+      spawnSync("git", ["init"], { cwd, stdio: "ignore" });
+      spawnSync("git", ["config", "user.email", "workflow@example.test"], { cwd, stdio: "ignore" });
+      spawnSync("git", ["config", "user.name", "Workflow Eval"], { cwd, stdio: "ignore" });
+      spawnSync("git", ["add", "."], { cwd, stdio: "ignore" });
+      spawnSync("git", ["commit", "-m", "chore: seed terminal pr fixture"], { cwd, stdio: "ignore" });
+      spawnSync("git", ["switch", "-c", "feat/pi-terminal-pr"], { cwd, stdio: "ignore" });
     },
   };
 }

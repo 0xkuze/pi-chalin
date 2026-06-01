@@ -76,9 +76,12 @@ export interface WorkflowRunTraceSummary {
   directEligible: boolean;
   firstMutationEventIndex?: number;
   firstPassingVerificationEventIndex?: number;
+  firstTerminalActionEventIndex?: number;
   postVerificationExplorationCalls: number;
   postVerificationShellCalls: number;
   postVerificationToolCallsByName: Record<string, number>;
+  postTerminalToolCalls: number;
+  postTerminalToolCallsByName: Record<string, number>;
   toolCallSequence: string[];
 }
 
@@ -1014,6 +1017,11 @@ export function evaluateWorkflowRegressionGates(outputs: WorkflowRunOutput[], gr
     if (isChalin && output.diagnostics.traceSummary?.postVerificationShellCalls > 0) {
       const message = `${label}: post-verification shell calls ${output.diagnostics.traceSummary.postVerificationShellCalls} after passing verification`;
       if (boundedDirect) failures.push(message);
+      else warnings.push(message);
+    }
+    if (isChalin && (output.diagnostics.traceSummary?.postTerminalToolCalls ?? 0) > 0) {
+      const message = `${label}: post-terminal tool calls ${output.diagnostics.traceSummary.postTerminalToolCalls} after successful external terminal action`;
+      if (!shouldRequireChalinRoute(evalCase)) failures.push(message);
       else warnings.push(message);
     }
     if (isChalin && !shouldRequireChalinRoute(evalCase) && output.diagnostics.chalinRouteCalls > thresholds.maxDirectChalinRouteCalls) {
@@ -2460,9 +2468,12 @@ export function summarizeWorkflowRunTrace(evalCase: WorkflowEvalCase, parsed: Re
   const toolStarts = parsed.toolEvents.filter((event) => event.phase !== "end");
   const firstMutationEventIndex = toolStarts.find((event) => isMutationToolEvent(event.name, event.argsText))?.index;
   const firstPassingVerificationEventIndex = firstPassingVerificationEndIndex(parsed.toolEvents);
+  const firstTerminalActionEventIndex = firstSuccessfulTerminalActionEndIndex(parsed.toolEvents);
   const postVerificationToolCallsByName: Record<string, number> = {};
+  const postTerminalToolCallsByName: Record<string, number> = {};
   let postVerificationExplorationCalls = 0;
   let postVerificationShellCalls = 0;
+  let postTerminalToolCalls = 0;
 
   if (firstPassingVerificationEventIndex !== undefined) {
     for (const event of parsed.toolEvents) {
@@ -2477,13 +2488,25 @@ export function summarizeWorkflowRunTrace(evalCase: WorkflowEvalCase, parsed: Re
     }
   }
 
+  if (firstTerminalActionEventIndex !== undefined) {
+    for (const event of parsed.toolEvents) {
+      if (event.index <= firstTerminalActionEventIndex || event.phase === "end") continue;
+      if (isAllowedPostTerminalToolEvent(event.name, event.argsText)) continue;
+      postTerminalToolCalls += 1;
+      postTerminalToolCallsByName[event.name] = (postTerminalToolCallsByName[event.name] ?? 0) + 1;
+    }
+  }
+
   return {
     directEligible: !shouldRequireChalinRoute(evalCase),
     firstMutationEventIndex,
     firstPassingVerificationEventIndex,
+    firstTerminalActionEventIndex,
     postVerificationExplorationCalls,
     postVerificationShellCalls,
     postVerificationToolCallsByName,
+    postTerminalToolCalls,
+    postTerminalToolCallsByName,
     toolCallSequence: toolStarts.map((event) => event.name).slice(0, 80),
   };
 }
@@ -2504,6 +2527,22 @@ function firstPassingVerificationEndIndex(toolEvents: ReturnType<typeof parsePiJ
   return undefined;
 }
 
+function firstSuccessfulTerminalActionEndIndex(toolEvents: ReturnType<typeof parsePiJsonTrace>["toolEvents"]): number | undefined {
+  let pendingTerminalStart = false;
+  for (const event of toolEvents) {
+    if (event.name !== "bash") continue;
+    if (event.phase !== "end" && isTerminalWorkflowCommand(event.argsText)) {
+      pendingTerminalStart = true;
+      continue;
+    }
+    if (event.phase === "end" && pendingTerminalStart) {
+      if (!event.isError) return event.index;
+      pendingTerminalStart = false;
+    }
+  }
+  return undefined;
+}
+
 function isMutationToolEvent(name: string, argsText: string): boolean {
   if (name === "edit" || name === "write") return true;
   if (name !== "bash") return false;
@@ -2518,6 +2557,70 @@ function isPostVerificationExplorationTool(name: string): boolean {
     || name === "ls"
     || name === "chalin_project_discovery"
     || name === "chalin_project_snapshot";
+}
+
+function isAllowedPostTerminalToolEvent(name: string, argsText: string): boolean {
+  return name === "bash" && ghPrWorkflowCommand(argsText)?.subcommand === "view";
+}
+
+function isTerminalWorkflowCommand(argsText: string): boolean {
+  const command = commandTextFromArgsText(argsText);
+  const match = ghPrWorkflowCommand(command);
+  return match?.subcommand === "create" && !match.args.includes("--dry-run");
+}
+
+function ghPrWorkflowCommand(argsText: string): { subcommand: string; args: string[] } | undefined {
+  const command = commandTextFromArgsText(argsText);
+  const tokens = shellWords(command).map((token) => token.toLowerCase());
+  for (let index = 0; index < tokens.length - 2; index += 1) {
+    if (!isGhWorkflowExecutableToken(tokens[index] ?? "") || tokens[index + 1] !== "pr") continue;
+    const subcommand = tokens[index + 2];
+    if (!subcommand) return undefined;
+    return { subcommand, args: tokens.slice(index + 3) };
+  }
+  return undefined;
+}
+
+function commandTextFromArgsText(argsText: string): string {
+  try {
+    const parsed = JSON.parse(argsText) as { command?: unknown };
+    if (typeof parsed.command === "string") return parsed.command;
+  } catch {
+    // Trace parsers sometimes already pass a raw command string.
+  }
+  return argsText;
+}
+
+function isGhWorkflowExecutableToken(token: string): boolean {
+  return token === "gh" || token.endsWith("/gh");
+}
+
+function shellWords(command: string): string[] {
+  const words: string[] = [];
+  let current = "";
+  let quote: "'" | "\"" | undefined;
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index] ?? "";
+    if (quote) {
+      if (char === quote) quote = undefined;
+      else current += char;
+      continue;
+    }
+    if (char === "'" || char === "\"") {
+      quote = char;
+      continue;
+    }
+    if (char === " " || char === "\t" || char === "\n" || char === "\r") {
+      if (current) {
+        words.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += char;
+  }
+  if (current) words.push(current);
+  return words;
 }
 
 function containsMarker(text: string, marker: string): boolean {
@@ -3367,7 +3470,7 @@ export function resolveComparativeJudgeMode(value: string): WorkflowComparativeJ
 }
 
 function emptyDiagnostics(): WorkflowEfficiencyDiagnostics {
-  return { jsonEvents: 0, toolEvents: 0, toolCallsByName: {}, chalinRouteCalls: 0, chalinRouteAgentRuns: 0, chalinRouteAgentSteps: 0, chalinRouteAgents: [], subagentCalls: 0, chalinRouteNonExecutable: 0, chalinRouteValidationErrors: 0, toolValidationErrors: 0, duplicateToolCalls: 0, readCalls: 0, writeCalls: 0, editCalls: 0, retries: 0, agentRetries: 0, infraRetries: 0, usage: emptyUsage(), tokenTotal: 0, verificationPassed: false, verificationToolCalls: 0, traceSummary: { directEligible: true, postVerificationExplorationCalls: 0, postVerificationShellCalls: 0, postVerificationToolCallsByName: {}, toolCallSequence: [] }, finalAnswerMissing: false, antiCheat: { pass: true, critical: [], warnings: [], accessed: [] } };
+  return { jsonEvents: 0, toolEvents: 0, toolCallsByName: {}, chalinRouteCalls: 0, chalinRouteAgentRuns: 0, chalinRouteAgentSteps: 0, chalinRouteAgents: [], subagentCalls: 0, chalinRouteNonExecutable: 0, chalinRouteValidationErrors: 0, toolValidationErrors: 0, duplicateToolCalls: 0, readCalls: 0, writeCalls: 0, editCalls: 0, retries: 0, agentRetries: 0, infraRetries: 0, usage: emptyUsage(), tokenTotal: 0, verificationPassed: false, verificationToolCalls: 0, traceSummary: { directEligible: true, postVerificationExplorationCalls: 0, postVerificationShellCalls: 0, postVerificationToolCallsByName: {}, postTerminalToolCalls: 0, postTerminalToolCallsByName: {}, toolCallSequence: [] }, finalAnswerMissing: false, antiCheat: { pass: true, critical: [], warnings: [], accessed: [] } };
 }
 
 export function extractWorkflowUsage(stdout: string): WorkflowUsageTotals {

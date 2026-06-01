@@ -109,7 +109,7 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
 
     const eventArgs = (event as { args?: { command?: unknown; path?: unknown } }).args;
     const fallbackArgs = takeToolStart(pi, event.toolName);
-    const { shouldProgressNudge, shouldReadyToVerifyNudge, shouldFailureNudge, shouldCompletionNudge, shouldTestCoverageNudge, shouldWeakTestCoverageNudge, shouldPackageMetadataNudge, shouldParallelSurfaceNudge, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldPreMutationVerificationNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldDocsEvidenceLoopNudge, shouldLocatorLoopNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, verificationCommand, docsOnlyMutation, policyJudge } = recordDirectToolCompletion({
+    const { shouldProgressNudge, shouldReadyToVerifyNudge, shouldFailureNudge, shouldCompletionNudge, shouldTestCoverageNudge, shouldWeakTestCoverageNudge, shouldPackageMetadataNudge, shouldParallelSurfaceNudge, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldTerminalCompletionNudge, shouldPostTerminalDriftNudge, shouldPreMutationVerificationNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldDocsEvidenceLoopNudge, shouldLocatorLoopNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, verificationCommand, docsOnlyMutation, policyJudge } = recordDirectToolCompletion({
       toolName: event.toolName,
       isError: event.isError,
       command: typeof eventArgs?.command === "string" ? eventArgs.command : fallbackArgs?.command,
@@ -194,6 +194,28 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
       pi.sendMessage({
         customType: "pi-chalin-docs-only-shell-nudge",
         content: "This prompt names only docs artifacts. Stop running shell verification or build/test discovery. Gather minimal evidence before the docs write/edit; after the write, only read the updated docs artifact and answer. Document searched/not-found gaps instead of chasing more tools. Do not include failed/disallowed shell commands as final Verification.",
+        display: false,
+      }, { triggerTurn: false, deliverAs: "steer" });
+    }
+    if (shouldTerminalCompletionNudge) {
+      pi.sendMessage({
+        customType: "pi-chalin-terminal-completion-nudge",
+        content: [
+          "The requested external workflow completed successfully.",
+          "Final now. Do not call tools, rewrite PR body files, rerun support commands, or keep polishing local artifacts.",
+          "Use the user's language and give a compact receipt with the PR/action result, verification already run, and any important notes.",
+        ].join("\n"),
+        display: false,
+      }, { triggerTurn: false, deliverAs: "steer" });
+    }
+    if (shouldPostTerminalDriftNudge) {
+      pi.sendMessage({
+        customType: "pi-chalin-post-terminal-drift-nudge",
+        content: [
+          "Hard stop: a terminal external action already completed for this user request.",
+          "Do not mutate or rewrite support artifacts such as PR body files after the PR/action is already created.",
+          "Your next assistant action must be the final answer; include the completed PR/action and the verification already performed.",
+        ].join("\n"),
         display: false,
       }, { triggerTurn: false, deliverAs: "steer" });
     }

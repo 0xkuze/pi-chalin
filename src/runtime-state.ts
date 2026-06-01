@@ -6,6 +6,8 @@ export type DirectToolEventPhase = "start" | "completed";
 export type DirectNudgeKind =
   | "workspace-boundary"
   | "docs-shell"
+  | "terminal-completion"
+  | "post-terminal-drift"
   | "pre-mutation-verification"
   | "post-verification-shell"
   | "post-verification-exploration"
@@ -106,6 +108,8 @@ export interface DirectToolCompletionAdapter {
   shouldParallelSurfaceNudge: boolean;
   shouldWorkspaceBoundaryNudge: boolean;
   shouldDocsShellNudge: boolean;
+  shouldTerminalCompletionNudge: boolean;
+  shouldPostTerminalDriftNudge: boolean;
   shouldPreMutationVerificationNudge: boolean;
   shouldPostVerificationShellNudge: boolean;
   shouldPostVerificationExplorationNudge: boolean;
@@ -153,6 +157,10 @@ interface DirectCompletionState {
   readToolCount: number;
   verificationAttemptCount: number;
   preMutationVerificationNudgeSent: boolean;
+  terminalActionObserved: boolean;
+  terminalActionCommand?: string;
+  terminalCompletionNudgeSent: boolean;
+  postTerminalDriftNudgeSent: boolean;
   testCoverageNudgeSent: boolean;
   testCoverageReviewObserved: boolean;
   verificationObserved: boolean;
@@ -190,6 +198,7 @@ export interface DirectPolicySnapshot {
   testMutationObserved: boolean;
   verificationObserved: boolean;
   verificationCommand?: string;
+  terminalActionCommand?: string;
   docsOnlyMutation: boolean;
   changedPaths: string[];
   readPaths: string[];
@@ -432,6 +441,18 @@ export function recordDirectToolCompletion(options: { toolName: string; isError?
   if (options.toolName === "bash" && options.command) {
     recordDeletedPathsFromCommand(options.command);
   }
+  let shouldTerminalCompletionNudge = false;
+  let shouldPostTerminalDriftNudge = false;
+  if (
+    directCompletion.terminalActionObserved
+    && !options.isError
+    && isPostTerminalDriftTool(options.toolName)
+    && !isAllowedTerminalFollowupCommand(options.command)
+    && !directCompletion.postTerminalDriftNudgeSent
+  ) {
+    shouldPostTerminalDriftNudge = true;
+    directCompletion.postTerminalDriftNudgeSent = true;
+  }
   const coverageReviewWasRequested = directCompletion.testCoverageNudgeSent;
   if (!directCompletion.mutationObserved && !options.isError) {
     recordPreMutationEvidenceTool(options.toolName);
@@ -448,7 +469,7 @@ export function recordDirectToolCompletion(options: { toolName: string; isError?
     directCompletion.readPaths.add(normalizeWorkflowPath(options.path));
   }
   if (options.toolName === "edit" || options.toolName === "write") {
-    if (options.isError) return directCompletionAdapter({ shouldProgressNudge: false, shouldReadyToVerifyNudge: false, shouldFailureNudge: false, shouldCompletionNudge: false, shouldTestCoverageNudge: false, shouldWeakTestCoverageNudge: false, shouldPackageMetadataNudge: false, shouldParallelSurfaceNudge: false, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldPreMutationVerificationNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldDocsEvidenceLoopNudge, shouldLocatorLoopNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, docsOnlyMutation: directDocsOnlyMutation() });
+    if (options.isError) return directCompletionAdapter({ shouldProgressNudge: false, shouldReadyToVerifyNudge: false, shouldFailureNudge: false, shouldCompletionNudge: false, shouldTestCoverageNudge: false, shouldWeakTestCoverageNudge: false, shouldPackageMetadataNudge: false, shouldParallelSurfaceNudge: false, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldTerminalCompletionNudge, shouldPostTerminalDriftNudge, shouldPreMutationVerificationNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldDocsEvidenceLoopNudge, shouldLocatorLoopNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, docsOnlyMutation: directDocsOnlyMutation() });
     justMutated = true;
     const recoveringFromVerificationFailure = directCompletion.failedVerificationNudgeSent && !directCompletion.verificationObserved;
     directCompletion.mutationObserved = true;
@@ -591,7 +612,15 @@ export function recordDirectToolCompletion(options: { toolName: string; isError?
     shouldFailureNudge = !directCompletion.failedVerificationNudgeSent;
     if (shouldFailureNudge) directCompletion.failedVerificationNudgeSent = true;
   } else if (options.isError) {
-    return directCompletionAdapter({ shouldProgressNudge, shouldReadyToVerifyNudge: false, shouldFailureNudge: false, shouldCompletionNudge: false, shouldTestCoverageNudge: false, shouldWeakTestCoverageNudge: false, shouldPackageMetadataNudge: false, shouldParallelSurfaceNudge: false, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldPreMutationVerificationNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldDocsEvidenceLoopNudge, shouldLocatorLoopNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, verificationCommand: directCompletion.verificationCommand, docsOnlyMutation });
+    return directCompletionAdapter({ shouldProgressNudge, shouldReadyToVerifyNudge: false, shouldFailureNudge: false, shouldCompletionNudge: false, shouldTestCoverageNudge: false, shouldWeakTestCoverageNudge: false, shouldPackageMetadataNudge: false, shouldParallelSurfaceNudge: false, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldTerminalCompletionNudge, shouldPostTerminalDriftNudge, shouldPreMutationVerificationNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldDocsEvidenceLoopNudge, shouldLocatorLoopNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, verificationCommand: directCompletion.verificationCommand, docsOnlyMutation });
+  }
+  if (options.toolName === "bash" && !options.isError && isTerminalDirectCommand(options.command)) {
+    directCompletion.terminalActionObserved = true;
+    directCompletion.terminalActionCommand = options.command?.trim();
+    if (!directCompletion.terminalCompletionNudgeSent) {
+      shouldTerminalCompletionNudge = true;
+      directCompletion.terminalCompletionNudgeSent = true;
+    }
   }
   if (
     directCompletion.failedVerificationNudgeSent
@@ -672,7 +701,7 @@ export function recordDirectToolCompletion(options: { toolName: string; isError?
     directCompletion.readbackStopNudgeSent = true;
   }
   if (shouldCompletionNudge) directCompletion.nudgeSent = true;
-  return directCompletionAdapter({ shouldProgressNudge, shouldReadyToVerifyNudge, shouldFailureNudge, shouldCompletionNudge, shouldTestCoverageNudge, shouldWeakTestCoverageNudge, shouldPackageMetadataNudge, shouldParallelSurfaceNudge, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldPreMutationVerificationNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldDocsEvidenceLoopNudge, shouldLocatorLoopNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, verificationCommand: directCompletion.verificationCommand, docsOnlyMutation });
+  return directCompletionAdapter({ shouldProgressNudge, shouldReadyToVerifyNudge, shouldFailureNudge, shouldCompletionNudge, shouldTestCoverageNudge, shouldWeakTestCoverageNudge, shouldPackageMetadataNudge, shouldParallelSurfaceNudge, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldTerminalCompletionNudge, shouldPostTerminalDriftNudge, shouldPreMutationVerificationNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldDocsEvidenceLoopNudge, shouldLocatorLoopNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, verificationCommand: directCompletion.verificationCommand, docsOnlyMutation });
 }
 
 const DIRECT_NUDGE_FLAGS = [
@@ -686,6 +715,8 @@ const DIRECT_NUDGE_FLAGS = [
   "shouldParallelSurfaceNudge",
   "shouldWorkspaceBoundaryNudge",
   "shouldDocsShellNudge",
+  "shouldTerminalCompletionNudge",
+  "shouldPostTerminalDriftNudge",
   "shouldPreMutationVerificationNudge",
   "shouldPostVerificationShellNudge",
   "shouldPostVerificationExplorationNudge",
@@ -705,6 +736,8 @@ const DIRECT_NUDGE_PRIORITY = [
   ["parallel-surface", "shouldParallelSurfaceNudge"],
   ["test-coverage", "shouldTestCoverageNudge"],
   ["failure", "shouldFailureNudge"],
+  ["post-terminal-drift", "shouldPostTerminalDriftNudge"],
+  ["terminal-completion", "shouldTerminalCompletionNudge"],
   ["completion", "shouldCompletionNudge"],
   ["docs-shell", "shouldDocsShellNudge"],
   ["pre-mutation-verification", "shouldPreMutationVerificationNudge"],
@@ -759,6 +792,8 @@ function policyJudgeForKind(kind: DirectNudgeKind, input: DirectNudgeSelectorInp
   const reasonByKind: Record<DirectNudgeKind, string> = {
     "workspace-boundary": "A mutation or verification left the current workspace boundary.",
     "docs-shell": "Docs-only work needs readback evidence rather than shell activity.",
+    "terminal-completion": "A terminal direct action completed the user's external workflow.",
+    "post-terminal-drift": "Tool use continued after a terminal direct action already completed the user's external workflow.",
     "pre-mutation-verification": "Verification ran before any mutation, so it cannot prove the requested change.",
     "post-verification-shell": "Shell use continued after passing verification without a new mutation.",
     "post-verification-exploration": "Exploration continued after passing verification without a new mutation.",
@@ -845,7 +880,7 @@ const semanticJudgeRelevantNudges = new Set<DirectNudgeKind>([
 ]);
 
 function nextActionForNudge(kind: DirectNudgeKind): PolicyJudgeNextAction {
-  if (kind === "completion") return "finalize";
+  if (kind === "completion" || kind === "terminal-completion") return "finalize";
   if (kind === "ready-to-verify" || kind === "source-and-test-ready" || kind === "pre-mutation-verification") return "verify";
   if (kind === "failure" || kind === "post-failure-evidence" || kind === "verification-loop") return "repair";
   if (kind === "workspace-boundary" || kind === "parallel-surface") return "block";
@@ -853,14 +888,14 @@ function nextActionForNudge(kind: DirectNudgeKind): PolicyJudgeNextAction {
 }
 
 function confidenceForNudge(kind: DirectNudgeKind): number {
-  if (kind === "completion" || kind === "workspace-boundary" || kind === "failure") return 0.9;
+  if (kind === "completion" || kind === "terminal-completion" || kind === "workspace-boundary" || kind === "failure") return 0.9;
   if (kind === "weak-test-coverage" || kind === "package-metadata" || kind === "parallel-surface") return 0.82;
   if (kind === "progress") return 0.58;
   return 0.72;
 }
 
 function blockingGapForNudge(kind: DirectNudgeKind): boolean {
-  return kind !== "progress" && kind !== "completion";
+  return kind !== "progress" && kind !== "completion" && kind !== "terminal-completion";
 }
 
 function directNudgeFlagForKind(kind: DirectNudgeKind): DirectNudgeFlag {
@@ -874,6 +909,18 @@ export function getDirectChangedPaths(): string[] {
 }
 
 export function getDirectCriticalGuardContextMessage(): string | undefined {
+  if (directCompletion.terminalActionObserved) {
+    const command = directCompletion.terminalActionCommand ? ` with \`${directCompletion.terminalActionCommand}\`` : "";
+    const drift = directCompletion.postTerminalDriftNudgeSent
+      ? " Later tool use already tried to mutate or inspect support artifacts after that terminal action."
+      : "";
+    return [
+      "pi-chalin critical direct-work guard.",
+      `Hard stop: the user's external workflow already completed${command}.${drift}`,
+      "Your next assistant action must be the final answer in the user's language with the resulting PR/action, verification already performed, and compact notes.",
+      "Do not call more tools, rewrite PR body files, rerun support commands, or keep polishing local artifacts after the external action succeeded.",
+    ].join("\n");
+  }
   if (!directCompletion.verificationObserved && !directCompletion.outOfWorkspaceMutationObserved) return undefined;
   const reasons: string[] = [];
   const parallelSurfaceGap = promptCanonicalSurfaceBypassed() ?? pythonRootDuplicateTestSurface();
@@ -986,6 +1033,10 @@ function freshDirectCompletionState(turnId = 0): DirectCompletionState {
     readToolCount: 0,
     verificationAttemptCount: 0,
     preMutationVerificationNudgeSent: false,
+    terminalActionObserved: false,
+    terminalActionCommand: undefined,
+    terminalCompletionNudgeSent: false,
+    postTerminalDriftNudgeSent: false,
     testCoverageNudgeSent: false,
     testCoverageReviewObserved: false,
     verificationObserved: false,
@@ -1041,6 +1092,7 @@ function directPolicySnapshot(): DirectPolicySnapshot {
     testMutationObserved: directCompletion.testMutationObserved,
     verificationObserved: directCompletion.verificationObserved,
     verificationCommand: directCompletion.verificationCommand,
+    terminalActionCommand: directCompletion.terminalActionCommand,
     docsOnlyMutation: directDocsOnlyMutation(),
     changedPaths: [...directCompletion.changedPaths].sort(),
     readPaths: [...directCompletion.readPaths].sort(),
@@ -1101,6 +1153,36 @@ function cloneSkillOverrideState(state: SkillOverrideState): SkillOverrideState 
 
 function isPostVerificationExplorationTool(toolName: string): boolean {
   return ["read", "grep", "find", "ls", "chalin_project_discovery", "chalin_project_snapshot"].includes(toolName);
+}
+
+function isPostTerminalDriftTool(toolName: string): boolean {
+  return ["bash", "read", "grep", "find", "ls", "edit", "write", "chalin_project_discovery", "chalin_project_snapshot"].includes(toolName);
+}
+
+function isAllowedTerminalFollowupCommand(command: string | undefined): boolean {
+  const match = ghPrCommand(command);
+  return match?.subcommand === "view";
+}
+
+function isTerminalDirectCommand(command: string | undefined): boolean {
+  const match = ghPrCommand(command);
+  return match?.subcommand === "create" && !match.args.includes("--dry-run");
+}
+
+function ghPrCommand(command: string | undefined): { subcommand: string; args: string[] } | undefined {
+  if (!command) return undefined;
+  const tokens = shellWords(command).map((token) => token.toLowerCase());
+  for (let index = 0; index < tokens.length - 2; index += 1) {
+    if (!isGhExecutableToken(tokens[index] ?? "") || tokens[index + 1] !== "pr") continue;
+    const subcommand = tokens[index + 2];
+    if (!subcommand) return undefined;
+    return { subcommand, args: tokens.slice(index + 3) };
+  }
+  return undefined;
+}
+
+function isGhExecutableToken(token: string): boolean {
+  return token === "gh" || token.endsWith("/gh");
 }
 
 function isPostFailureEvidenceTool(toolName: string, command: string | undefined): boolean {
