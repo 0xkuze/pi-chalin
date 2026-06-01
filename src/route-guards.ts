@@ -1,5 +1,5 @@
 import { Effect } from "effect";
-import type { AgentStep, RouteDecision } from "./schemas.ts";
+import type { AgentStep, RouteDecision, RouteExpectedEffect } from "./schemas.ts";
 
 interface RouteNormalizationOptions {
   requiresWorkspaceMutation: boolean;
@@ -22,26 +22,18 @@ export function ensureMutationRouteHasWorker(route: RouteDecision, requiresWorks
   return ensureMutationRouteHasWorkerAndReviewer(route, requiresWorkspaceMutation, task);
 }
 
-export function inferRouteRequiresWorkspaceMutation(route: RouteDecision, task: string): boolean {
-  if (route.kind === "memory-only" || route.kind === "ask-user") return false;
+export function inferRouteRequiresWorkspaceMutation(route: RouteDecision, _task: string): boolean {
+  if (route.kind === "ask-user") return false;
+  if (route.expectedEffects?.includes("write")) return true;
+  if (route.expectedEffects && !route.expectedEffects.includes("write")) return false;
   if (route.agents.includes("worker")) return true;
-  const text = `${task}\n${route.reason}\n${routeStepTasks(route).join("\n")}`.toLowerCase();
-  if (/\b(read[- ]?only|no[- ]?code|sin modificar|no modificar|do not modify|analysis only|solo analizar|s[oó]lo analizar)\b/.test(text)) return false;
-  return /\b(fix|bugfix|implement|refactor|change|update|add|write|create|patch|repair|corrige|arregla|implementa|refactoriza|cambia|modifica|actualiza|agrega|añade|escribe|crea|parchea|repara)\b|\b(?:make|cargo|go|bun|npm|pnpm|yarn|pytest|python|node)\s+test\b|\btests?\s+must\s+pass\b|\bdebe(?:n)?\s+pasar\b/.test(text);
-}
-
-function routeStepTasks(route: RouteDecision): string[] {
-  if (!route.plan) return [];
-  if (route.plan.kind === "single") return [route.plan.task];
-  if (route.plan.kind === "parallel") return route.plan.tasks.map((step) => step.task);
-  if (route.plan.kind === "chain") return route.plan.steps.map((step) => step.task);
-  return route.plan.stages.flatMap((stage) => stage.tasks.map((step) => step.task));
+  return false;
 }
 
 export function ensureMutationRouteHasWorkerAndReviewer(route: RouteDecision, requiresWorkspaceMutation: boolean, task: string): RouteDecision {
   if (reviewerDisabled()) return ensureMutationRouteHasWorkerOnly(route, requiresWorkspaceMutation, task);
   const hasImplementationWorker = route.agents.includes("worker");
-  if ((!requiresWorkspaceMutation && !hasImplementationWorker) || route.kind === "memory-only" || route.kind === "ask-user") return route;
+  if ((!requiresWorkspaceMutation && !hasImplementationWorker) || route.kind === "ask-user") return route;
   if (!route.plan) return route;
 
   const workerStep: AgentStep = {
@@ -71,6 +63,7 @@ export function ensureMutationRouteHasWorkerAndReviewer(route: RouteDecision, re
       ...route,
       agents: result.stages.flatMap((stage) => stage.tasks.map((step) => step.agent)),
       needsArtifacts: true,
+      expectedEffects: addExpectedEffects(route.expectedEffects, ["write", "verify"]),
       reason: implementationReviewReason(route.reason, result.addedWorker, result.addedReviewer),
       plan: {
         kind: "dag",
@@ -80,24 +73,23 @@ export function ensureMutationRouteHasWorkerAndReviewer(route: RouteDecision, re
     return withReview;
   }
 
-  const existingSteps = route.plan.kind === "single"
-    ? [{ id: "existing", agent: route.plan.agent, task: route.plan.task, budget: route.plan.budget }]
-    : route.plan.kind === "chain" ? route.plan.steps : route.plan.tasks;
+  const existingSteps = route.plan.steps;
   const result = ensureStepsHaveImplementationReview(existingSteps, workerStep, reviewerStep);
   const withReview = result.changed ? {
     ...route,
-    kind: "multi-agent-chain",
+    kind: "multi-agent-sequential",
     agents: result.steps.map((step) => step.agent),
     needsArtifacts: true,
+    expectedEffects: addExpectedEffects(route.expectedEffects, ["write", "verify"]),
     reason: implementationReviewReason(route.reason, result.addedWorker, result.addedReviewer),
-    plan: { kind: "chain", steps: result.steps },
+    plan: { kind: "sequential", steps: result.steps },
   } satisfies RouteDecision : route;
   return withReview;
 }
 
 function ensureMutationRouteHasWorkerOnly(route: RouteDecision, requiresWorkspaceMutation: boolean, task: string): RouteDecision {
   const hasImplementationWorker = route.agents.includes("worker");
-  if ((!requiresWorkspaceMutation && !hasImplementationWorker) || route.kind === "memory-only" || route.kind === "ask-user") return stripReviewerSteps(route);
+  if ((!requiresWorkspaceMutation && !hasImplementationWorker) || route.kind === "ask-user") return stripReviewerSteps(route);
   if (!route.plan) return stripReviewerSteps(route);
 
   const workerStep: AgentStep = {
@@ -120,23 +112,23 @@ function ensureMutationRouteHasWorkerOnly(route: RouteDecision, requiresWorkspac
       ...route,
       agents: withWorker.flatMap((stage) => stage.tasks.map((step) => step.agent)),
       needsArtifacts: true,
+      expectedEffects: addExpectedEffects(route.expectedEffects, ["write"]),
       reason: `${route.reason} Mutation task normalized by pi-chalin harness ablation: reviewer disabled; worker execution preserved.`,
       plan: { kind: "dag", stages: withWorker },
     };
   }
 
-  const existingSteps = route.plan.kind === "single"
-    ? [{ id: "existing", agent: route.plan.agent, task: route.plan.task, budget: route.plan.budget }]
-    : route.plan.kind === "chain" ? route.plan.steps : route.plan.tasks;
+  const existingSteps = route.plan.steps;
   const stripped = existingSteps.filter((step) => step.agent !== "reviewer");
   const steps = stripped.some((step) => step.agent === "worker") ? stripped : [...stripped, workerStep];
   return {
     ...route,
-    kind: "multi-agent-chain",
+    kind: "multi-agent-sequential",
     agents: steps.map((step) => step.agent),
     needsArtifacts: true,
+    expectedEffects: addExpectedEffects(route.expectedEffects, ["write"]),
     reason: `${route.reason} Mutation task normalized by pi-chalin harness ablation: reviewer disabled; worker execution preserved.`,
-    plan: { kind: "chain", steps },
+    plan: { kind: "sequential", steps },
   };
 }
 
@@ -156,23 +148,21 @@ function stripReviewerSteps(route: RouteDecision): RouteDecision {
       plan: { kind: "dag", stages },
     };
   }
-  const steps = route.plan.kind === "single"
-    ? [{ id: "existing", agent: route.plan.agent, task: route.plan.task, budget: route.plan.budget }]
-    : route.plan.kind === "chain" ? route.plan.steps : route.plan.tasks;
+  const steps = route.plan.steps;
   const stripped = steps.filter((step) => step.agent !== "reviewer");
   if (stripped.length === steps.length) return route;
   if (stripped.length === 0) return askUserRoute(`${route.reason} Reviewer-only route removed for pi-chalin no-reviewer harness ablation; no executable non-reviewer step remains.`);
   return {
     ...route,
-    kind: stripped.length === 1 ? "single-agent" : "multi-agent-chain",
+    kind: "multi-agent-sequential",
     agents: stripped.map((step) => step.agent),
     reason: `${route.reason} Reviewer steps removed for pi-chalin no-reviewer harness ablation.`,
-    plan: stripped.length === 1 ? { kind: "single", agent: stripped[0]!.agent, task: stripped[0]!.task, budget: stripped[0]!.budget } : { kind: "chain", steps: stripped },
+    plan: { kind: "sequential", steps: stripped },
   };
 }
 
 function askUserRoute(reason: string): RouteDecision {
-  return { kind: "ask-user", agents: [], risk: "low", ambiguity: "high", needsMemory: false, needsArtifacts: false, reason };
+  return { kind: "ask-user", agents: [], risk: "low", ambiguity: "high", needsMemory: false, needsArtifacts: false, expectedEffects: ["read"], reason };
 }
 
 function stripReviewerStages(stages: Array<{ id: string; tasks: AgentStep[] }>): Array<{ id: string; tasks: AgentStep[] }> {
@@ -183,7 +173,7 @@ function stripReviewerStages(stages: Array<{ id: string; tasks: AgentStep[] }>):
 
 export function collapseReadOnlyScoutContextRoute(route: RouteDecision, requiresWorkspaceMutation: boolean): RouteDecision {
   if (requiresWorkspaceMutation || route.needsMemory || route.risk !== "low") return route;
-  if (route.kind !== "multi-agent-chain" || route.plan?.kind !== "chain") return route;
+  if (route.kind !== "multi-agent-sequential" || route.plan?.kind !== "sequential") return route;
   if (route.plan.steps.length !== 2) return route;
 
   const [scout, contextBuilder] = route.plan.steps;
@@ -191,15 +181,14 @@ export function collapseReadOnlyScoutContextRoute(route: RouteDecision, requires
 
   return {
     ...route,
-    kind: "single-agent",
+    kind: "multi-agent-sequential",
     agents: ["scout"],
     needsArtifacts: false,
+    expectedEffects: readOnlyEffects(route.expectedEffects),
     reason: `${route.reason} Read-only scout/context-builder route normalized by pi-chalin: the primary Pi agent can synthesize the user-facing answer from the scout handoff without a second child synthesis step.`,
     plan: {
-      kind: "single",
-      agent: "scout",
-      task: scout.task,
-      budget: scout.budget,
+      kind: "sequential",
+      steps: [{ ...scout }],
     },
   };
 }
@@ -262,6 +251,15 @@ function implementationReviewReason(reason: string, addedWorker: boolean, addedR
     addedReviewer ? "added a reviewer step because implementation routes must be checked against the plan, standards, gaps, and verification evidence." : undefined,
   ].filter(Boolean);
   return `${reason} Mutation task normalized by pi-chalin: ${additions.join(" ")}`;
+}
+
+function addExpectedEffects(current: RouteExpectedEffect[] | undefined, additions: RouteExpectedEffect[]): RouteExpectedEffect[] {
+  return [...new Set<RouteExpectedEffect>([...(current ?? ["read"]), ...additions])];
+}
+
+function readOnlyEffects(current: RouteExpectedEffect[] | undefined): RouteExpectedEffect[] {
+  const safe = (current ?? ["read"]).filter((effect) => effect !== "write" && effect !== "verify");
+  return safe.length ? safe : ["read"];
 }
 
 function findLastIndex<T>(items: T[], predicate: (item: T, index: number) => boolean): number {

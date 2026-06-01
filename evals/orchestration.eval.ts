@@ -156,10 +156,10 @@ async function runCase(testCase: ChalinOrchestrationEvalCase): Promise<EvalResul
   const detectedDecision = detectDecision(stdout);
   const actualDecision = run.status === 0 || detectedDecision === "chalin" ? detectedDecision : "error";
   const actualTopology = detectTopology(stdout);
-  const matchedExpectedAgents = testCase.expectedAgents.filter((agent) => hasAgent(stdout, agent));
+  const matchedExpectedAgents = expectedAgentCandidates(testCase).filter((agent) => hasAgent(stdout, agent));
   const durationMs = Date.now() - started;
-  const topologyPass = testCase.expectedTopology === "none" ? actualTopology === "none" : topologyMatches(testCase.expectedTopology, actualTopology);
-  const agentsPass = testCase.expectedAgents.length === 0 || matchedExpectedAgents.length === testCase.expectedAgents.length;
+  const topologyPass = acceptedTopologies(testCase).some((topology) => topologyMatches(topology, actualTopology));
+  const agentsPass = acceptedAgentSets(testCase).some((agents) => agents.length === 0 || agents.every((agent) => matchedExpectedAgents.includes(agent)));
   const decisionPass = actualDecision === testCase.expectedDecision;
   const executionPass = run.status === 0 && !run.signal && !run.timeoutReason;
   const thresholdFailures = evaluateThresholds(testCase, metrics, durationMs);
@@ -283,23 +283,18 @@ function killProcessTree(pid: number | undefined, signal: NodeJS.Signals): void 
 }
 
 function detectDecision(stdout: string): "chalin" | "direct" {
-  return /"(?:name|toolName)":"(?:chalin_route|chalin_memory_search)"|Chalin workflow:|Subagent results:/i.test(stdout) ? "chalin" : "direct";
+  return /"(?:name|toolName)":"chalin_route"|Chalin workflow:|Subagent results:/i.test(stdout) ? "chalin" : "direct";
 }
 
 function detectTopology(stdout: string): string {
-  const routeKinds = Array.from(stdout.matchAll(/"kind":"(single-agent|multi-agent-chain|multi-agent-parallel|multi-agent-dag|memory-only)"/gi), (match) => match[1]?.trim()).filter(Boolean);
+  const routeKinds = Array.from(stdout.matchAll(/"kind":"(multi-agent-sequential|multi-agent-dag)"/gi), (match) => match[1]?.trim()).filter(Boolean);
   const routeKind = routeKinds.at(-1);
   if (routeKind) return routeKind;
 
-  const topologies = Array.from(stdout.matchAll(/"topology":"(single|chain|parallel|dag|memory-only)"/gi), (match) => match[1]?.trim()).filter(Boolean);
+  const topologies = Array.from(stdout.matchAll(/"topology":"(sequential|dag)"/gi), (match) => match[1]?.trim()).filter(Boolean);
   const topology = topologies.at(-1);
-  if (topology === "single") return "single-agent";
-  if (topology === "chain") return "multi-agent-chain";
-  if (topology === "parallel") return "multi-agent-parallel";
+  if (topology === "sequential") return "multi-agent-sequential";
   if (topology === "dag") return "multi-agent-dag";
-  if (topology === "memory-only") return "memory-only";
-
-  if (/"(?:name|toolName)":"chalin_memory_search"/i.test(stdout)) return "memory-only";
 
   const workflow = stdout.match(/Chalin workflow:\s*([^\\n"]+)/i)?.[1]?.trim();
   if (workflow) return workflow;
@@ -307,12 +302,21 @@ function detectTopology(stdout: string): string {
 }
 
 function topologyMatches(expected: ChalinExpectedTopology, actual: string): boolean {
-  if (expected === "single") return actual === "single-agent";
-  if (expected === "chain") return actual === "multi-agent-chain";
-  if (expected === "parallel") return actual === "multi-agent-parallel" || actual === "multi-agent-dag";
+  if (expected === "sequential") return actual === "multi-agent-sequential";
   if (expected === "dag") return actual === "multi-agent-dag";
-  if (expected === "memory-only") return actual === "memory-only";
   return actual === "none";
+}
+
+function acceptedTopologies(testCase: ChalinOrchestrationEvalCase): ChalinExpectedTopology[] {
+  return testCase.acceptedTopologies?.length ? testCase.acceptedTopologies : [testCase.expectedTopology];
+}
+
+function acceptedAgentSets(testCase: ChalinOrchestrationEvalCase): string[][] {
+  return testCase.acceptedAgentSets?.length ? testCase.acceptedAgentSets : [testCase.expectedAgents];
+}
+
+function expectedAgentCandidates(testCase: ChalinOrchestrationEvalCase): string[] {
+  return [...new Set(acceptedAgentSets(testCase).flat())];
 }
 
 function hasAgent(stdout: string, agent: string): boolean {
@@ -338,9 +342,9 @@ function failureReason(testCase: ChalinOrchestrationEvalCase, actualDecision: st
   if (signal) return `pi was killed by ${signal}`;
   if (status !== 0) return `pi exited with ${status}: ${snippet(stderr, 500)}`;
   if (actualDecision !== testCase.expectedDecision) return `expected ${testCase.expectedDecision}, got ${actualDecision}`;
-  if (!topologyMatches(testCase.expectedTopology, actualTopology)) return `expected topology ${testCase.expectedTopology}, got ${actualTopology}`;
+  if (!acceptedTopologies(testCase).some((topology) => topologyMatches(topology, actualTopology))) return `expected topology ${acceptedTopologies(testCase).join(" or ")}, got ${actualTopology}`;
   if (thresholdFailures.length) return `threshold failures: ${thresholdFailures.join("; ")}`;
-  return `missing expected agents: ${testCase.expectedAgents.filter((agent) => !agents.includes(agent)).join(", ")}`;
+  return `missing expected agent set: ${acceptedAgentSets(testCase).map((set) => `[${set.join(", ")}]`).join(" or ")}`;
 }
 
 

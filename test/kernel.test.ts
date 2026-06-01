@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, test } from "bun:test";
-import { ChalinKernel, routeFromPlan } from "../src/kernel.ts";
+import { ChalinKernel, routeFromLegacyPlan, routeFromPlan } from "../src/kernel.ts";
 import { createMemoryCandidate, MemoryStore } from "../src/memory.ts";
 import { createSkillTraceEvent } from "../src/observability.ts";
 import type { WorkerRunner, WorkerRunnerContext } from "../src/runner.ts";
@@ -23,40 +23,68 @@ test("ChalinKernel no longer hard-codes prompt routing decisions", () => {
 });
 
 test("routeFromPlan builds a dynamic chain chosen by the primary Pi agent", () => {
-  const route = routeFromPlan({ topology: "chain" });
+  const route = routeFromPlan({ topology: "sequential", expectedEffects: ["read"] });
   assert.equal(route.kind, "ask-user");
 });
 
-test("routeFromPlan builds chain, parallel, single, and memory-only workflows", () => {
+test("routeFromPlan requires explicit expectedEffects", () => {
+  const route = routeFromPlan({
+    topology: "sequential",
+    steps: [{ agent: "reviewer", task: "Review this diff." }],
+  });
+
+  assert.equal(route.kind, "ask-user");
+  assert.match(route.reason, /requires explicit expectedEffects/i);
+});
+
+test("routeFromLegacyPlan keeps old agent-based expectedEffects inference explicit", () => {
+  const route = routeFromLegacyPlan({
+    topology: "sequential",
+    steps: [
+      { agent: "worker", task: "Apply the requested workspace change." },
+      { agent: "reviewer", task: "Review the changed files and verification evidence." },
+    ],
+    reason: "Legacy caller did not provide expectedEffects.",
+  });
+
+  assert.equal(route.kind, "multi-agent-sequential");
+  assert.deepEqual(route.expectedEffects, ["read", "write", "verify"]);
+});
+
+test("routeFromPlan builds sequential and DAG workflows", () => {
   const chain = routeFromPlan({
-    topology: "chain",
+    topology: "sequential",
+    expectedEffects: ["read", "verify"],
     steps: [
       { agent: "scout", task: "Map project structure and constraints." },
       { agent: "reviewer", task: "Review high-signal findings." },
     ],
     reason: "Need scoped context before review.",
   });
-  assert.equal(chain.kind, "multi-agent-chain");
+  assert.equal(chain.kind, "multi-agent-sequential");
   assert.deepEqual(chain.agents, ["scout", "reviewer"]);
-  assert.equal(chain.plan?.kind, "chain");
+  assert.equal(chain.plan?.kind, "sequential");
 
   const parallel = routeFromPlan({
-    topology: "parallel",
-    steps: [
-      { agent: "scout", task: "Inspect local architecture." },
-      { agent: "planner", task: "Evaluate improvement paths." },
+    topology: "dag",
+    expectedEffects: ["read"],
+    stages: [
+      {
+        id: "fanout",
+        tasks: [
+          { agent: "scout", task: "Inspect local architecture." },
+          { agent: "planner", task: "Evaluate improvement paths." },
+        ],
+      },
     ],
   });
-  assert.equal(parallel.kind, "multi-agent-parallel");
-  assert.equal(parallel.plan?.kind, "parallel");
+  assert.equal(parallel.kind, "multi-agent-dag");
+  assert.equal(parallel.plan?.kind, "dag");
 
-  const single = routeFromPlan({ topology: "single", steps: [{ agent: "reviewer", task: "Review this diff." }] });
-  assert.equal(single.kind, "single-agent");
-  assert.equal(single.plan?.kind, "single");
-
-  const memory = routeFromPlan({ topology: "memory-only" });
-  assert.equal(memory.kind, "memory-only");
-  assert.equal(memory.needsMemory, true);
+  const single = routeFromPlan({ topology: "sequential", expectedEffects: ["read", "verify"], steps: [{ agent: "reviewer", task: "Review this diff." }] });
+  assert.equal(single.kind, "multi-agent-sequential");
+  assert.equal(single.plan?.kind, "sequential");
+  assert.deepEqual(single.plan?.steps.map((step) => step.agent), ["reviewer"]);
 });
 
 test("memory-disabled harness mode strips route memory use for ablation evals", () => {
@@ -64,18 +92,15 @@ test("memory-disabled harness mode strips route memory use for ablation evals", 
   process.env.PI_CHALIN_DISABLE_MEMORY = "1";
   try {
     const route = routeFromPlan({
-      topology: "chain",
+      topology: "sequential",
+      expectedEffects: ["read"],
       needsMemory: true,
       steps: [
         { agent: "scout", task: "Map prior decisions with current files." },
         { agent: "planner", task: "Plan without memory." },
       ],
     });
-    const memoryOnly = routeFromPlan({ topology: "memory-only" });
-
     assert.equal(route.needsMemory, false);
-    assert.equal(memoryOnly.kind, "ask-user");
-    assert.match(memoryOnly.reason, /memory disabled/i);
   } finally {
     if (previous === undefined) delete process.env.PI_CHALIN_DISABLE_MEMORY;
     else process.env.PI_CHALIN_DISABLE_MEMORY = previous;
@@ -101,7 +126,8 @@ test("memory-disabled harness mode skips route memory reads and writes", async (
       }
     }
     const route = routeFromPlan({
-      topology: "single",
+      topology: "sequential",
+      expectedEffects: ["read", "write", "verify"],
       needsMemory: true,
       steps: [{ agent: "worker", task: "Implement without memory side effects." }],
     });
@@ -137,6 +163,7 @@ test("memory-disabled harness mode skips route memory reads and writes", async (
 test("routeFromPlan builds staged DAG workflows chosen by the primary Pi agent", () => {
   const dag = routeFromPlan({
     topology: "dag",
+    expectedEffects: ["read", "verify"],
     stages: [
       { id: "discover", tasks: [{ agent: "scout", task: "Map project modules." }] },
       {
@@ -156,28 +183,11 @@ test("routeFromPlan builds staged DAG workflows chosen by the primary Pi agent",
   assert.deepEqual(dag.plan?.stages.map((stage) => stage.id), ["discover", "fanout", "review"]);
 });
 
-test("memory-only inventory route enumerates visible records instead of search-only recall", async () => {
-  const cwd = tempDir("pi-chalin-kernel-memory-inventory-");
-  const memory = new MemoryStore({ cwd });
-  await memory.submitCandidates([
-    createMemoryCandidate({ category: "pattern", content: "Alpha telemetry pipelines prefer bounded retries before alerts because transient provider boot can delay local readiness.", sourceAgent: "scout", confidence: 0.95, scope: "project" }),
-    createMemoryCandidate({ category: "tooling", content: "Bench harness adapters should keep task fixtures self contained so runner comparisons remain deterministic.", sourceAgent: "scout", confidence: 0.95, scope: "project" }),
-    createMemoryCandidate({ category: "testing", content: "Regression checks should use fake timers or explicit barriers instead of wall clock sleeps in async suites.", sourceAgent: "reviewer", confidence: 0.95, scope: "project" }),
-    createMemoryCandidate({ category: "workflow", content: "Long analyses should preserve compact handoffs after each phase so later resumptions avoid restarting exploration.", sourceAgent: "planner", confidence: 0.95, scope: "project" }),
-  ]);
-  const route = routeFromPlan({ topology: "memory-only", risk: "low", reason: "inventory" });
-  const result = await new ChalinKernel({ cwd, memory }).handleRoute(route, "what elements you have in memory how much of thems", { cwd });
-
-  assert.equal(result.approval.action, "allow");
-  assert.equal(result.route.kind, "memory-only");
-  assert.equal(result.memories.length, 4);
-});
-
 test("ChalinKernel executes an LLM-planned mock route", async () => {
   const cwd = tempDir("pi-chalin-kernel-");
-  const route = routeFromPlan({ topology: "single", steps: [{ agent: "reviewer", task: "Review this diff for bugs." }] });
+  const route = routeFromPlan({ topology: "sequential", expectedEffects: ["read", "verify"], steps: [{ agent: "reviewer", task: "Review this diff for bugs." }] });
   const result = await new ChalinKernel({ cwd }).handleRoute(route, "review this diff for bugs", { cwd });
-  assert.equal(result.route.kind, "single-agent");
+  assert.equal(result.route.kind, "multi-agent-sequential");
   assert.equal(result.approval.action, "allow");
   assert.equal(result.run?.status, "complete");
   assert.equal(result.run?.steps[0]?.agent, "reviewer");
@@ -185,7 +195,7 @@ test("ChalinKernel executes an LLM-planned mock route", async () => {
 
 test("ChalinKernel records skill metrics even when the run does not need artifacts", async () => {
   const cwd = tempDir("pi-chalin-kernel-skill-metrics-");
-  const route = routeFromPlan({ topology: "single", steps: [{ agent: "worker", task: "Fix bugfix regression." }] });
+  const route = routeFromPlan({ topology: "sequential", expectedEffects: ["read", "write", "verify"], steps: [{ agent: "worker", task: "Fix bugfix regression." }] });
   const runner: WorkerRunner = {
     async run(inputRoute: RouteDecision): Promise<RunState> {
       const run = createRunState(inputRoute, cwd);
@@ -218,7 +228,8 @@ test("ChalinKernel records skill metrics even when the run does not need artifac
 test("ChalinKernel resumes an already-started non-critical run without a second approval prompt", async () => {
   const cwd = tempDir("pi-chalin-kernel-resume-");
   const route = routeFromPlan({
-    topology: "chain",
+    topology: "sequential",
+    expectedEffects: ["read", "write", "verify"],
     risk: "medium",
     needsArtifacts: true,
     steps: [
@@ -258,7 +269,7 @@ test("ChalinKernel resumes an already-started non-critical run without a second 
 
 test("ChalinKernel does not block SDK tool results on memory persistence", async () => {
   const cwd = tempDir("pi-chalin-kernel-memory-");
-  const route = routeFromPlan({ topology: "single", steps: [{ agent: "reviewer", task: "Summarize findings." }] });
+  const route = routeFromPlan({ topology: "sequential", expectedEffects: ["read", "verify"], steps: [{ agent: "reviewer", task: "Summarize findings." }] });
   const previousDelay = process.env.PI_CHALIN_MEMORY_PERSIST_DELAY_MS;
   process.env.PI_CHALIN_MEMORY_PERSIST_DELAY_MS = "0";
   let memoryPersisted = false;

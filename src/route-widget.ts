@@ -28,7 +28,7 @@ export type ChalinRouteWidgetDetails = {
 
 type ChalinRouteToolParams = {
   task: string;
-  topology: "single" | "chain" | "parallel" | "dag" | "memory-only";
+  topology: "sequential" | "dag";
   steps?: Array<{ id?: string; agent: string; task: string; budget?: "tight" | "normal" | "deep" | "extended" }>;
   stages?: Array<{ id?: string; name?: string; tasks: Array<{ id?: string; agent: string; task: string; budget?: "tight" | "normal" | "deep" | "extended" }> }>;
 };
@@ -113,20 +113,14 @@ export function chalinRouteUpdateDetails(run: RunState): ChalinRouteWidgetDetail
 function plannedStepsFromRoute(route: RouteDecision): ChalinRouteWidgetStep[] {
   const plan = route.plan;
   if (!plan) return [];
-  if (plan.kind === "single") return [{ agent: plan.agent, task: plan.task }];
-  if (plan.kind === "chain") return plan.steps;
-  if (plan.kind === "parallel") return plan.tasks;
+  if (plan.kind === "sequential") return plan.steps;
   return plan.stages.flatMap((stage) => stage.tasks.map((step) => ({ ...step, id: `${stage.id}:${step.id ?? step.agent}` })));
 }
 
 function plannedWidgetSteps(params: ChalinRouteToolParams): ChalinRouteWidgetStep[] {
-  if (params.topology === "single") {
-    const first = params.steps?.[0];
-    return first ? [first] : [];
-  }
-  if (params.topology === "chain" || params.topology === "parallel") return params.steps ?? [];
+  if (params.topology === "sequential") return params.steps ?? [];
   if (params.topology === "dag") return params.stages?.flatMap((stage) => stage.tasks.map((step) => ({ ...step, id: `${stage.id ?? "stage"}:${step.id ?? step.agent}` }))) ?? [];
-  return [{ agent: "memory", task: params.task, status: "pending" }];
+  return [];
 }
 
 function formatWidgetStep(step: ChalinRouteWidgetStep, index: number, total: number, runStatus?: RunStatus): string {
@@ -174,7 +168,6 @@ function treePrefix(index: number, total: number): string {
 }
 
 function routeTitle(topology: ChalinRouteToolParams["topology"], task: string): string {
-  if (topology === "memory-only") return "memory lookup";
   return `${topology} · ${truncate(task, 52)}`;
 }
 
@@ -231,7 +224,6 @@ export function footerStateForRun(run: RunState): ChalinFooterState {
 }
 
 export function routeIntent(route: RouteDecision): string {
-  if (route.kind === "memory-only") return "memory lookup";
   if (route.agents.includes("worker")) return "implement safely";
   if (route.agents.includes("reviewer")) return "review";
   if (route.agents.includes("context-builder")) return "understand";

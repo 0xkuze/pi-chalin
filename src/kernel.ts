@@ -5,7 +5,7 @@ import { DEFAULT_CONFIG, approvalDecision, type ChalinConfig } from "./config.ts
 import type { MemoryStoreLike } from "./memory.ts";
 import { createConfiguredMemoryStore } from "./memory-provider.ts";
 import { MockWorkerRunner, SdkWorkerRunner, resumeWorkerRunnerEffect, runWorkerRunnerEffect, type WorkerRunner, type WorkerRunnerContext } from "./runner.ts";
-import type { AgentDefinition, AgentStage, AgentStep, AgentThinkingLevel, ApprovalDecision, MemoryRecord, RouteDecision, RoutePlan, RunState } from "./schemas.ts";
+import type { AgentDefinition, AgentStage, AgentStep, AgentThinkingLevel, ApprovalDecision, MemoryRecord, RouteDecision, RouteExpectedEffect, RunState } from "./schemas.ts";
 import { recordSkillMetricsEffect } from "./skills.ts";
 
 export interface ChalinKernelOptions {
@@ -176,7 +176,6 @@ export class ChalinKernel {
   }
 
   private async retrieveRouteMemories(route: RouteDecision, prompt: string): Promise<MemoryRecord[]> {
-    if (route.kind === "memory-only" && isMemoryInventoryPrompt(prompt)) return this.memory.list();
     return (await this.memory.retrieve({ query: prompt, sourceAgent: "primary-pi", limit: 5, tokenBudget: 900 })).results.map((result) => result.record);
   }
 
@@ -214,33 +213,38 @@ function askUser(reason: string): RouteDecision {
   return { kind: "ask-user", agents: [], risk: "low", ambiguity: "high", needsMemory: false, needsArtifacts: false, reason };
 }
 
-export function routeFromPlan(input: {
-  topology: "single" | "chain" | "parallel" | "dag" | "memory-only";
+type StrictRoutePlanInput = {
+  topology: "sequential" | "dag";
   steps?: AgentStep[];
   stages?: Array<{ id?: string; name?: string; tasks: AgentStep[] }>;
   risk?: RouteDecision["risk"];
   needsMemory?: boolean;
   needsArtifacts?: boolean;
+  expectedEffects: RouteExpectedEffect[];
   reason?: string;
-}): RouteDecision {
+};
+
+type LegacyRoutePlanInput = Omit<StrictRoutePlanInput, "expectedEffects"> & {
+  expectedEffects?: RouteExpectedEffect[];
+};
+
+export function routeFromPlan(input: LegacyRoutePlanInput): RouteDecision {
+  return routeFromPlanInternal(input, false);
+}
+
+export function routeFromLegacyPlan(input: LegacyRoutePlanInput): RouteDecision {
+  return routeFromPlanInternal(input, true);
+}
+
+function routeFromPlanInternal(input: LegacyRoutePlanInput, legacyInferExpectedEffects: boolean): RouteDecision {
   const steps = sanitizeSteps(input.steps ?? []);
-  if (input.topology === "memory-only") {
-    if (memoryDisabled()) return askUser("pi-chalin memory disabled for harness ablation eval.");
-    return {
-      kind: "memory-only",
-      agents: [],
-      risk: input.risk ?? "low",
-      ambiguity: "low",
-      needsMemory: true,
-      needsArtifacts: false,
-      reason: input.reason?.trim() || "Primary Pi agent requested pi-chalin memory lookup.",
-    };
-  }
   if (input.topology === "dag") {
     const stages = sanitizeStages(input.stages ?? []);
     if (stages.length === 0) return askUser("chalin_route dag topology requires at least one stage with agent tasks.");
     const agents = stages.flatMap((stage) => stage.tasks.map((step) => step.agent));
     const allSteps = stages.flatMap((stage) => stage.tasks);
+    const expectedEffects = expectedEffectsFromInput(input.expectedEffects, allSteps, legacyInferExpectedEffects);
+    if (!expectedEffects) return expectedEffectsRequiredRoute();
     return {
       kind: "multi-agent-dag",
       agents,
@@ -248,24 +252,31 @@ export function routeFromPlan(input: {
       ambiguity: "low",
       needsMemory: routeNeedsMemory(input.needsMemory),
       needsArtifacts: input.needsArtifacts ?? allSteps.some((step) => ["scout", "planner", "worker", "reviewer", "context-builder"].includes(step.agent)),
+      expectedEffects,
       reason: input.reason?.trim() || "Primary Pi agent selected a staged DAG workflow dynamically.",
       plan: { kind: "dag", stages },
     };
   }
-  if (steps.length === 0) return askUser("chalin_route requires at least one agent step unless topology is memory-only.");
+  if (steps.length === 0) return askUser("chalin_route sequential topology requires at least one agent step.");
 
   const agents = steps.map((step) => step.agent);
-  const plan = planFromTopology(input.topology, steps);
+  const expectedEffects = expectedEffectsFromInput(input.expectedEffects, steps, legacyInferExpectedEffects);
+  if (!expectedEffects) return expectedEffectsRequiredRoute();
   return {
-    kind: kindFromTopology(input.topology, steps.length),
+    kind: "multi-agent-sequential",
     agents,
     risk: input.risk ?? riskFromPlan(steps),
     ambiguity: "low",
     needsMemory: routeNeedsMemory(input.needsMemory),
     needsArtifacts: input.needsArtifacts ?? steps.some((step) => ["scout", "planner", "worker", "reviewer", "context-builder"].includes(step.agent)),
+    expectedEffects,
     reason: input.reason?.trim() || "Primary Pi agent selected this chalin workflow dynamically.",
-    plan,
+    plan: { kind: "sequential", steps },
   };
+}
+
+function expectedEffectsRequiredRoute(): RouteDecision {
+  return askUser("chalin_route requires explicit expectedEffects; set read, write, and/or verify instead of relying on legacy agent-based inference.");
 }
 
 function routeNeedsMemory(value: boolean | undefined): boolean {
@@ -293,20 +304,28 @@ function sanitizeStages(stages: Array<{ id?: string; name?: string; tasks: Agent
     .slice(0, 8);
 }
 
-function kindFromTopology(topology: "single" | "chain" | "parallel", stepCount: number): RouteDecision["kind"] {
-  if (topology === "parallel") return "multi-agent-parallel";
-  if (topology === "chain" || stepCount > 1) return "multi-agent-chain";
-  return "single-agent";
-}
-
-function planFromTopology(topology: "single" | "chain" | "parallel", steps: AgentStep[]): RoutePlan {
-  if (topology === "parallel") return { kind: "parallel", tasks: steps };
-  if (topology === "chain" || steps.length > 1) return { kind: "chain", steps };
-  return { kind: "single", agent: steps[0]!.agent, task: steps[0]!.task, budget: steps[0]!.budget };
-}
-
 function sanitizeBudget(value: AgentStep["budget"]): AgentStep["budget"] | undefined {
   return value === "tight" || value === "normal" || value === "deep" || value === "extended" ? value : undefined;
+}
+
+function expectedEffectsFromInput(effects: RouteExpectedEffect[] | undefined, steps: AgentStep[], legacyInferExpectedEffects: boolean): RouteExpectedEffect[] | undefined {
+  if (effects !== undefined) return sanitizeExpectedEffects(effects);
+  if (legacyInferExpectedEffects) return inferExpectedEffectsFromSteps(steps);
+  return undefined;
+}
+
+function sanitizeExpectedEffects(effects: RouteExpectedEffect[]): RouteExpectedEffect[] | undefined {
+  const valid = new Set<RouteExpectedEffect>(["read", "write", "verify"]);
+  const normalized = effects.filter((effect): effect is RouteExpectedEffect => valid.has(effect));
+  const unique = [...new Set(normalized)];
+  return unique.length > 0 ? unique : undefined;
+}
+
+function inferExpectedEffectsFromSteps(steps: AgentStep[]): RouteExpectedEffect[] {
+  const effects = new Set<RouteExpectedEffect>(["read"]);
+  if (steps.some((step) => step.agent === "worker" || step.agent === "conflict-resolver")) effects.add("write");
+  if (steps.some((step) => step.agent === "worker" || step.agent === "reviewer" || step.agent === "conflict-resolver")) effects.add("verify");
+  return [...effects];
 }
 
 function riskFromPlan(steps: Array<{ agent: string }>): RouteDecision["risk"] {

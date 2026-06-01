@@ -5,7 +5,7 @@ import { createChildToolPolicy } from "../src/child-tools.ts";
 import type { RouteDecision } from "../src/schemas.ts";
 
 function route(risk: RouteDecision["risk"]): RouteDecision {
-  return { kind: "single-agent", agents: ["worker"], risk, ambiguity: "low", needsMemory: false, needsArtifacts: true, reason: "test", plan: { kind: "single", agent: "worker", task: "x" } };
+  return { kind: "multi-agent-sequential", agents: ["worker"], risk, ambiguity: "low", needsMemory: false, needsArtifacts: true, reason: "test", plan: { kind: "sequential", steps: [{ agent: "worker", task: "x" }] } };
 }
 
 test("approvalDecision allows low risk under balanced mode", () => {

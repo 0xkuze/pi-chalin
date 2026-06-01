@@ -10,16 +10,13 @@ import {
 } from "../evals/orchestration-cases.ts";
 import { activeTokenTotal } from "../evals/token-metrics.ts";
 import { buildChalinOrchestratorSystemPrompt, selectLikelyAgentsForPrompt } from "../src/orchestration.ts";
-import { routeFromPlan } from "../src/kernel.ts";
+import { routeFromLegacyPlan, routeFromPlan } from "../src/kernel.ts";
 import { collapseReadOnlyScoutContextRoute, ensureMutationRouteHasWorkerAndReviewer, inferRouteRequiresWorkspaceMutation, normalizeRouteForExecution } from "../src/route-guards.ts";
 import type { RouteDecision } from "../src/schemas.ts";
 
 const expectedTopologyMap = new Map([
-  ["single", "single-agent"],
-  ["chain", "multi-agent-chain"],
-  ["parallel", "multi-agent-parallel"],
+  ["sequential", "multi-agent-sequential"],
   ["dag", "multi-agent-dag"],
-  ["memory-only", "memory-only"],
   ["none", "none"],
 ]);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -28,14 +25,11 @@ test("orchestration eval cases cover chalin and direct decisions", () => {
   const summary = summarizeOrchestrationEvalCases();
 
   assert.equal(summary.total, 21);
-  assert.equal(summary.chalinExpected, 13);
-  assert.equal(summary.directExpected, 8);
-  assert.equal(summary.byTopology.single, 5);
-  assert.equal(summary.byTopology.chain, 5);
-  assert.equal(summary.byTopology.parallel, undefined);
+  assert.equal(summary.chalinExpected, 12);
+  assert.equal(summary.directExpected, 9);
+  assert.equal(summary.byTopology.sequential, 10);
   assert.equal(summary.byTopology.dag, 2);
-  assert.equal(summary.byTopology["memory-only"], 1);
-  assert.equal(summary.byTopology.none, 8);
+  assert.equal(summary.byTopology.none, 9);
 
   for (const testCase of ORCHESTRATION_EVAL_CASES) {
     assert.ok(testCase.id.length > 0);
@@ -68,88 +62,52 @@ test("orchestrator prompt teaches LLM-first routing without prompt keyword class
   const prompt = buildChalinOrchestratorSystemPrompt(catalog.list());
 
   assert.match(prompt, /primary Pi agent/i);
-  assert.match(prompt, /answer directly, call `chalin_interview`, call `chalin_web_search`, or call `chalin_route`/i);
-  assert.match(prompt, /MUST call `chalin_interview` before `chalin_route`/i);
-  assert.match(prompt, /URL, current docs, release notes, changelog, or external documentation/i);
-  assert.match(prompt, /call `chalin_web_search` before native local inspection or route/i);
-  assert.match(prompt, /Interview when/i);
-  assert.match(prompt, /Choose `chalin_route` when specialist context isolation/i);
-  assert.match(prompt, /Gate/i);
-  assert.match(prompt, /branch\/diff\/PR/i);
-  assert.match(prompt, /Architecture\/migration/i);
-  assert.match(prompt, /Do not treat an explicit named-file refactor implementation as project strategy/i);
-  assert.match(prompt, /Direct-work guidance/i);
-  assert.match(prompt, /small target set of files/i);
-  assert.match(prompt, /specific function\/symbol\/API plus a local verifier/i);
-  assert.match(prompt, /bounded read-only mini-project review/i);
-  assert.match(prompt, /docs-only allows docs writes/i);
-  assert.match(prompt, /runtime\/API-boundary analysis/i);
-  assert.match(prompt, /full fidelity to every explicit criterion/i);
-  assert.match(prompt, /derive the contract from prompt\+repo evidence/i);
-  assert.match(prompt, /preservation\/no-op paths/i);
-  assert.match(prompt, /composition with nearby metadata/i);
-  assert.match(prompt, /low-allocation/i);
-  assert.match(prompt, /resource escape hatches/i);
-  assert.match(prompt, /arbitrary fixed caps/i);
-  assert.match(prompt, /one combined implementation\/test edit/i);
-  assert.match(prompt, /avoids micro-edits/i);
-  assert.match(prompt, /smallest exact block/i);
-  assert.match(prompt, /one focused corrective edit per failed verification/i);
-  assert.match(prompt, /Verification must be docs readback/i);
-  assert.match(prompt, /changed-file readback/i);
-  assert.match(prompt, /exact implementation and nearest test\/evidence source paths/i);
-  assert.match(prompt, /controlled clocks/i);
-  assert.match(prompt, /exact requested files\/APIs/i);
-  assert.match(prompt, /executable metadata/i);
-  assert.match(prompt, /no unrequested deps/i);
+  assert.match(prompt, /At the start choose one path: `DIRECT` or `ROUTE`/i);
+  assert.match(prompt, /`DIRECT`: use normal Pi tools/i);
+  assert.match(prompt, /`ROUTE`: call `chalin_route`/i);
+  assert.match(prompt, /topology=sequential.*topology=dag/i);
+  assert.match(prompt, /Pick agents by responsibility/i);
+  assert.match(prompt, /Use the fewest agents/i);
+  assert.match(prompt, /Routed file mutation needs a worker and a later reviewer/i);
+  assert.match(prompt, /Use `chalin_interview` only when a human decision remains/i);
+  assert.match(prompt, /memory is a capability, not a route category/i);
   assert.doesNotMatch(prompt, /bun test|dependency-free TypeScript|Bun CLI|tsx|vitest|jest/i);
-  assert.match(prompt, /explicit memory recall\/remembrance or memory inventory\/counts/i);
-  assert.match(prompt, /prefer `chalin_memory_search`/i);
-  assert.match(prompt, /Routing principles/i);
-  assert.match(prompt, /Use the available agent roster as tools/i);
-  assert.match(prompt, /fixed recipe book/i);
-  assert.match(prompt, /staged fan-out\/fan-in/i);
-  assert.match(prompt, /Minimal topology defaults are defaults/i);
-  assert.match(prompt, /deep project analysis split by folders\/modules -> DAG/i);
-  assert.match(prompt, /architecture or migration across many components -> chain scout -> planner/i);
-  assert.match(prompt, /formal project-wide audit\/test-command-policy review -> single reviewer/i);
-  assert.match(prompt, /local module-splitting\/options comparison -> chain scout -> planner/i);
-  assert.match(prompt, /risky implementation with tests -> chain worker -> reviewer/i);
-  assert.match(prompt, /independent writer slices -> DAG/i);
-  assert.match(prompt, /memory-only route if direct memory search is unavailable/i);
-  assert.match(prompt, /Coverage Matrix/i);
-  assert.match(prompt, /covered, not-present with evidence, or marked unknown\/gap/i);
-  assert.match(prompt, /derive domain-critical surfaces/i);
-  assert.match(prompt, /Routed implementation\/file mutation must include at least one worker-capable executor and a later reviewer/i);
-  assert.match(prompt, /reviewer reports FAIL\/GAP/i);
-  assert.match(prompt, /non-overlapping/i);
-  assert.match(prompt, /Direct answer when/i);
-  assert.match(prompt, /named-file bugfixes/i);
-  assert.match(prompt, /named-file bugfixes\/refactors/i);
-  assert.match(prompt, /After a passing verification, perform one changed-file readback and stop/i);
   assert.match(prompt, /scout/);
   assert.match(prompt, /reviewer/);
+  assert.ok(prompt.length < 2600, `orchestrator prompt should stay minimal, got ${prompt.length}`);
+  assert.doesNotMatch(prompt, /branch\/diff\/PR/i);
+  assert.doesNotMatch(prompt, /->/i);
   assert.doesNotMatch(prompt, /regex|if the prompt contains|hard-coded prompt/i);
 });
 
-test("orchestrator prompt shows the full roster so the model chooses agents", () => {
+test("orchestrator prompt shows a compact role roster so the model chooses agents", () => {
   const catalog = AgentCatalog.load({ cwd: process.cwd() });
   const agents = catalog.list();
   const selected = selectLikelyAgentsForPrompt(agents, "Implementa src/cache.ts con tests y luego revisa la cobertura.");
   const names = selected.map((agent) => agent.name);
 
-  assert.deepEqual(names, agents.map((agent) => agent.name));
+  assert.ok(names.includes("worker"));
+  assert.ok(names.includes("reviewer"));
+  assert.equal(names.includes("conflict-resolver"), false);
+  assert.ok(names.length < agents.length);
+  assert.deepEqual(selectLikelyAgentsForPrompt(agents, "hola").map((agent) => agent.name), agents.map((agent) => agent.name));
+
+  const conflictNames = selectLikelyAgentsForPrompt(agents, "Resuelve el conflicto de merge del worktree aislado y valida el resultado.")
+    .map((agent) => agent.name);
+  assert.ok(conflictNames.includes("conflict-resolver"));
 
   const prompt = buildChalinOrchestratorSystemPrompt(agents, "Implementa src/cache.ts con tests y luego revisa la cobertura.");
-  assert.match(prompt, /Full configured roster shown so the LM, not prompt keyword code, chooses the right agents/i);
+  assert.match(prompt, /Available pi-chalin agents/i);
   assert.match(prompt, /worker/);
   assert.match(prompt, /reviewer/);
-  assert.match(prompt, /conflict-resolver: Resolves isolated worktree merge conflicts/);
+  assert.doesNotMatch(prompt, /conflict-resolver: conflict-resolution/);
+  assert.doesNotMatch(prompt, /capabilities=/);
+  assert.doesNotMatch(prompt, /tools=/);
 });
 
 test("chalin mutation routes without workers are normalized before execution and review", () => {
   const route: RouteDecision = {
-    kind: "multi-agent-chain",
+    kind: "multi-agent-sequential",
     agents: ["scout", "planner", "reviewer"],
     risk: "low",
     ambiguity: "low",
@@ -157,7 +115,7 @@ test("chalin mutation routes without workers are normalized before execution and
     needsArtifacts: true,
     reason: "primary selected analysis chain",
     plan: {
-      kind: "chain",
+      kind: "sequential",
       steps: [
         { agent: "scout", task: "inspect pricing files" },
         { agent: "planner", task: "plan refactor" },
@@ -169,7 +127,7 @@ test("chalin mutation routes without workers are normalized before execution and
   const normalized = ensureMutationRouteHasWorkerAndReviewer(route, true, "Refactoriza src/pricing.ts para extraer funciones puras y añade tests.");
 
   assert.deepEqual(normalized.agents, ["scout", "planner", "worker", "reviewer"]);
-  assert.equal(normalized.plan?.kind, "chain");
+  assert.equal(normalized.plan?.kind, "sequential");
   assert.match(normalized.reason, /added a worker/i);
 });
 
@@ -178,7 +136,8 @@ test("reviewer-disabled harness mode keeps mutation routes executable without ad
   process.env.PI_CHALIN_DISABLE_REVIEWER = "1";
   try {
     const route = routeFromPlan({
-      topology: "single",
+      topology: "sequential",
+      expectedEffects: ["read", "write", "verify"],
       steps: [{ agent: "planner", task: "Plan and patch a focused implementation change." }],
       reason: "Harness no-reviewer ablation.",
     });
@@ -187,7 +146,7 @@ test("reviewer-disabled harness mode keeps mutation routes executable without ad
       task: "Implementa el cambio y corre tests.",
     });
 
-    assert.equal(normalized.plan?.kind, "chain");
+    assert.equal(normalized.plan?.kind, "sequential");
     assert.ok(normalized.agents.includes("worker"));
     assert.equal(normalized.agents.includes("reviewer"), false);
     assert.doesNotMatch(normalized.reason, /added a reviewer/i);
@@ -202,7 +161,8 @@ test("reviewer-disabled harness mode removes review-only routes instead of execu
   process.env.PI_CHALIN_DISABLE_REVIEWER = "1";
   try {
     const singleReviewer = normalizeRouteForExecution(routeFromPlan({
-      topology: "single",
+      topology: "sequential",
+      expectedEffects: ["read", "verify"],
       steps: [{ agent: "reviewer", task: "Review the implementation." }],
       reason: "Harness no-reviewer ablation.",
     }), {
@@ -211,6 +171,7 @@ test("reviewer-disabled harness mode removes review-only routes instead of execu
     });
     const dagReviewer = normalizeRouteForExecution(routeFromPlan({
       topology: "dag",
+      expectedEffects: ["read", "verify"],
       stages: [{ id: "review", tasks: [{ agent: "reviewer", task: "Review the implementation." }] }],
       reason: "Harness no-reviewer DAG ablation.",
     }), {
@@ -230,14 +191,15 @@ test("reviewer-disabled harness mode removes review-only routes instead of execu
 
 test("mutation normalization is driven by structured route metadata, not prompt regex", () => {
   const route: RouteDecision = {
-    kind: "multi-agent-chain",
+    kind: "multi-agent-sequential",
     agents: ["scout", "planner", "reviewer"],
     risk: "medium",
     ambiguity: "low",
     needsMemory: false,
     needsArtifacts: true,
+    expectedEffects: ["read"],
     reason: "parent chose chalin",
-    plan: { kind: "chain", steps: [{ agent: "scout", task: "inspect" }, { agent: "planner", task: "plan" }, { agent: "reviewer", task: "review" }] },
+    plan: { kind: "sequential", steps: [{ agent: "scout", task: "inspect" }, { agent: "planner", task: "plan" }, { agent: "reviewer", task: "review" }] },
   };
 
   const withoutFlag = ensureMutationRouteHasWorkerAndReviewer(
@@ -255,45 +217,65 @@ test("mutation normalization is driven by structured route metadata, not prompt 
   assert.deepEqual(withFlag.agents, ["scout", "planner", "worker", "reviewer"]);
 });
 
-test("route tool infers mutation intent when a routed implementation omits the mutation flag", () => {
+test("route expectedEffects marks mutation without prose inference", () => {
+  const route = routeFromPlan({
+    topology: "sequential",
+    expectedEffects: ["read", "write", "verify"],
+    steps: [{ agent: "planner", task: "Prepare the execution contract." }],
+    reason: "Side effects are explicit route metadata.",
+  });
+
+  assert.equal(inferRouteRequiresWorkspaceMutation(route, "No mutation words here."), true);
+
+  const normalized = normalizeRouteForExecution(route, {
+    requiresWorkspaceMutation: inferRouteRequiresWorkspaceMutation(route, "No mutation words here."),
+    task: "No mutation words here.",
+  });
+
+  assert.deepEqual(normalized.agents, ["planner", "worker", "reviewer"]);
+  assert.deepEqual(normalized.expectedEffects, ["read", "write", "verify"]);
+});
+
+test("routes without expectedEffects do not infer mutation from prose", () => {
   const route: RouteDecision = {
-    kind: "single-agent",
+    kind: "multi-agent-sequential",
     agents: ["scout"],
     risk: "medium",
     ambiguity: "low",
     needsMemory: false,
     needsArtifacts: true,
     reason: "Tokenizer bugfix with make test verification.",
-    plan: { kind: "single", agent: "scout", task: "Inspect source and return a patch plan." },
+    plan: { kind: "sequential", steps: [{ agent: "scout", task: "Inspect source and return a patch plan." }] },
   };
 
-  assert.equal(inferRouteRequiresWorkspaceMutation(route, "Fix the tokenizer and make test must pass."), true);
+  assert.equal(inferRouteRequiresWorkspaceMutation(route, "Fix the tokenizer and make test must pass."), false);
   assert.equal(inferRouteRequiresWorkspaceMutation(route, "Read-only analysis only; do not modify files."), false);
 });
 
-test("route tool infers mutation intent from delegated step tasks", () => {
-  const route = routeFromPlan({
-    topology: "chain",
+test("routeFromLegacyPlan derives mutation effects from worker responsibility", () => {
+  const route = routeFromLegacyPlan({
+    topology: "sequential",
     steps: [
-      { agent: "planner", task: "Plan how to change only the target validation block." },
-      { agent: "reviewer", task: "Review that the patch would avoid rewriting the file." },
+      { agent: "worker", task: "Apply the requested workspace change." },
+      { agent: "reviewer", task: "Review the changed files and verification evidence." },
     ],
-    reason: "Parent selected a compact safety workflow.",
+    reason: "Worker owns the mutation; reviewer owns verification.",
   });
 
   assert.equal(inferRouteRequiresWorkspaceMutation(route, "Handle the requested work."), true);
+  assert.deepEqual(route.expectedEffects, ["read", "write", "verify"]);
 
   const normalized = normalizeRouteForExecution(route, {
     requiresWorkspaceMutation: inferRouteRequiresWorkspaceMutation(route, "Handle the requested work."),
     task: "Handle the requested work.",
   });
 
-  assert.deepEqual(normalized.agents, ["planner", "worker", "reviewer"]);
+  assert.deepEqual(normalized.agents, ["worker", "reviewer"]);
 });
 
 test("implementation routes with workers are normalized to include a post-worker reviewer", () => {
   const route: RouteDecision = {
-    kind: "multi-agent-chain",
+    kind: "multi-agent-sequential",
     agents: ["scout", "planner", "worker"],
     risk: "medium",
     ambiguity: "low",
@@ -301,7 +283,7 @@ test("implementation routes with workers are normalized to include a post-worker
     needsArtifacts: true,
     reason: "parent chose implementation chain",
     plan: {
-      kind: "chain",
+      kind: "sequential",
       steps: [
         { agent: "scout", task: "inspect implementation surface" },
         { agent: "planner", task: "plan the change" },
@@ -313,7 +295,7 @@ test("implementation routes with workers are normalized to include a post-worker
   const normalized = ensureMutationRouteHasWorkerAndReviewer(route, false, "Implementa la mejora y corre tests.");
 
   assert.deepEqual(normalized.agents, ["scout", "planner", "worker", "reviewer"]);
-  assert.equal(normalized.plan?.kind, "chain");
+  assert.equal(normalized.plan?.kind, "sequential");
   assert.match(normalized.reason, /added a reviewer/i);
   assert.match(normalized.reason, /plan, standards, gaps, and verification evidence/i);
 });
@@ -346,7 +328,7 @@ test("dag implementation routes add final reviewer after worker stages", () => {
 
 test("implementation normalization preserves the orchestrator-selected evidence and planning agents", () => {
   const route: RouteDecision = {
-    kind: "multi-agent-chain",
+    kind: "multi-agent-sequential",
     agents: ["scout", "planner", "worker", "reviewer"],
     risk: "medium",
     ambiguity: "low",
@@ -354,7 +336,7 @@ test("implementation normalization preserves the orchestrator-selected evidence 
     needsArtifacts: true,
     reason: "parent selected a richer implementation workflow",
     plan: {
-      kind: "chain",
+      kind: "sequential",
       steps: [
         { agent: "scout", task: "inspect ownership" },
         { agent: "planner", task: "plan risk controls" },
@@ -367,13 +349,13 @@ test("implementation normalization preserves the orchestrator-selected evidence 
   const normalized = ensureMutationRouteHasWorkerAndReviewer(route, true, "Implementa una mejora con revisión.");
 
   assert.deepEqual(normalized.agents, ["scout", "planner", "worker", "reviewer"]);
-  assert.equal(normalized.plan?.kind, "chain");
-  assert.deepEqual(normalized.plan?.kind === "chain" ? normalized.plan.steps.map((step) => step.agent) : [], ["scout", "planner", "worker", "reviewer"]);
+  assert.equal(normalized.plan?.kind, "sequential");
+  assert.deepEqual(normalized.plan?.kind === "sequential" ? normalized.plan.steps.map((step) => step.agent) : [], ["scout", "planner", "worker", "reviewer"]);
 });
 
 test("read-only scout/context-builder normalization is driven by route shape", () => {
   const route: RouteDecision = {
-    kind: "multi-agent-chain",
+    kind: "multi-agent-sequential",
     agents: ["scout", "context-builder"],
     risk: "low",
     ambiguity: "low",
@@ -381,7 +363,7 @@ test("read-only scout/context-builder normalization is driven by route shape", (
     needsArtifacts: true,
     reason: "Read-only user-facing understanding.",
     plan: {
-      kind: "chain",
+      kind: "sequential",
       steps: [
         { agent: "scout", task: "Map repository evidence.", budget: "deep" },
         { agent: "context-builder", task: "Synthesize user-facing answer.", budget: "normal" },
@@ -392,10 +374,10 @@ test("read-only scout/context-builder normalization is driven by route shape", (
   const normalized = collapseReadOnlyScoutContextRoute(route, false);
   const mutating = collapseReadOnlyScoutContextRoute(route, true);
 
-  assert.equal(normalized.kind, "single-agent");
+  assert.equal(normalized.kind, "multi-agent-sequential");
   assert.deepEqual(normalized.agents, ["scout"]);
   assert.equal(normalized.needsArtifacts, false);
-  assert.equal(normalized.plan?.kind, "single");
+  assert.equal(normalized.plan?.kind, "sequential");
   assert.match(normalized.reason, /primary Pi agent can synthesize/i);
-  assert.equal(mutating.kind, "multi-agent-chain");
+  assert.equal(mutating.kind, "multi-agent-sequential");
 });

@@ -1,7 +1,7 @@
 import type { ChalinHandleResult } from "./kernel.ts";
 import { sanitizeTransientVerificationClaims } from "./evidence-claims.ts";
 import type { ChalinRouteOutcome } from "./runtime-state.ts";
-import type { EvidenceClaim, RouteDecision, RunState } from "./schemas.ts";
+import type { AgentHandoff, EvidenceClaim, RouteDecision, RunState } from "./schemas.ts";
 import { isUsableStepStatus } from "./status.ts";
 
 export function formatRoute(route: RouteDecision, result: ChalinHandleResult | undefined, options: { availableAgents?: string[] } = {}): string {
@@ -140,7 +140,9 @@ function shouldAggregateFinalMaterial(run: RunState, completeSteps: RunState["st
 function supportingEvidenceMaterial(steps: RunState["steps"]): string | undefined {
   const items = steps
     .map((step) => {
-      const excerpt = structuredClaimExcerpt(step.output?.claims) ?? (() => {
+      const excerpt = structuredHandoffExcerpt(step.output?.structuredHandoff)
+        ?? structuredClaimExcerpt(step.output?.claims)
+        ?? (() => {
         const output = stepFullOutput(step);
         return output ? curatedEvidenceExcerpt(output) : undefined;
       })();
@@ -148,6 +150,18 @@ function supportingEvidenceMaterial(steps: RunState["steps"]): string | undefine
     })
     .filter((item): item is string => Boolean(item));
   return items.length ? items.join("\n") : undefined;
+}
+
+function structuredHandoffExcerpt(item: AgentHandoff | undefined): string | undefined {
+  if (!item) return undefined;
+  const pieces = [
+    item.summary,
+    item.changedFiles.length ? `changed: ${item.changedFiles.slice(0, 4).join(", ")}` : undefined,
+    item.verification.length ? `verification: ${item.verification.slice(0, 3).join("; ")}` : undefined,
+    item.risks.length ? `risks: ${item.risks.slice(0, 3).join("; ")}` : undefined,
+    item.nextActions.length ? `next: ${item.nextActions.slice(0, 3).join("; ")}` : undefined,
+  ].filter((value): value is string => Boolean(value));
+  return pieces.length ? truncate(pieces.join(" "), 420) : undefined;
 }
 
 function structuredClaimExcerpt(claims: EvidenceClaim[] | undefined): string | undefined {
@@ -273,6 +287,8 @@ export function compactRouteDetails(route: RouteDecision, result: ChalinHandleRe
         thinkingLevel: step.thinkingLevel,
         error: step.error,
         handoff: truncate(step.output?.handoff || step.output?.text || step.error || "", 600),
+        structuredHandoff: step.output?.structuredHandoff,
+        reviewerVerdict: step.output?.reviewerVerdict,
       })),
     } : undefined,
     diagnostics,

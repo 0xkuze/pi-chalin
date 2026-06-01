@@ -15,7 +15,7 @@ import { openSafetyApproval } from "./ui.ts";
 import { clearLegacyChalinControlWidget, setChalinStatus } from "./ui-status.ts";
 import { chalinRouteUpdateDetails, colorizeChalinWidget, footerStateForRun, formatChalinRoutePlanWidget, formatChalinRunWidget, formatChalinRunWidgetFromDetails, isUsableStepStatus, plannedWidgetRun, routeIntent, type ChalinRouteWidgetDetails } from "./route-widget.ts";
 import { fetchWebUrls, formatWebBundle, formatWebBundleProgressWidget, formatWebBundleWidget, searchWeb, type WebBundleProgressWidgetInput, type WebContextBundle } from "./webfetch.ts";
-import type { MemoryRecord, RouteDecision, RunState } from "./schemas.ts";
+import type { MemoryRecord, RouteDecision, RouteExpectedEffect, RunState } from "./schemas.ts";
 import { collapseReadOnlyScoutContextRoute, inferRouteRequiresWorkspaceMutation, normalizeRouteForExecution } from "./route-guards.ts";
 import { compactRouteDetails, finalAnswerMaterial, formatRoute, outcomeForResult } from "./route-format.ts";
 import { buildProjectDiscoveryIndex, formatProjectDiscoveryIndex } from "./discovery.ts";
@@ -66,17 +66,19 @@ const ChalinInterviewParams = Type.Object({
 const ChalinRouteParams = Type.Object({
   task: Type.String({ description: "Original user goal rewritten as an executable workflow objective." }),
   topology: Type.Union([
-    Type.Literal("single", { description: "One agent executes a bounded delegated task." }),
-    Type.Literal("chain", { description: "Agents run sequentially in the order chosen by the orchestrator." }),
-    Type.Literal("parallel", { description: "Independent agents analyze alternatives in parallel." }),
-    Type.Literal("dag", { description: "Staged workflow with explicit stage dependencies." }),
-    Type.Literal("memory-only", { description: "Only retrieve pi-chalin memory; no steps/stages." }),
-  ], { description: "Must be exactly one of: single, chain, parallel, dag, memory-only. Do not invent values such as broad, direct, planner, or review." }),
-  steps: Type.Optional(Type.Array(AgentStepParams, { description: "Required for single/chain/parallel. Omit for dag and memory-only." })),
-  stages: Type.Optional(Type.Array(AgentStageParams, { description: "Required for dag. Omit for single/chain/parallel/memory-only." })),
+    Type.Literal("sequential", { description: "One or more agent steps run in order; one step is valid." }),
+    Type.Literal("dag", { description: "Staged workflow where a stage can contain parallel agent tasks and later stages fan in." }),
+  ], { description: "Must be exactly one of: sequential, dag. Do not invent other topology values." }),
+  steps: Type.Optional(Type.Array(AgentStepParams, { description: "Required for sequential. Omit for dag." })),
+  stages: Type.Optional(Type.Array(AgentStageParams, { description: "Required for dag. Omit for sequential." })),
   risk: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"), Type.Literal("critical")])),
   needsMemory: Type.Optional(Type.Boolean()),
   needsArtifacts: Type.Optional(Type.Boolean()),
+  expectedEffects: Type.Array(Type.Union([
+    Type.Literal("read"),
+    Type.Literal("write"),
+    Type.Literal("verify"),
+  ]), { minItems: 1, description: "Required explicit route side effects. read means inspect only; write means workspace mutation is expected; verify means tests/commands/readback are expected. Do not infer side effects from prose." }),
   requiresWorkspaceMutation: Type.Optional(Type.Boolean({ description: "Set true when any routed step is expected to edit, write, create, delete, or otherwise mutate workspace files. Implementation/file-mutation routes require an executor plus final reviewer." })),
   reason: Type.Optional(Type.String({ description: "Why delegation improves correctness, confidence, isolation, or review for this specific task." })),
   dryRun: Type.Optional(Type.Boolean()),
@@ -108,16 +110,32 @@ const ChalinSkillParams = Type.Object({
 
 type ChalinRouteToolParams = {
   task: string;
-  topology: "single" | "chain" | "parallel" | "dag" | "memory-only";
+  topology: "sequential" | "dag";
   steps?: Array<{ id?: string; agent: string; task: string; budget?: "tight" | "normal" | "deep" | "extended" }>;
   stages?: Array<{ id?: string; name?: string; tasks: Array<{ id?: string; agent: string; task: string; budget?: "tight" | "normal" | "deep" | "extended" }> }>;
   risk?: RouteDecision["risk"];
   needsMemory?: boolean;
   needsArtifacts?: boolean;
+  expectedEffects: RouteExpectedEffect[];
   requiresWorkspaceMutation?: boolean;
   reason?: string;
   dryRun?: boolean;
 };
+
+function validateExplicitExpectedEffects(value: unknown): { effects: RouteExpectedEffect[] } | { error: string } {
+  const valid = new Set<RouteExpectedEffect>(["read", "write", "verify"]);
+  if (!Array.isArray(value)) {
+    return { error: "chalin_route requires expectedEffects. Set at least one of: read, write, verify." };
+  }
+  if (value.length === 0) {
+    return { error: "chalin_route expectedEffects must include at least one of: read, write, verify." };
+  }
+  const invalid = value.filter((effect) => typeof effect !== "string" || !valid.has(effect as RouteExpectedEffect));
+  if (invalid.length > 0) {
+    return { error: `chalin_route expectedEffects contains invalid value(s): ${invalid.map(String).join(", ")}. Use only: read, write, verify.` };
+  }
+  return { effects: [...new Set(value as RouteExpectedEffect[])] };
+}
 
 type ChalinSkillToolParams = {
   action: "list" | "show" | "search" | "use" | "disable" | "audit" | "promote" | "retire" | "metrics" | "reconcile";
@@ -328,7 +346,7 @@ export function registerChalinTools(pi: ExtensionAPI): void {
     name: "chalin_project_snapshot",
     label: "Chalin Project Snapshot",
     description: "Legacy alias that returns raw project inventory plus git metadata. It does not infer stack, entrypoints, tests, commands, or importance.",
-    promptSnippet: "chalin_project_snapshot: get raw project inventory plus git metadata before branch/diff reconnaissance.",
+    promptSnippet: "chalin_project_snapshot: get raw project inventory plus git metadata when change-set or repository-state facts are needed.",
     promptGuidelines: [
       "Prefer chalin_project_discovery unless git metadata is needed.",
       "Treat this as filesystem/git facts only; choose follow-up reads/searches with LLM judgment.",
@@ -344,13 +362,13 @@ export function registerChalinTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "chalin_interview",
     label: "Chalin Interview",
-    description: "Ask blocking clarification questions in the TUI and persist answers as pi-chalin artifacts before planning or running subagents.",
-    promptSnippet: "chalin_interview: when the request is ambiguous or missing critical information, ask concise multiple-choice questions before chalin_route.",
+    description: "Ask blocking clarification questions in the TUI and persist answers as pi-chalin artifacts for direct or routed work.",
+    promptSnippet: "chalin_interview: ask concise questions only when a remaining human decision blocks safe progress after discoverable context is used.",
     promptGuidelines: [
-      "Use chalin_interview before chalin_route when the user's request has unknown terms, missing scope, uncovered constraints, destructive/risky choices, or multiple valid directions with meaningful tradeoffs.",
+      "Use chalin_interview in direct or routed mode when proceeding would require guessing user intent, constraints, tradeoffs, or safety boundaries that cannot be discovered cheaply.",
       "Ask only what blocks correct planning. Prefer one to five questions per batch. Each question must have two to five concise options and exactly one recommended option when possible.",
       "Always allow a custom answer unless the answer space must be constrained for safety.",
-      "After chalin_interview returns, use the persisted answers as artifact context and continue with planning or chalin_route only when you are confident enough.",
+      "After chalin_interview returns, use the persisted answers as artifact context and continue only when you are confident enough.",
     ],
     parameters: ChalinInterviewParams,
     async execute(_toolCallId, params: InterviewRequestInput, _signal, _onUpdate, ctx) {
@@ -388,30 +406,25 @@ export function registerChalinTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "chalin_route",
     label: "Chalin Route",
-    description: "Run a selected pi-chalin subagent workflow for broad, risky, deep, parallel, or multi-surface work; skip bounded direct code/test edits, single-symbol/function bugfixes with local verification, simple named parser/scanner bugfixes, and localized docs edits unless stateful transition review is likely to improve quality.",
-    promptSnippet: "chalin_route: use for broad/risky/deep or multi-surface workflows; skip bounded direct code/test edits, single-symbol/function bugfixes with local verification, simple parser/scanner bugfixes, and localized docs edits unless stateful transition review is useful.",
+    description: "Run a selected pi-chalin subagent workflow when isolated roles, staged execution, review, or context relief materially improve correctness beyond direct work.",
+    promptSnippet: "chalin_route: use when a reliable outcome needs current repo/change-state reconstruction, broad context-building, staged or independent responsibilities, mutation plus review, or parent context relief; keep bounded target-plus-verifier work direct unless evidence expands scope.",
     promptGuidelines: [
-      "Use only when subagents materially improve quality, confidence, isolation, or review.",
-      "For risky surgical/long-file edits, worker then reviewer is the minimum; add a planner only when no-rewrite constraints or target-region safety need a separate plan.",
-      "Choose the minimal role that owns the responsibility: scout for understanding/high-level risk overview, planner for strategy/options, reviewer for formal risk/config review, worker for file mutation.",
-      "Keep explicit-file bugfix/refactor/add-test work direct unless risk, breadth, ambiguity, or no-rewrite discipline requires isolation.",
-      "Keep specific function/symbol/API bugfixes with local verification direct: use one targeted native search/read first, then edit/test; route only after evidence proves broad or risky coupling.",
-      "Keep one-behavior code+test tasks with local verification direct until file evidence proves broad ownership, migration, generated-code coupling, unsafe long-file surgery, stateful parser/scanner transition risk, or another concrete risk.",
-      "If direct work reveals real breadth, ambiguity, repeated failed verification, generated/cross-runtime coupling, or context pressure, escalate with a compact handoff instead of forcing the parent agent to finish alone.",
-      "Keep single docs-only/no-code artifacts with an explicit docs path direct when evidence is cheap; route them only when substantial synthesis or independent review across surfaces is worth the latency.",
-      "Keep bounded read-only mini-project reviews direct when the user forbids modification; answer with path evidence.",
-      "Valid topology values are exactly: single, chain, parallel, dag, memory-only. Use single/chain/parallel with steps; use dag with stages; use memory-only without steps.",
-      "Use single for one specialist handoff such as understanding, inventory, strategy, options comparison, or review when one role can inspect evidence directly.",
-      "For local module-splitting/options comparisons, use scout then planner when evidence inventory is needed, or a single planner when evidence is obvious. Use parallel planners only when the prompt explicitly needs independent perspectives.",
-      "Use dag only for genuinely independent concurrent slices, not for a broad single strategy question.",
-      "For routed implementation, choose the topology from the task evidence and available agents; do not force a prewritten chain when a smaller or different workflow is enough.",
-      "Set requiresWorkspaceMutation for any routed file edit, including docs artifacts. Any routed implementation or file mutation must include an editing/executing worker and a later reviewer who checks the original request, plan/claims, repository standards, gaps, and test/readback evidence.",
-      "Add scout/planner/researcher/context-builder only when they materially improve evidence, ownership, alternatives, risk control, or parallelization; otherwise keep the route compact.",
+      "Use only when subagents materially improve quality, confidence, isolation, review, or context management.",
+      "Keep work direct when the target, acceptance surface, and verifier are already clear enough for the parent agent to proceed cheaply.",
+      "If direct work reveals real breadth, unresolved ambiguity, repeated failed verification, independent responsibility boundaries, or context pressure, escalate with a compact evidence handoff.",
+      "Valid topology values are exactly: sequential and dag. Use sequential with steps and dag with stages.",
+      "Choose topology from execution shape: sequential for one or more ordered responsibilities; dag when any stage needs parallel ownership or later fan-in.",
+      "Memory is a capability, not a route topology. Use direct memory search for recall/inventory, or set needsMemory when routed agents should receive/use memory context.",
+      "Set expectedEffects explicitly: read for inspection, write for workspace mutation, verify when tests/commands/readback are part of the route. requiresWorkspaceMutation is a legacy compatibility flag.",
+      "Any routed implementation or file mutation must include an editing/executing worker and a later reviewer who checks the original request, plan/claims, repository standards, gaps, and test/readback evidence.",
+      "Add roles only when they own a distinct responsibility that materially improves evidence, alternatives, risk control, execution, review, or synthesis; otherwise keep the route compact.",
       "Use risk low for explicit docs-only artifact edits; reserve medium/high/critical for product-code mutation, secrets, destructive actions, or security-sensitive execution.",
       "After the result, answer from Final answer material; call more tools only for an explicit critical gap.",
     ],
     parameters: ChalinRouteParams,
     async execute(_toolCallId, params: ChalinRouteToolParams, signal, onUpdate, ctx) {
+      const expectedEffects = validateExplicitExpectedEffects(params.expectedEffects);
+      if ("error" in expectedEffects) return errorResult(expectedEffects.error, { expectedEffects: params.expectedEffects });
       const loaded = loadEffectiveConfig({ cwd: ctx.cwd });
       const catalog = AgentCatalog.load({ cwd: ctx.cwd });
       const memory = createConfiguredMemoryStore({ cwd: ctx.cwd }, loaded.config);
@@ -423,8 +436,10 @@ export function registerChalinTools(pi: ExtensionAPI): void {
         modelOverrides: mergedSessionModelOverrides(loaded.config.agents.modelOverrides),
         thinkingOverrides: mergedSessionThinkingOverrides(loaded.config.agents.thinkingOverrides),
       });
-      let route = routeFromPlan(params);
-      const requiresWorkspaceMutation = Boolean(params.requiresWorkspaceMutation) || inferRouteRequiresWorkspaceMutation(route, params.task);
+      let route = routeFromPlan({ ...params, expectedEffects: expectedEffects.effects });
+      const requiresWorkspaceMutation = route.expectedEffects?.includes("write") === true
+        || Boolean(params.requiresWorkspaceMutation)
+        || inferRouteRequiresWorkspaceMutation(route, params.task);
       route = loaded.config.safety.mutationExpectationGuard
         ? normalizeRouteForExecution(route, { requiresWorkspaceMutation, task: params.task })
         : collapseReadOnlyScoutContextRoute(route, requiresWorkspaceMutation);
@@ -438,7 +453,7 @@ export function registerChalinTools(pi: ExtensionAPI): void {
         return errorResult(`Unknown pi-chalin agent(s): ${unknownAgents.join(", ")}\nAvailable agents: ${agents.map((agent) => agent.name).join(", ")}\nRetry chalin_route with only available agent names, or answer directly if the task is bounded.`, { route, diagnostics: catalog.diagnostics });
       }
       if (route.kind === "ask-user") {
-        return errorResult(`${route.reason}\nRetry chalin_route with a valid topology contract: single/chain/parallel require steps, dag requires stages, and memory-only requires no steps.`, { route });
+        return errorResult(`${route.reason}\nRetry chalin_route with a valid topology contract: sequential requires steps and dag requires stages.`, { route });
       }
       const guard = beginChalinRouteInvocation({ dryRun: Boolean(params.dryRun), route });
       if (!guard.allowed) {

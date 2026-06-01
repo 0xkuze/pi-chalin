@@ -1,12 +1,14 @@
 export type ChalinExpectedDecision = "chalin" | "direct";
-export type ChalinExpectedTopology = "single" | "chain" | "parallel" | "dag" | "memory-only" | "none";
+export type ChalinExpectedTopology = "sequential" | "dag" | "none";
 
 export interface ChalinOrchestrationEvalCase {
   id: string;
   prompt: string;
   expectedDecision: ChalinExpectedDecision;
   expectedTopology: ChalinExpectedTopology;
+  acceptedTopologies?: ChalinExpectedTopology[];
   expectedAgents: string[];
+  acceptedAgentSets?: string[][];
   category: string;
   reason: string;
 }
@@ -16,7 +18,7 @@ export const ORCHESTRATION_EVAL_CASES: ChalinOrchestrationEvalCase[] = [
     id: "branch-summary-nontrivial",
     prompt: "hey what we do in this branch",
     expectedDecision: "chalin",
-    expectedTopology: "single",
+    expectedTopology: "sequential",
     expectedAgents: ["scout"],
     category: "branch-analysis",
     reason: "Branch summaries require git/diff exploration, but a single scout can provide the evidence handoff while the primary agent synthesizes the user-facing answer.",
@@ -25,25 +27,28 @@ export const ORCHESTRATION_EVAL_CASES: ChalinOrchestrationEvalCase[] = [
     id: "project-understanding",
     prompt: "que hace este proyecto y cuales son sus modulos principales",
     expectedDecision: "chalin",
-    expectedTopology: "single",
+    expectedTopology: "sequential",
+    acceptedTopologies: ["sequential", "dag"],
     expectedAgents: ["scout"],
+    acceptedAgentSets: [["scout"], ["context-builder"]],
     category: "broad-local-analysis",
-    reason: "Understanding an unknown project needs scoped exploration; the primary agent can synthesize from a scout handoff without a second subagent unless gap reads are required.",
+    reason: "Understanding an unknown project needs scoped exploration; sequential and DAG are both valid depending on whether the router keeps the map as one ordered pass or splits independent surfaces before synthesis.",
   },
   {
     id: "deep-project-fanout",
     prompt: "entiende este proyecto en profundidad dividiendo el analisis por carpetas principales y luego sintetiza",
     expectedDecision: "chalin",
     expectedTopology: "dag",
+    acceptedTopologies: ["dag", "sequential"],
     expectedAgents: ["scout", "context-builder"],
     category: "deep-local-analysis-fanout",
-    reason: "Deep repository understanding should gather initial context, fan out folder analysis in parallel, and synthesize afterward.",
+    reason: "Deep repository understanding should gather scoped context and synthesize afterward; DAG is preferred when the router splits independent surfaces, while sequential is still valid when it preserves a coherent ordered analysis.",
   },
   {
     id: "architecture-migration",
     prompt: "si tuvieras que migrar todos los componentes a Vue 3 como lo harias",
     expectedDecision: "chalin",
-    expectedTopology: "chain",
+    expectedTopology: "sequential",
     expectedAgents: ["scout", "planner"],
     category: "architecture-migration",
     reason: "A migration across all components benefits from inventory then planning; a separate reviewer is optional overhead unless risk review is requested.",
@@ -52,16 +57,17 @@ export const ORCHESTRATION_EVAL_CASES: ChalinOrchestrationEvalCase[] = [
     id: "project-review",
     prompt: "review this project and tell me the main architecture risks",
     expectedDecision: "chalin",
-    expectedTopology: "single",
+    expectedTopology: "sequential",
+    acceptedTopologies: ["sequential", "dag"],
     expectedAgents: ["scout"],
     category: "review",
-    reason: "A high-level architecture-risk overview can be handled by one scout handoff plus primary synthesis; formal audits should use reviewer.",
+    reason: "A high-level architecture-risk overview needs routed evidence; sequential and DAG are both valid depending on whether the router keeps one scout pass or splits independent surfaces before synthesis.",
   },
   {
     id: "multi-file-implementation",
     prompt: "implement a safer auth refresh flow and add tests",
     expectedDecision: "chalin",
-    expectedTopology: "chain",
+    expectedTopology: "sequential",
     expectedAgents: ["worker", "reviewer"],
     category: "implementation",
     reason: "Implementation touching behavior and tests needs an executor and a later review; the worker can gather local context unless evidence proves a separate scout/planner is needed.",
@@ -70,7 +76,7 @@ export const ORCHESTRATION_EVAL_CASES: ChalinOrchestrationEvalCase[] = [
     id: "parallel-options",
     prompt: "compare two possible approaches for splitting the frontend modules and recommend one",
     expectedDecision: "chalin",
-    expectedTopology: "chain",
+    expectedTopology: "sequential",
     expectedAgents: ["planner"],
     category: "parallel-analysis",
     reason: "A local module-splitting comparison can use compact evidence then planning; parallel planners are reserved for explicitly independent perspectives or high-stakes disagreement.",
@@ -87,17 +93,17 @@ export const ORCHESTRATION_EVAL_CASES: ChalinOrchestrationEvalCase[] = [
   {
     id: "memory-recall",
     prompt: "recuerda que decidimos sobre la memoria de pi-chalin",
-    expectedDecision: "chalin",
-    expectedTopology: "memory-only",
+    expectedDecision: "direct",
+    expectedTopology: "none",
     expectedAgents: [],
     category: "memory",
-    reason: "Explicit memory recall should use the chalin memory path.",
+    reason: "Explicit memory recall should use direct memory search when available; memory is a capability, not a route topology.",
   },
   {
     id: "go-project-understanding",
     prompt: "analiza este servicio Go y dime su estructura principal, entrypoints y como se testea",
     expectedDecision: "chalin",
-    expectedTopology: "single",
+    expectedTopology: "sequential",
     expectedAgents: ["scout"],
     category: "broad-local-analysis-go",
     reason: "Stack-agnostic project understanding should use scout evidence without assuming a Node-style package manifest or paying for avoidable synthesis overhead.",
@@ -106,7 +112,7 @@ export const ORCHESTRATION_EVAL_CASES: ChalinOrchestrationEvalCase[] = [
     id: "complex-go-implementation-plan",
     prompt: "implementa manejo seguro de refresh token en este servicio Go y agrega tests",
     expectedDecision: "chalin",
-    expectedTopology: "chain",
+    expectedTopology: "sequential",
     expectedAgents: ["worker", "reviewer"],
     category: "implementation-go",
     reason: "A Go implementation with tests needs worker execution and review; extra planning/discovery agents are optional when the route discovers broader risk.",
@@ -115,7 +121,7 @@ export const ORCHESTRATION_EVAL_CASES: ChalinOrchestrationEvalCase[] = [
     id: "surgical-long-file-edit",
     prompt: "en un archivo largo cambia solo la validacion puntual de auth y evita reescribir el archivo completo",
     expectedDecision: "chalin",
-    expectedTopology: "chain",
+    expectedTopology: "sequential",
     expectedAgents: ["worker", "reviewer"],
     category: "surgical-edit",
     reason: "A long-file no-rewrite edit needs disciplined worker mutation and reviewer verification; a separate planner is useful only when target-region planning is nontrivial.",
@@ -124,7 +130,7 @@ export const ORCHESTRATION_EVAL_CASES: ChalinOrchestrationEvalCase[] = [
     id: "policy-aware-review",
     prompt: "revisa si los tests y comandos del proyecto estan bien configurados sin crear scripts temporales",
     expectedDecision: "chalin",
-    expectedTopology: "single",
+    expectedTopology: "sequential",
     expectedAgents: ["reviewer"],
     category: "tool-discipline-review",
     reason: "A reviewer can inspect test and command configuration directly; extra scout handoff is optional overhead.",
