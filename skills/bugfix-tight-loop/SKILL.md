@@ -37,8 +37,6 @@ version: 1
 ## Rules
 - Read the exact target surface before editing.
 - Change the smallest behavior-preserving region that fixes the failure.
-- Prefer surgical edits to existing files; reserve full-file writes for new files or failed edits.
-- Once target files are known, avoid extra discovery or re-reading edited files unless verification fails or evidence is missing.
 - Add or update the nearest runner-discoverable regression test unless the user explicitly forbids test edits.
 - When tests are touched, cover the broken behavior plus the nearest meaningful boundary of the same contract.
 - Run the nearest verification command from repository evidence.
