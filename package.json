@@ -45,6 +45,7 @@
     "eval:workflow:sharded": "bun evals/workflow-sharded.eval.ts --preset=community",
     "eval:workflow:matrix": "bun evals/workflow-quality.eval.ts --preset=matrix",
     "eval:workflow:harness": "bun evals/workflow-quality.eval.ts --preset=harness",
+    "eval:workflow:harness-ab": "bun evals/workflow-quality.eval.ts --preset=harness-ab",
     "eval:workflow:complex": "bun evals/workflow-quality.eval.ts --preset=complex",
     "eval:workflow:routed": "bun evals/workflow-quality.eval.ts --preset=routed",
     "eval:workflow:community": "bun evals/workflow-quality.eval.ts --preset=community",

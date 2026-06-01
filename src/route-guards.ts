@@ -39,6 +39,7 @@ function routeStepTasks(route: RouteDecision): string[] {
 }
 
 export function ensureMutationRouteHasWorkerAndReviewer(route: RouteDecision, requiresWorkspaceMutation: boolean, task: string): RouteDecision {
+  if (reviewerDisabled()) return ensureMutationRouteHasWorkerOnly(route, requiresWorkspaceMutation, task);
   const hasImplementationWorker = route.agents.includes("worker");
   if ((!requiresWorkspaceMutation && !hasImplementationWorker) || route.kind === "memory-only" || route.kind === "ask-user") return route;
   if (!route.plan) return route;
@@ -94,6 +95,92 @@ export function ensureMutationRouteHasWorkerAndReviewer(route: RouteDecision, re
   return withReview;
 }
 
+function ensureMutationRouteHasWorkerOnly(route: RouteDecision, requiresWorkspaceMutation: boolean, task: string): RouteDecision {
+  const hasImplementationWorker = route.agents.includes("worker");
+  if ((!requiresWorkspaceMutation && !hasImplementationWorker) || route.kind === "memory-only" || route.kind === "ask-user") return stripReviewerSteps(route);
+  if (!route.plan) return stripReviewerSteps(route);
+
+  const workerStep: AgentStep = {
+    id: "implementation",
+    agent: "worker",
+    task: [
+      "Implement the user's requested workspace changes.",
+      "Preserve existing behavior, satisfy every explicit acceptance criterion, and run or update relevant tests when available.",
+      `Original task: ${task}`,
+    ].join(" "),
+    budget: "normal",
+  };
+
+  if (route.plan.kind === "dag") {
+    const stages = stripReviewerStages(route.plan.stages);
+    const withWorker = stages.some((stage) => stage.tasks.some((step) => step.agent === "worker"))
+      ? stages
+      : [...stages, { id: "implementation", tasks: [workerStep] }];
+    return {
+      ...route,
+      agents: withWorker.flatMap((stage) => stage.tasks.map((step) => step.agent)),
+      needsArtifacts: true,
+      reason: `${route.reason} Mutation task normalized by pi-chalin harness ablation: reviewer disabled; worker execution preserved.`,
+      plan: { kind: "dag", stages: withWorker },
+    };
+  }
+
+  const existingSteps = route.plan.kind === "single"
+    ? [{ id: "existing", agent: route.plan.agent, task: route.plan.task, budget: route.plan.budget }]
+    : route.plan.kind === "chain" ? route.plan.steps : route.plan.tasks;
+  const stripped = existingSteps.filter((step) => step.agent !== "reviewer");
+  const steps = stripped.some((step) => step.agent === "worker") ? stripped : [...stripped, workerStep];
+  return {
+    ...route,
+    kind: "multi-agent-chain",
+    agents: steps.map((step) => step.agent),
+    needsArtifacts: true,
+    reason: `${route.reason} Mutation task normalized by pi-chalin harness ablation: reviewer disabled; worker execution preserved.`,
+    plan: { kind: "chain", steps },
+  };
+}
+
+function stripReviewerSteps(route: RouteDecision): RouteDecision {
+  if (!route.plan || !route.agents.includes("reviewer")) return route;
+  if (route.plan.kind === "dag") {
+    const originalPlan = route.plan;
+    const stages = stripReviewerStages(route.plan.stages);
+    const unchanged = stages.length === originalPlan.stages.length
+      && stages.every((stage, index) => stage.tasks.length === (originalPlan.stages[index]?.tasks.length ?? -1));
+    if (unchanged) return route;
+    if (stages.length === 0) return askUserRoute(`${route.reason} Reviewer-only route removed for pi-chalin no-reviewer harness ablation; no executable non-reviewer step remains.`);
+    return {
+      ...route,
+      agents: stages.flatMap((stage) => stage.tasks.map((step) => step.agent)),
+      reason: `${route.reason} Reviewer steps removed for pi-chalin no-reviewer harness ablation.`,
+      plan: { kind: "dag", stages },
+    };
+  }
+  const steps = route.plan.kind === "single"
+    ? [{ id: "existing", agent: route.plan.agent, task: route.plan.task, budget: route.plan.budget }]
+    : route.plan.kind === "chain" ? route.plan.steps : route.plan.tasks;
+  const stripped = steps.filter((step) => step.agent !== "reviewer");
+  if (stripped.length === steps.length) return route;
+  if (stripped.length === 0) return askUserRoute(`${route.reason} Reviewer-only route removed for pi-chalin no-reviewer harness ablation; no executable non-reviewer step remains.`);
+  return {
+    ...route,
+    kind: stripped.length === 1 ? "single-agent" : "multi-agent-chain",
+    agents: stripped.map((step) => step.agent),
+    reason: `${route.reason} Reviewer steps removed for pi-chalin no-reviewer harness ablation.`,
+    plan: stripped.length === 1 ? { kind: "single", agent: stripped[0]!.agent, task: stripped[0]!.task, budget: stripped[0]!.budget } : { kind: "chain", steps: stripped },
+  };
+}
+
+function askUserRoute(reason: string): RouteDecision {
+  return { kind: "ask-user", agents: [], risk: "low", ambiguity: "high", needsMemory: false, needsArtifacts: false, reason };
+}
+
+function stripReviewerStages(stages: Array<{ id: string; tasks: AgentStep[] }>): Array<{ id: string; tasks: AgentStep[] }> {
+  return stages
+    .map((stage) => ({ ...stage, tasks: stage.tasks.filter((step) => step.agent !== "reviewer") }))
+    .filter((stage) => stage.tasks.length > 0);
+}
+
 export function collapseReadOnlyScoutContextRoute(route: RouteDecision, requiresWorkspaceMutation: boolean): RouteDecision {
   if (requiresWorkspaceMutation || route.needsMemory || route.risk !== "low") return route;
   if (route.kind !== "multi-agent-chain" || route.plan?.kind !== "chain") return route;
@@ -115,6 +202,10 @@ export function collapseReadOnlyScoutContextRoute(route: RouteDecision, requires
       budget: scout.budget,
     },
   };
+}
+
+function reviewerDisabled(): boolean {
+  return process.env.PI_CHALIN_DISABLE_REVIEWER === "1";
 }
 
 function ensureStepsHaveImplementationReview(existingSteps: AgentStep[], workerStep: AgentStep, reviewerStep: AgentStep): { steps: AgentStep[]; changed: boolean; addedWorker: boolean; addedReviewer: boolean } {

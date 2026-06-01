@@ -176,6 +176,7 @@ export function estimateBudgetPreflight(input: BudgetPreflightInput): BudgetPref
 }
 
 export function evaluateBudgetUsage(policy: BudgetPolicy, usage: BudgetUsage, progress?: ProgressScore): BudgetHealth {
+  if (budgetGatesDisabled()) return { status: "ok", caps: [], warnings: [], next: "continue" };
   const caps: BudgetCapHit[] = [];
   compare(caps, "max_tool_calls", usage.toolCalls, policy.caps.maxToolCalls);
   compare(caps, "max_seconds", Math.ceil(usage.elapsedMs / 1000), policy.caps.maxSeconds);
@@ -204,6 +205,10 @@ export function evaluateBudgetUsage(policy: BudgetPolicy, usage: BudgetUsage, pr
       ? policy.resumeStrategy === "stage-checkpoint-validate-memory-next" ? "split" : "checkpoint-and-continue"
       : "continue"),
   };
+}
+
+function budgetGatesDisabled(): boolean {
+  return process.env.PI_CHALIN_DISABLE_BUDGET_GATES === "1";
 }
 
 export function summarizeToolUtility(input: ToolUtilityInput): ToolUtilityMetrics {

@@ -83,6 +83,32 @@ test("evaluateBudgetUsage turns exhausted budget into checkpointed continuation 
   assert.equal(health.next, "checkpoint-and-continue");
 });
 
+test("budget-disabled harness mode suppresses continuation gates for ablation evals", () => {
+  const previous = process.env.PI_CHALIN_DISABLE_BUDGET_GATES;
+  process.env.PI_CHALIN_DISABLE_BUDGET_GATES = "1";
+  try {
+    const reviewer = agent("reviewer", "review");
+    const policy = policyForStep(reviewer, { agent: "reviewer", task: "Review project", budget: "tight" }, "multi-agent-chain");
+    const health = evaluateBudgetUsage(policy, {
+      toolCalls: policy.caps.maxToolCalls + 10,
+      elapsedMs: (policy.caps.maxSeconds + 1) * 1000,
+      totalCostUsd: 0,
+      turns: 1,
+      outputChars: 0,
+      readBytes: 0,
+      filesTouched: 0,
+      retriesByTool: {},
+    });
+
+    assert.equal(health.status, "ok");
+    assert.deepEqual(health.caps, []);
+    assert.equal(health.next, "continue");
+  } finally {
+    if (previous === undefined) delete process.env.PI_CHALIN_DISABLE_BUDGET_GATES;
+    else process.env.PI_CHALIN_DISABLE_BUDGET_GATES = previous;
+  }
+});
+
 test("tool-call budget alone is a soft cap that can checkpoint without failing the stage", () => {
   const scout = agent("scout", "recon");
   const policy = policyForStep(scout, { agent: "scout", task: "Map project", budget: "normal" }, "multi-agent-chain");

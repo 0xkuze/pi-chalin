@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { setDefaultTimeout, test } from "bun:test";
 import { WORKFLOW_ORACLE_DIR, createWorkflowFixture, getWorkflowEvalCase, listWorkflowCommunityCases, listWorkflowComplexCases, listWorkflowEvalCases, listWorkflowHoldoutCases, selectWorkflowPrompt } from "../evals/workflow-cases.ts";
 import { buildWorkflowShardChildArgs, resolveWorkflowShardArgs } from "../evals/workflow-sharded.eval.ts";
-import { appendWorkflowTail, assertSdkRunBudget, auditWorkflowProductionFastPaths, auditWorkflowTraceForCheating, buildWorkflowComparativeJudgeInfrastructureSkip, buildWorkflowComparativeJudgePrompt, buildWorkflowContentOnlyComparativeJudgePrompt, buildWorkflowJudgePrompt, collectWorkflowEvidence, detectWorkflowInfrastructureFailure, detectWorkflowVerification, effectiveWorkflowFinalText, enforceWorkflowImplementationComparativeWinner, evaluateWorkflowRegressionGates, extractFinalText, extractTokenTotal, extractWorkflowUsage, observeTerminalAssistantAnswer, parseJsonObjectFromText, resolveCaseIds, resolveComparativeJudgeMode, resolveGentleCompanionRoot, resolveGentlePiRoot, resolveVariants, resolveWorkflowArgs, resolveWorkflowIdleTimeoutMs, resolveWorkflowInfraRetries, resolveWorkflowOutputStoragePolicy, resolveWorkflowRunCount, resolveWorkflowThinking, resolveWorkflowTimeoutMs, shouldRequireChalinRoute, shouldRequireGentleSubagent, shouldRetainWorkflowFixture, shouldRetryWorkflowRun, shouldRunWorkflowJudge, shouldStoreFullWorkflowOutput, summarizeComparison, summarizeWorkflowBlindJudgeStability, summarizeWorkflowFailures, summarizeWorkflowSkillsAb, toolsForWorkflowVariant, workflowAgentHistory, workflowChalinRouteAgentMetrics, workflowDiagnostics, workflowFixtureFingerprint, workflowPromptVariantIndexForRun, workflowRegressionGatesEnabled, workflowReportFilename, workflowToolHistory, writeWorkflowReport, DEFAULT_WORKFLOW_IDLE_TIMEOUT_MS, MAX_WORKFLOW_RUNS, MAX_WORKFLOW_TIMEOUT_MS } from "../evals/workflow-quality.eval.ts";
+import { appendWorkflowTail, assertSdkRunBudget, auditWorkflowProductionFastPaths, auditWorkflowTraceForCheating, buildWorkflowComparativeJudgeInfrastructureSkip, buildWorkflowComparativeJudgePrompt, buildWorkflowContentOnlyComparativeJudgePrompt, buildWorkflowJudgePrompt, collectWorkflowEvidence, detectWorkflowInfrastructureFailure, detectWorkflowVerification, effectiveWorkflowFinalText, enforceWorkflowImplementationComparativeWinner, evaluateWorkflowRegressionGates, extractFinalText, extractTokenTotal, extractWorkflowUsage, observeTerminalAssistantAnswer, parseJsonObjectFromText, resolveCaseIds, resolveComparativeJudgeMode, resolveGentleCompanionRoot, resolveGentlePiRoot, resolveVariants, resolveWorkflowArgs, resolveWorkflowIdleTimeoutMs, resolveWorkflowInfraRetries, resolveWorkflowOutputStoragePolicy, resolveWorkflowRunCount, resolveWorkflowThinking, resolveWorkflowTraceVariant, resolveWorkflowTimeoutMs, shouldRequireChalinRoute, shouldRequireGentleSubagent, shouldRetainWorkflowFixture, shouldRetryWorkflowRun, shouldRunWorkflowJudge, shouldStoreFullWorkflowOutput, summarizeComparison, summarizeWorkflowBlindJudgeStability, summarizeWorkflowFailures, summarizeWorkflowSkillsAb, toolsForWorkflowVariant, workflowAgentHistory, workflowChalinRouteAgentMetrics, workflowDiagnostics, workflowEvalPass, workflowFixtureFingerprint, workflowPromptVariantIndexForRun, workflowRegressionGatesEnabled, workflowReportFilename, workflowToolHistory, workflowVariantEnv, writeWorkflowReport, DEFAULT_WORKFLOW_IDLE_TIMEOUT_MS, MAX_WORKFLOW_RUNS, MAX_WORKFLOW_TIMEOUT_MS } from "../evals/workflow-quality.eval.ts";
 import { scoreWorkflowWorkspace } from "../evals/workflow-quality-lib.ts";
 
 setDefaultTimeout(60_000);
@@ -1218,6 +1218,7 @@ test("workflow eval CLI helpers keep live runs bounded", () => {
   assert.deepEqual(resolveVariants("chalin"), ["chalin"]);
   assert.deepEqual(resolveVariants("harnesses"), ["chalin", "gentle"]);
   assert.deepEqual(resolveVariants("skills-ab"), ["chalin-skills-off", "chalin-skills-on"]);
+  assert.deepEqual(resolveVariants("harness-ab"), ["chalin", "chalin-no-memory", "chalin-no-reviewer", "chalin-no-budget-gates"]);
   assert.deepEqual(resolveVariants("all-harnesses"), ["simple", "chalin", "gentle"]);
   assert.ok(resolveCaseIds("all").length >= 6);
   assert.deepEqual(resolveCaseIds("skills-ab"), ["holdout-bugfix-date-parser"]);
@@ -1228,6 +1229,48 @@ test("workflow eval CLI helpers keep live runs bounded", () => {
   assert.ok(resolveCaseIds("all-realistic").length > resolveCaseIds("all-with-holdout").length);
   assert.ok(resolveCaseIds("all-expanded").length > resolveCaseIds("all-realistic").length);
   assert.deepEqual(resolveCaseIds("a,b"), ["a", "b"]);
+});
+
+test("workflow harness-ab variants set isolated harness toggles", () => {
+  assert.deepEqual(workflowVariantEnv("chalin", "model-x"), {
+    PI_CHALIN_EVAL_AGENT_MODEL: "model-x",
+    PI_CHALIN_DISABLE_MEMORY: undefined,
+    PI_CHALIN_DISABLE_REVIEWER: undefined,
+    PI_CHALIN_DISABLE_BUDGET_GATES: undefined,
+    PI_CHALIN_GENTLE_COMPANIONS_ROOT: undefined,
+    PI_CHALIN_GENTLE_PI_ROOT: undefined,
+  });
+  assert.equal(workflowVariantEnv("chalin-no-memory", "model-x").PI_CHALIN_DISABLE_MEMORY, "1");
+  assert.equal(workflowVariantEnv("chalin-no-reviewer", "model-x").PI_CHALIN_DISABLE_REVIEWER, "1");
+  assert.equal(workflowVariantEnv("chalin-no-budget-gates", "model-x").PI_CHALIN_DISABLE_BUDGET_GATES, "1");
+});
+
+test("workflow harness-ab variants reuse chalin trace grading contract", () => {
+  assert.equal(resolveWorkflowTraceVariant("simple"), "simple");
+  assert.equal(resolveWorkflowTraceVariant("chalin"), "chalin");
+  assert.equal(resolveWorkflowTraceVariant("chalin-no-memory"), "chalin");
+  assert.equal(resolveWorkflowTraceVariant("chalin-no-reviewer"), "chalin");
+  assert.equal(resolveWorkflowTraceVariant("chalin-no-budget-gates"), "chalin");
+  assert.equal(resolveWorkflowTraceVariant("gentle"), "gentle");
+});
+
+test("workflow harness-ab eval pass honors comparison gate failures", () => {
+  const output = (variant: "chalin" | "chalin-no-memory") => ({
+    variant,
+    runIndex: 1,
+    workspace: { caseId: "holdout-go-ttl-cache", pass: true, score: 100 },
+    trace: { pass: true, score: 100, warnings: [], critical: [] },
+    diagnostics: {
+      infrastructureFailure: undefined,
+      finalAnswerMissing: false,
+      chalinRouteValidationErrors: 0,
+      antiCheat: { pass: true, critical: [], warnings: [], accessed: [] },
+      verificationPassed: true,
+    },
+    judge: undefined,
+  } as never);
+
+  assert.equal(workflowEvalPass([output("chalin"), output("chalin-no-memory")], [{ pass: false }]), false);
 });
 
 test("workflow eval routes complex harness cases while keeping calibration cases direct", () => {
@@ -1328,6 +1371,12 @@ test("workflow presets expand long package scripts without environment variables
   assert.equal(harness.thinking, "adaptive");
   assert.equal(harness.matrixPath, "evals/results/workflow-quality-harness-comparison.jsonl");
 
+  const harnessAb = resolveWorkflowArgs({ preset: "harness-ab" });
+  assert.equal(harnessAb.mode, "sdk");
+  assert.equal(harnessAb.variant, "harness-ab");
+  assert.equal(harnessAb.gates, "1");
+  assert.equal(harnessAb.matrixPath, "evals/results/workflow-quality-harness-ablation.jsonl");
+
   const complex = resolveWorkflowArgs({ preset: "complex" });
   assert.equal(complex.case, "complex");
   assert.equal(complex.variant, "all-harnesses");
@@ -1343,6 +1392,9 @@ test("workflow presets expand long package scripts without environment variables
   assert.equal(sharded.runs, "3");
   assert.equal(sharded.matrixPath, "evals/results/workflow-quality-community-sharded-matrix.jsonl");
   assert.equal(resolveWorkflowShardArgs({ preset: "community", concurrency: "2" }).concurrency, "2");
+
+  const packageJson = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf-8")) as { scripts?: Record<string, string> };
+  assert.equal(packageJson.scripts?.["eval:workflow:harness-ab"], "bun evals/workflow-quality.eval.ts --preset=harness-ab");
 
   assert.throws(() => resolveWorkflowArgs({ preset: "unknown" }), /Unsupported workflow preset/);
   assert.throws(() => resolveWorkflowShardArgs({ preset: "unknown" }), /Unsupported workflow shard preset/);
@@ -1476,6 +1528,34 @@ test("workflow regression gates require routed tools for route-required harness 
   assert.ok(gates.failures.some((item) => /route-required case did not call chalin_route/.test(item)));
   assert.ok(gates.failures.some((item) => /route-required case called chalin_route but did not execute Chalin subagent steps/.test(item)));
   assert.ok(gates.failures.some((item) => /route-required case did not call Gentle subagent/.test(item)));
+});
+
+test("workflow regression gates require routed tools for every chalin harness ablation", () => {
+  const output = {
+    variant: "chalin-no-memory",
+    runIndex: 1,
+    workspace: { caseId: "complex-bun-zig-runtime-plan", pass: true, score: 100 },
+    trace: { pass: true, score: 100, warnings: [], critical: [] },
+    diagnostics: {
+      infrastructureFailure: undefined,
+      finalAnswerMissing: false,
+      objectiveStopReason: undefined,
+      duplicateToolCalls: 0,
+      chalinRouteCalls: 1,
+      chalinRouteAgentSteps: 0,
+      verificationPassed: true,
+    },
+    judge: undefined,
+  } as never;
+  const gates = evaluateWorkflowRegressionGates([output], [{
+    caseId: "complex-bun-zig-runtime-plan",
+    pass: true,
+    reason: "ok",
+    variants: { "chalin-no-memory": { passRate: 1, avgWorkspaceScore: 100, avgWorkspaceQualityScore: 100, avgTraceScore: 100, p95DurationMs: 1_000 } },
+  }] as never);
+
+  assert.equal(gates.pass, false);
+  assert.ok(gates.failures.some((item) => /route-required case called chalin_route but did not execute Chalin subagent steps/.test(item)));
 });
 
 test("workflow regression gates fail if harnesses receive different prompt variants", () => {

@@ -109,11 +109,8 @@ interface DirectCompletionState {
   testCoverageReviewObserved: boolean;
   verificationObserved: boolean;
   verificationCommand?: string;
-  weakTestCoverageObserved: boolean;
   weakTestCoverageNudgeSent: boolean;
-  packageMetadataGapObserved: boolean;
   packageMetadataNudgeSent: boolean;
-  parallelSurfaceGapObserved: boolean;
   parallelSurfaceNudgeSent: boolean;
   outOfWorkspaceMutationObserved: boolean;
   outOfWorkspaceMutationNudgeSent: boolean;
@@ -317,6 +314,14 @@ export function getDirectToolEventsForTests(): DirectToolEvent[] {
   return directCompletion.toolEvents.map((event) => ({ ...event }));
 }
 
+export function getDirectDerivedGapDiagnosticsForTests(): { weakTestCoverage: boolean; packageMetadata: boolean; parallelSurface?: { expected: string; actual: string[] } } {
+  return {
+    weakTestCoverage: directWeakTestCoverageGap(),
+    packageMetadata: directPackageMetadataGap(),
+    parallelSurface: directParallelSurfaceGap(),
+  };
+}
+
 export function recordDirectToolCompletion(options: { toolName: string; isError?: boolean; command?: string; path?: string; argsText?: string }): DirectToolCompletionAdapter {
   appendDirectToolEvent({ ...options, phase: "completed" });
   let shouldProgressNudge = false;
@@ -402,20 +407,12 @@ export function recordDirectToolCompletion(options: { toolName: string; isError?
       }
       if (isTestLikePath(changedPath)) {
         directCompletion.testMutationObserved = true;
-        const content = extractContentFromArgsText(options.argsText);
-        if (content !== undefined) {
-          directCompletion.weakTestCoverageObserved = looksLikeWeakTestCoverage(content);
-          if (!directCompletion.weakTestCoverageObserved) directCompletion.weakTestCoverageNudgeSent = false;
-        }
+        if (!directWeakTestCoverageGap()) directCompletion.weakTestCoverageNudgeSent = false;
       } else if (!isDocsMarkdownPath(changedPath)) {
         directCompletion.sourceMutationObserved = true;
       }
       if (isPackageJsonPath(changedPath) && directCompletion.directModeKind === "scaffold-greenfield") {
-        const content = extractContentFromArgsText(options.argsText);
-        if (content !== undefined) {
-          directCompletion.packageMetadataGapObserved = packageJsonLikelyNeedsModuleType(content);
-          if (!directCompletion.packageMetadataGapObserved) directCompletion.packageMetadataNudgeSent = false;
-        }
+        if (!directPackageMetadataGap()) directCompletion.packageMetadataNudgeSent = false;
       }
       if (coverageReviewWasRequested && !isDocsMarkdownPath(changedPath)) {
         directCompletion.testCoverageReviewObserved = true;
@@ -440,7 +437,6 @@ export function recordDirectToolCompletion(options: { toolName: string; isError?
       directCompletion.verificationAttemptCount = 0;
       directCompletion.weakTestCoverageNudgeSent = false;
       directCompletion.packageMetadataNudgeSent = false;
-      directCompletion.parallelSurfaceGapObserved = false;
       directCompletion.parallelSurfaceNudgeSent = false;
       directCompletion.nudgeSent = false;
     }
@@ -563,28 +559,27 @@ export function recordDirectToolCompletion(options: { toolName: string; isError?
   const needsWeakTestCoverageReview = directCompletion.verificationObserved
     && directCompletion.sourceMutationObserved
     && directCompletion.testMutationObserved
-    && directCompletion.weakTestCoverageObserved;
+    && directWeakTestCoverageGap();
   const shouldWeakTestCoverageNudge = directCompletion.sourceMutationObserved
     && directCompletion.testMutationObserved
-    && directCompletion.weakTestCoverageObserved
+    && directWeakTestCoverageGap()
     && !directCompletion.weakTestCoverageNudgeSent
     && (justMutated || directCompletion.verificationObserved);
   if (shouldWeakTestCoverageNudge) directCompletion.weakTestCoverageNudgeSent = true;
   const needsPackageMetadataReview = directCompletion.verificationObserved
     && directCompletion.directModeKind === "scaffold-greenfield"
-    && directCompletion.packageMetadataGapObserved;
+    && directPackageMetadataGap();
   const shouldPackageMetadataNudge = directCompletion.directModeKind === "scaffold-greenfield"
-    && directCompletion.packageMetadataGapObserved
+    && directPackageMetadataGap()
     && !directCompletion.packageMetadataNudgeSent
     && (justMutated || directCompletion.verificationObserved);
   if (shouldPackageMetadataNudge) directCompletion.packageMetadataNudgeSent = true;
-  directCompletion.parallelSurfaceGapObserved = directCompletion.verificationObserved
-    && Boolean(promptCanonicalSurfaceBypassed() ?? pythonRootDuplicateTestSurface());
-  const shouldParallelSurfaceNudge = directCompletion.parallelSurfaceGapObserved && !directCompletion.parallelSurfaceNudgeSent;
+  const parallelSurfaceGap = directParallelSurfaceGap();
+  const shouldParallelSurfaceNudge = Boolean(parallelSurfaceGap) && !directCompletion.parallelSurfaceNudgeSent;
   if (shouldParallelSurfaceNudge) directCompletion.parallelSurfaceNudgeSent = true;
   const needsMissingTestCoverageReview = directCompletion.verificationObserved
     && sourceMutationWithoutTestMutation();
-  const needsTestCoverageReview = needsMissingTestCoverageReview || needsWeakTestCoverageReview || needsPackageMetadataReview || directCompletion.parallelSurfaceGapObserved;
+  const needsTestCoverageReview = needsMissingTestCoverageReview || needsWeakTestCoverageReview || needsPackageMetadataReview || Boolean(parallelSurfaceGap);
   const shouldTestCoverageNudge = needsMissingTestCoverageReview && !directCompletion.testCoverageNudgeSent;
   if (shouldTestCoverageNudge) directCompletion.testCoverageNudgeSent = true;
   const changedPathReadbackObserved = options.toolName === "read"
@@ -727,13 +722,13 @@ export function getDirectCriticalGuardContextMessage(): string | undefined {
   if (
     directCompletion.sourceMutationObserved
     && directCompletion.testMutationObserved
-    && directCompletion.weakTestCoverageObserved
+    && directWeakTestCoverageGap()
   ) {
     reasons.push("the changed tests still look like trivial smoke/empty coverage instead of assertions for the requested behavior");
   }
   if (
     directCompletion.directModeKind === "scaffold-greenfield"
-    && directCompletion.packageMetadataGapObserved
+    && directPackageMetadataGap()
   ) {
     reasons.push("the scaffold package metadata still does not agree with delivered bin/main/export/module entrypoints");
   }
@@ -836,11 +831,8 @@ function freshDirectCompletionState(): DirectCompletionState {
     testCoverageReviewObserved: false,
     verificationObserved: false,
     verificationCommand: undefined,
-    weakTestCoverageObserved: false,
     weakTestCoverageNudgeSent: false,
-    packageMetadataGapObserved: false,
     packageMetadataNudgeSent: false,
-    parallelSurfaceGapObserved: false,
     parallelSurfaceNudgeSent: false,
     outOfWorkspaceMutationObserved: false,
     outOfWorkspaceMutationNudgeSent: false,
@@ -873,6 +865,34 @@ function appendDirectToolEvent(event: DirectToolEvent): void {
   if (directCompletion.toolEvents.length > 200) {
     directCompletion.toolEvents.splice(0, directCompletion.toolEvents.length - 200);
   }
+}
+
+function directWeakTestCoverageGap(): boolean {
+  const latestByPath = latestChangedFileContents((path) => isTestLikePath(path));
+  return [...latestByPath.values()].some((content) => looksLikeWeakTestCoverage(content));
+}
+
+function directPackageMetadataGap(): boolean {
+  if (directCompletion.directModeKind !== "scaffold-greenfield") return false;
+  const latestPackage = [...latestChangedFileContents((path) => isPackageJsonPath(path)).values()].at(-1);
+  return latestPackage !== undefined && packageJsonLikelyNeedsModuleType(latestPackage);
+}
+
+function directParallelSurfaceGap(): { expected: string; actual: string[] } | undefined {
+  if (!directCompletion.verificationObserved) return undefined;
+  return promptCanonicalSurfaceBypassed() ?? pythonRootDuplicateTestSurface();
+}
+
+function latestChangedFileContents(predicate: (path: string) => boolean): Map<string, string> {
+  const latest = new Map<string, string>();
+  for (const event of directCompletion.toolEvents) {
+    if (event.phase !== "completed" || event.isError || (event.toolName !== "edit" && event.toolName !== "write")) continue;
+    const path = normalizeWorkflowPath(event.path ?? extractPathFromArgsText(event.argsText) ?? "");
+    if (!path || !predicate(path)) continue;
+    const content = extractContentFromArgsText(event.argsText);
+    if (content !== undefined) latest.set(path, content);
+  }
+  return latest;
 }
 
 function freshSkillOverrideState(): SkillOverrideState {

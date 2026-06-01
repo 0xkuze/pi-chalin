@@ -59,6 +59,81 @@ test("routeFromPlan builds chain, parallel, single, and memory-only workflows", 
   assert.equal(memory.needsMemory, true);
 });
 
+test("memory-disabled harness mode strips route memory use for ablation evals", () => {
+  const previous = process.env.PI_CHALIN_DISABLE_MEMORY;
+  process.env.PI_CHALIN_DISABLE_MEMORY = "1";
+  try {
+    const route = routeFromPlan({
+      topology: "chain",
+      needsMemory: true,
+      steps: [
+        { agent: "scout", task: "Map prior decisions with current files." },
+        { agent: "planner", task: "Plan without memory." },
+      ],
+    });
+    const memoryOnly = routeFromPlan({ topology: "memory-only" });
+
+    assert.equal(route.needsMemory, false);
+    assert.equal(memoryOnly.kind, "ask-user");
+    assert.match(memoryOnly.reason, /memory disabled/i);
+  } finally {
+    if (previous === undefined) delete process.env.PI_CHALIN_DISABLE_MEMORY;
+    else process.env.PI_CHALIN_DISABLE_MEMORY = previous;
+  }
+});
+
+test("memory-disabled harness mode skips route memory reads and writes", async () => {
+  const previous = process.env.PI_CHALIN_DISABLE_MEMORY;
+  process.env.PI_CHALIN_DISABLE_MEMORY = "1";
+  try {
+    const cwd = tempDir("pi-chalin-kernel-no-memory-");
+    let retrieveCalls = 0;
+    let submitCalls = 0;
+    class CountingMemoryStore extends MemoryStore {
+      override async retrieve(...args: Parameters<MemoryStore["retrieve"]>): ReturnType<MemoryStore["retrieve"]> {
+        retrieveCalls += 1;
+        return super.retrieve(...args);
+      }
+
+      override async submitCandidates(...args: Parameters<MemoryStore["submitCandidates"]>): ReturnType<MemoryStore["submitCandidates"]> {
+        submitCalls += 1;
+        return super.submitCandidates(...args);
+      }
+    }
+    const route = routeFromPlan({
+      topology: "single",
+      needsMemory: true,
+      steps: [{ agent: "worker", task: "Implement without memory side effects." }],
+    });
+    const runner: WorkerRunner = {
+      async run(inputRoute: RouteDecision): Promise<RunState> {
+        const run = createRunState(inputRoute, cwd);
+        run.status = "complete";
+        run.endedAt = new Date().toISOString();
+        run.steps[0]!.status = "complete";
+        run.steps[0]!.output = {
+          agent: "worker",
+          text: "Done.",
+          handoff: "Done.",
+          raw: "Done.",
+          warnings: [],
+          memoryCandidates: [createMemoryCandidate({ category: "testing", content: "No-memory ablation must not persist candidates.", sourceAgent: "worker", confidence: 0.9, scope: "project" })],
+        };
+        return run;
+      },
+    };
+
+    const result = await new ChalinKernel({ cwd, memory: new CountingMemoryStore({ cwd }), runner }).handleRoute(route, "implement", { cwd });
+
+    assert.equal(result.run?.status, "complete");
+    assert.equal(retrieveCalls, 0);
+    assert.equal(submitCalls, 0);
+  } finally {
+    if (previous === undefined) delete process.env.PI_CHALIN_DISABLE_MEMORY;
+    else process.env.PI_CHALIN_DISABLE_MEMORY = previous;
+  }
+});
+
 test("routeFromPlan builds staged DAG workflows chosen by the primary Pi agent", () => {
   const dag = routeFromPlan({
     topology: "dag",

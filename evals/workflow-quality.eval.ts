@@ -11,7 +11,7 @@ import { gradePiTrace, parsePiJsonTrace, type TraceQualityReport, type TraceVari
 import { DEFAULT_JUDGE_MODEL, resolveJudgeTimeoutMs } from "./trace-quality.eval.ts";
 import { summarizeWorkflowImprovementRunSignals, summarizeWorkflowImprovementSignals } from "./workflow-improvement.ts";
 
-const workflowVariants = ["simple", "chalin", "chalin-skills-off", "chalin-skills-on", "gentle"] as const;
+const workflowVariants = ["simple", "chalin", "chalin-skills-off", "chalin-skills-on", "chalin-no-memory", "chalin-no-reviewer", "chalin-no-budget-gates", "gentle"] as const;
 export type WorkflowVariant = (typeof workflowVariants)[number];
 export type WorkflowJudgeMode = "none" | "auto" | "pi";
 export type WorkflowComparativeJudgeMode = "none" | "pi" | "content-only" | "both";
@@ -463,6 +463,23 @@ const workflowPresetArgs = {
     thinking: "adaptive",
     matrixPath: "evals/results/workflow-quality-harness-comparison.jsonl",
   },
+  "harness-ab": {
+    mode: "sdk",
+    case: "route-required",
+    variant: "harness-ab",
+    runs: "1",
+    timeoutMs: "180000",
+    allowMulti: "1",
+    allowLong: "1",
+    gates: "1",
+    judge: "none",
+    comparativeJudge: "content-only",
+    judgeModel: "openai-codex/gpt-5.5",
+    model: "openai-codex/gpt-5.5",
+    thinking: "adaptive",
+    storeFailedOutput: "1",
+    matrixPath: "evals/results/workflow-quality-harness-ablation.jsonl",
+  },
   complex: {
     mode: "sdk",
     case: "complex",
@@ -514,8 +531,14 @@ const workflowPresetArgs = {
   },
 } satisfies Record<string, Record<string, string>>;
 
-function isChalinHarnessVariant(variant: WorkflowVariant): boolean {
-  return variant === "chalin" || variant === skillsOffVariant || variant === skillsOnVariant;
+function isChalinHarnessVariant(variant: WorkflowVariant | string | undefined): boolean {
+  return typeof variant === "string" && variant.startsWith("chalin");
+}
+
+export function resolveWorkflowTraceVariant(variant: WorkflowVariant): TraceVariant {
+  if (variant === "simple") return "simple";
+  if (variant === "gentle") return "gentle";
+  return "chalin";
 }
 
 function targetVariantForOutputs(outputs: readonly Pick<WorkflowRunOutput, "variant">[]): WorkflowVariant {
@@ -733,6 +756,7 @@ export function resolveVariants(value: string | undefined): WorkflowVariant[] {
   if (!value || value === "both" || value === "all") return ["simple", "chalin"];
   if (value === "harnesses" || value === "chalin-vs-gentle") return ["chalin", "gentle"];
   if (value === "skills-ab" || value === "skills-llm-ab") return [skillsOffVariant, skillsOnVariant];
+  if (value === "harness-ab" || value === "harness-ablation") return ["chalin", "chalin-no-memory", "chalin-no-reviewer", "chalin-no-budget-gates"];
   if (value === "all-harnesses") return ["simple", "chalin", "gentle"];
   if (isWorkflowVariant(value)) return [value];
   throw new Error(`Unsupported workflow variant: ${value}`);
@@ -931,7 +955,7 @@ export function evaluateWorkflowRegressionGates(outputs: WorkflowRunOutput[], gr
 
   for (const output of outputs) {
     const label = `${output.variant} ${output.workspace.caseId}#${output.runIndex}`;
-    const isChalin = output.variant === "chalin";
+    const isChalin = isChalinHarnessVariant(output.variant);
     if (output.diagnostics.infrastructureFailure) {
       const message = `${label}: infrastructure failure ${output.diagnostics.infrastructureFailure.kind}`;
       if (isChalin && blockingInfrastructureFailure(output)) failures.push(message);
@@ -985,13 +1009,13 @@ export function evaluateWorkflowRegressionGates(outputs: WorkflowRunOutput[], gr
       if (boundedDirect) failures.push(message);
       else warnings.push(message);
     }
-    if (output.variant === "chalin" && !shouldRequireChalinRoute(evalCase) && output.diagnostics.chalinRouteCalls > thresholds.maxDirectChalinRouteCalls) {
+    if (isChalin && !shouldRequireChalinRoute(evalCase) && output.diagnostics.chalinRouteCalls > thresholds.maxDirectChalinRouteCalls) {
       failures.push(`${label}: direct-eligible case called chalin_route ${output.diagnostics.chalinRouteCalls} time(s)`);
     }
-    if (output.variant === "chalin" && shouldRequireChalinRoute(evalCase) && (output.diagnostics.chalinRouteCalls ?? 0) < 1) {
+    if (isChalin && shouldRequireChalinRoute(evalCase) && (output.diagnostics.chalinRouteCalls ?? 0) < 1) {
       failures.push(`${label}: route-required case did not call chalin_route`);
     }
-    if (output.variant === "chalin" && shouldRequireChalinRoute(evalCase) && (output.diagnostics.chalinRouteCalls ?? 0) > 0 && (output.diagnostics.chalinRouteAgentSteps ?? 0) < 1) {
+    if (isChalin && shouldRequireChalinRoute(evalCase) && (output.diagnostics.chalinRouteCalls ?? 0) > 0 && (output.diagnostics.chalinRouteAgentSteps ?? 0) < 1) {
       failures.push(`${label}: route-required case called chalin_route but did not execute Chalin subagent steps`);
     }
     if (output.variant === "gentle" && shouldRequireGentleSubagent(evalCase) && (output.diagnostics.subagentCalls ?? 0) < 1) {
@@ -1199,11 +1223,14 @@ export function buildWorkflowJudgePrompt(output: Pick<WorkflowRunOutput, "varian
   ].join("\n\n");
 }
 
-function workflowEvalPass(outputs: WorkflowRunOutput[], grouped: Array<{ pass: boolean }>): boolean {
+export function workflowEvalPass(outputs: WorkflowRunOutput[], grouped: Array<{ pass: boolean }>): boolean {
   const hasBothVariants = outputs.some((item) => item.variant === "simple") && outputs.some((item) => item.variant === "chalin");
   const hasHarnessComparison = outputs.some((item) => item.variant === "chalin") && outputs.some((item) => item.variant === "gentle");
   const hasSkillsComparison = outputs.some((item) => item.variant === skillsOffVariant) && outputs.some((item) => item.variant === skillsOnVariant);
+  const hasHarnessAblationComparison = outputs.some((item) => item.variant === "chalin")
+    && outputs.some((item) => item.variant !== "chalin" && isChalinHarnessVariant(item.variant));
   if (hasSkillsComparison) return outputs.filter((item) => item.variant === skillsOnVariant).every(outputPass) && grouped.every((item) => item.pass);
+  if (hasHarnessAblationComparison) return outputs.filter((item) => item.variant === "chalin").every(outputPass) && grouped.every((item) => item.pass);
   if (hasHarnessComparison) return outputs.filter((item) => item.variant === "chalin").every(outputPass) && grouped.every((item) => item.pass);
   if (hasBothVariants) return outputs.filter((item) => item.variant === "chalin").every(outputPass) && grouped.every((item) => item.pass);
   return outputs.every(outputPass);
@@ -1623,9 +1650,12 @@ function cloneWorkflowFixture(seedFixture: WorkflowFixture, variant: WorkflowVar
   return { ...seedFixture, cwd };
 }
 
-function workflowVariantEnv(variant: WorkflowVariant, model: string | undefined): Record<string, string | undefined> {
+export function workflowVariantEnv(variant: WorkflowVariant, model: string | undefined): Record<string, string | undefined> {
   return {
     PI_CHALIN_EVAL_AGENT_MODEL: isChalinHarnessVariant(variant) ? model : undefined,
+    PI_CHALIN_DISABLE_MEMORY: variant === "chalin-no-memory" ? "1" : undefined,
+    PI_CHALIN_DISABLE_REVIEWER: variant === "chalin-no-reviewer" ? "1" : undefined,
+    PI_CHALIN_DISABLE_BUDGET_GATES: variant === "chalin-no-budget-gates" ? "1" : undefined,
     PI_CHALIN_GENTLE_COMPANIONS_ROOT: undefined,
     PI_CHALIN_GENTLE_PI_ROOT: undefined,
   };
@@ -1664,7 +1694,7 @@ async function runSdkCase(evalCase: WorkflowEvalCase, variant: WorkflowVariant, 
   const rawFinalText = extractFinalText(run.stdout);
   const finalText = effectiveWorkflowFinalText(run.stdout, rawFinalText, variant);
   const workspace = scoreWorkflowWorkspace(fixture.cwd, evalCase, { finalText, durationMs, validateTests: evalCase.expected.validation?.runTests === true });
-  const trace = gradePiTrace(run.stdout, { variant: variant as TraceVariant, finalText: rawFinalText, promptKind: "generic", requireChalinRoute: shouldRequireChalinRoute(evalCase), status: run.status, signal: run.signal, timeoutReason: run.timeoutReason, durationMs, maxDurationMs: timeoutMs });
+  const trace = gradePiTrace(run.stdout, { variant: resolveWorkflowTraceVariant(variant), finalText: rawFinalText, promptKind: "generic", requireChalinRoute: shouldRequireChalinRoute(evalCase), status: run.status, signal: run.signal, timeoutReason: run.timeoutReason, durationMs, maxDurationMs: timeoutMs });
   const diagnostics = workflowDiagnostics(evalCase, run.stdout, run.stderr, run.timeToWorkspaceValidMs, run.timeToVerificationPassMs, run.timeToFinalAnswerMs, finalText.length === 0, run.objectiveStopReason, run.timeoutReason);
   const evidence = collectWorkflowEvidence(fixture.cwd, evalCase);
   let output: WorkflowRunOutput = { variant, runIndex, cwd: fixture.cwd, stdout: run.stdout, stderr: run.stderr, finalText, status: run.status, signal: run.signal, timeoutReason: run.timeoutReason, durationMs, workspace, trace, diagnostics, evidence, promptVariantIndex: fixture.promptVariantIndex, promptVariantCount: fixture.promptVariantCount, initialFixtureFingerprint };

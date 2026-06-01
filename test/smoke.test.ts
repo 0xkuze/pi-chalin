@@ -1794,6 +1794,56 @@ test("direct source and test edits reject trivial smoke coverage before final", 
   assert.equal(await contextHandler({ type: "context", messages: [] }, ctx), undefined);
 });
 
+test("direct rare gap diagnostics are derived from tool event history", async () => {
+  const fake = createFakePi();
+  registerPiChalin(fake.api as never);
+  const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
+  const toolExecutionEnd = fake.handlers.get("tool_execution_end")?.[0] as (event: { toolName: string; isError?: boolean; args?: Record<string, unknown> }, ctx: unknown) => void;
+  const { getDirectDerivedGapDiagnosticsForTests } = await import("../src/runtime-state.ts");
+  const ctx = {
+    cwd: tempDir("pi-chalin-derived-gaps-"),
+    hasUI: false,
+    model: undefined,
+    modelRegistry: { getAvailable: () => [] },
+  };
+  await beforeAgentStart({
+    type: "before_agent_start",
+    prompt: "Create a TypeScript CLI package with package.json, src/cli.ts, tests, and real coverage.",
+    systemPrompt: "base",
+    systemPromptOptions: {},
+  }, ctx);
+
+  toolExecutionEnd({ toolName: "write", isError: false, args: { path: "src/cli.ts", content: "export function main() { return 1; }\n" } }, ctx);
+  toolExecutionEnd({ toolName: "write", isError: false, args: { path: "test/cli.test.ts", content: "test('empty', () => expect(1).toBe(1));\n" } }, ctx);
+  toolExecutionEnd({ toolName: "write", isError: false, args: { path: "package.json", content: JSON.stringify({ name: "demo", bin: { demo: "src/cli.ts" } }) } }, ctx);
+
+  assert.deepEqual(getDirectDerivedGapDiagnosticsForTests(), {
+    weakTestCoverage: true,
+    packageMetadata: true,
+    parallelSurface: undefined,
+  });
+
+  toolExecutionEnd({
+    toolName: "write",
+    isError: false,
+    args: {
+      path: "test/cli.test.ts",
+      content: [
+        "import { test, expect } from 'bun:test';",
+        "test('prints help', () => expect(renderHelp()).toContain('Usage'));",
+        "test('rejects blank input', () => expect(() => parseArgs([''])).toThrow());",
+      ].join("\n"),
+    },
+  }, ctx);
+  toolExecutionEnd({ toolName: "write", isError: false, args: { path: "package.json", content: JSON.stringify({ name: "demo", type: "module", bin: { demo: "src/cli.ts" } }) } }, ctx);
+
+  assert.deepEqual(getDirectDerivedGapDiagnosticsForTests(), {
+    weakTestCoverage: false,
+    packageMetadata: false,
+    parallelSurface: undefined,
+  });
+});
+
 test("direct C tests with multiple assert calls are not mistaken for trivial empty coverage", async () => {
   const fake = createFakePi();
   registerPiChalin(fake.api as never);

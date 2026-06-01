@@ -152,6 +152,61 @@ test("chalin mutation routes without workers are normalized before execution and
   assert.match(normalized.reason, /added a worker/i);
 });
 
+test("reviewer-disabled harness mode keeps mutation routes executable without adding review", () => {
+  const previous = process.env.PI_CHALIN_DISABLE_REVIEWER;
+  process.env.PI_CHALIN_DISABLE_REVIEWER = "1";
+  try {
+    const route = routeFromPlan({
+      topology: "single",
+      steps: [{ agent: "planner", task: "Plan and patch a focused implementation change." }],
+      reason: "Harness no-reviewer ablation.",
+    });
+    const normalized = normalizeRouteForExecution(route, {
+      requiresWorkspaceMutation: true,
+      task: "Implementa el cambio y corre tests.",
+    });
+
+    assert.equal(normalized.plan?.kind, "chain");
+    assert.ok(normalized.agents.includes("worker"));
+    assert.equal(normalized.agents.includes("reviewer"), false);
+    assert.doesNotMatch(normalized.reason, /added a reviewer/i);
+  } finally {
+    if (previous === undefined) delete process.env.PI_CHALIN_DISABLE_REVIEWER;
+    else process.env.PI_CHALIN_DISABLE_REVIEWER = previous;
+  }
+});
+
+test("reviewer-disabled harness mode removes review-only routes instead of executing reviewer", () => {
+  const previous = process.env.PI_CHALIN_DISABLE_REVIEWER;
+  process.env.PI_CHALIN_DISABLE_REVIEWER = "1";
+  try {
+    const singleReviewer = normalizeRouteForExecution(routeFromPlan({
+      topology: "single",
+      steps: [{ agent: "reviewer", task: "Review the implementation." }],
+      reason: "Harness no-reviewer ablation.",
+    }), {
+      requiresWorkspaceMutation: false,
+      task: "Review the implementation.",
+    });
+    const dagReviewer = normalizeRouteForExecution(routeFromPlan({
+      topology: "dag",
+      stages: [{ id: "review", tasks: [{ agent: "reviewer", task: "Review the implementation." }] }],
+      reason: "Harness no-reviewer DAG ablation.",
+    }), {
+      requiresWorkspaceMutation: false,
+      task: "Review the implementation.",
+    });
+
+    assert.equal(singleReviewer.agents.includes("reviewer"), false);
+    assert.equal(singleReviewer.kind, "ask-user");
+    assert.equal(dagReviewer.agents.includes("reviewer"), false);
+    assert.equal(dagReviewer.kind, "ask-user");
+  } finally {
+    if (previous === undefined) delete process.env.PI_CHALIN_DISABLE_REVIEWER;
+    else process.env.PI_CHALIN_DISABLE_REVIEWER = previous;
+  }
+});
+
 test("mutation normalization is driven by structured route metadata, not prompt regex", () => {
   const route: RouteDecision = {
     kind: "multi-agent-chain",
