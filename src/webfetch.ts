@@ -148,6 +148,21 @@ export function formatWebBundle(bundle: WebContextBundle): string {
   return lines.filter((line): line is string => line !== undefined).join("\n");
 }
 
+export function formatWebBundleWidget(bundle: WebContextBundle): string {
+  const total = bundle.sources.length;
+  const title = bundle.query ? `chalin web search · ${bundle.query}` : `chalin web fetch · ${bundle.urls?.join(", ")}`;
+  const lines = [
+    "chalin_web_search",
+    title,
+    `provider: ${bundle.provider} · cache: ${bundle.cache.hit ? "hit" : "miss"} · sources: ${total}`,
+    "",
+    `Sites requested: ${progressBar(total, total)} ${total}/${total}`,
+    ...bundle.sources.map((source) => `- ${source.title || source.url || "Untitled source"}`),
+    ...(bundle.warnings.length > 0 ? ["", `Warnings: ${bundle.warnings.join("; ")}`] : []),
+  ];
+  return lines.join("\n");
+}
+
 export async function listWebFetchAudit(options: WebFetchAuditOptions): Promise<WebFetchAuditEntry[]> {
   const dir = path.join(resolveChalinPaths(options).projectRoot, ".pi-chalin", "cache", "webfetch");
   if (!fs.existsSync(dir)) return [];
@@ -179,6 +194,13 @@ export async function listWebFetchAudit(options: WebFetchAuditOptions): Promise<
     }
   }
   return entries.sort((a, b) => Date.parse(b.observedAt) - Date.parse(a.observedAt));
+}
+
+function progressBar(done: number, total: number): string {
+  const width = 10;
+  if (total <= 0) return `[${"-".repeat(width)}]`;
+  const filled = Math.max(0, Math.min(width, Math.round((done / total) * width)));
+  return `[${"#".repeat(filled)}${"-".repeat(width - filled)}]`;
 }
 
 export function formatWebFetchAudit(entries: WebFetchAuditEntry[]): string {

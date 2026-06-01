@@ -14,7 +14,7 @@ import { activateSkillForTurn, beginChalinRouteInvocation, disableSkillForTurn, 
 import { openSafetyApproval } from "./ui.ts";
 import { clearLegacyChalinControlWidget, setChalinStatus } from "./ui-status.ts";
 import { chalinRouteUpdateDetails, colorizeChalinWidget, footerStateForRun, formatChalinRoutePlanWidget, formatChalinRunWidget, formatChalinRunWidgetFromDetails, isUsableStepStatus, plannedWidgetRun, routeIntent, type ChalinRouteWidgetDetails } from "./route-widget.ts";
-import { fetchWebUrls, formatWebBundle, searchWeb } from "./webfetch.ts";
+import { fetchWebUrls, formatWebBundle, formatWebBundleWidget, searchWeb, type WebContextBundle } from "./webfetch.ts";
 import type { MemoryRecord, RouteDecision, RunState } from "./schemas.ts";
 import { collapseReadOnlyScoutContextRoute, inferRouteRequiresWorkspaceMutation, normalizeRouteForExecution } from "./route-guards.ts";
 import { compactRouteDetails, finalAnswerMaterial, formatRoute, outcomeForResult } from "./route-format.ts";
@@ -695,6 +695,13 @@ export function registerChalinTools(pi: ExtensionAPI): void {
         ? await fetchWebUrls({ cwd: ctx.cwd, urls, freshness: params.freshness, signal })
         : await searchWeb({ cwd: ctx.cwd, query: params.query ?? "", maxSources: params.maxSources, depth: params.depth, freshness: params.freshness, signal });
       return textResult(formatWebBundle(bundle), bundle);
+    },
+    renderResult(result, _options, _theme) {
+      const details = result.details as Partial<WebContextBundle> | undefined;
+      const rendered = details?.provider === "exa-mcp" && Array.isArray(details.sources)
+        ? formatWebBundleWidget(details as WebContextBundle)
+        : result.content.find((part) => part.type === "text")?.text ?? "";
+      return new Text(rendered, 0, 0);
     },
   });
 }
