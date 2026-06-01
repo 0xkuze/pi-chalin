@@ -1,7 +1,7 @@
 import type { ChalinHandleResult } from "./kernel.ts";
 import { sanitizeTransientVerificationClaims } from "./evidence-claims.ts";
 import type { ChalinRouteOutcome } from "./runtime-state.ts";
-import type { RouteDecision, RunState } from "./schemas.ts";
+import type { EvidenceClaim, RouteDecision, RunState } from "./schemas.ts";
 import { isUsableStepStatus } from "./status.ts";
 
 export function formatRoute(route: RouteDecision, result: ChalinHandleResult | undefined, options: { availableAgents?: string[] } = {}): string {
@@ -119,13 +119,32 @@ function shouldAggregateFinalMaterial(run: RunState, completeSteps: RunState["st
 function supportingEvidenceMaterial(steps: RunState["steps"]): string | undefined {
   const items = steps
     .map((step) => {
-      const output = stepFullOutput(step);
-      if (!output) return undefined;
-      const excerpt = curatedEvidenceExcerpt(output);
+      const excerpt = structuredClaimExcerpt(step.output?.claims) ?? (() => {
+        const output = stepFullOutput(step);
+        return output ? curatedEvidenceExcerpt(output) : undefined;
+      })();
       return excerpt ? `- ${step.agent}: ${excerpt}` : undefined;
     })
     .filter((item): item is string => Boolean(item));
   return items.length ? items.join("\n") : undefined;
+}
+
+function structuredClaimExcerpt(claims: EvidenceClaim[] | undefined): string | undefined {
+  if (!claims?.length) return undefined;
+  const prioritized = [...claims].sort((left, right) => claimPriority(right) - claimPriority(left)).slice(0, 4);
+  return prioritized.map((claim) => {
+    const evidence = claim.evidence.length > 0 ? ` evidence: ${claim.evidence.slice(0, 3).join(", ")}` : " evidence: missing";
+    const confidence = Number.isFinite(claim.confidence) ? ` confidence: ${claim.confidence}` : "";
+    return truncate(`${claim.kind} ${claim.subject}: ${claim.summary};${evidence}${confidence}`, 320);
+  }).join(" ");
+}
+
+function claimPriority(claim: EvidenceClaim): number {
+  if (claim.kind === "contradiction") return 5;
+  if (claim.kind === "unknown") return 4;
+  if (claim.kind === "negative-claim") return 3;
+  if (claim.kind === "transient-status") return 2;
+  return 1;
 }
 
 function curatedEvidenceExcerpt(text: string): string | undefined {

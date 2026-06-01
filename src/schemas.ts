@@ -243,11 +243,28 @@ export interface MemoryAuditEvent {
   metadata?: Record<string, unknown>;
 }
 
+export const EVIDENCE_CLAIM_KINDS = ["stable-fact", "transient-status", "negative-claim", "unknown", "contradiction"] as const;
+export type EvidenceClaimKind = (typeof EVIDENCE_CLAIM_KINDS)[number];
+
+export const EVIDENCE_KINDS = ["read", "search", "verified-command", "partial", "handoff", "inference", "none"] as const;
+export type EvidenceKind = (typeof EVIDENCE_KINDS)[number];
+
+export interface EvidenceClaim {
+  kind: EvidenceClaimKind;
+  subject: string;
+  summary: string;
+  evidence: string[];
+  evidenceKind?: EvidenceKind;
+  confidence: number;
+  sourceAgent?: string;
+}
+
 export interface AgentOutput {
   agent: string;
   text: string;
   handoff?: string;
   memoryCandidates: MemoryCandidate[];
+  claims?: EvidenceClaim[];
   raw: string;
   warnings: string[];
 }

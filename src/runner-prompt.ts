@@ -1,4 +1,4 @@
-import type { AgentCapability, AgentDefinition, ResolvedSkill, RouteKind, ToolBudgetProfile } from "./schemas.ts";
+import type { AgentCapability, AgentDefinition, EvidenceClaim, ResolvedSkill, RouteKind, ToolBudgetProfile } from "./schemas.ts";
 import { policyForStep } from "./budget.ts";
 import { buildProjectDiscoveryIndex, formatProjectDiscoveryIndex } from "./discovery.ts";
 import type { RunStepState } from "./schemas.ts";
@@ -9,6 +9,7 @@ export interface SdkPromptOptions {
   priorFilesRead?: string[];
   synthesisGapReadLimit?: number;
   memoryContext?: string;
+  previousClaims?: EvidenceClaim[];
   activeSkills?: ResolvedSkill[];
   suggestedSkills?: ResolvedSkill[];
   rejectedSkills?: Array<{ skill: { qualifiedName: string }; reason: string }>;
@@ -20,6 +21,7 @@ export interface ChildToolOptions {
   memoryEnabled?: boolean;
   delegationDepth?: number;
   maxDelegationDepth?: number;
+  previousClaimsNeedAudit?: boolean;
 }
 
 export function buildSdkPrompt(
@@ -135,6 +137,8 @@ export function buildSdkPrompt(
     previous ? "## Previous Handoff" : undefined,
     previous || undefined,
     previous ? "" : undefined,
+    formatStructuredClaimAudit(options.previousClaims ?? []),
+    options.previousClaims?.length ? "" : undefined,
     options.rootTask?.trim() ? "## Original User Goal" : undefined,
     options.rootTask?.trim() || undefined,
     options.rootTask?.trim() ? "" : undefined,
@@ -164,6 +168,7 @@ export function buildSdkPrompt(
     "- Prefer categories like `project-fact:`, `pattern:`, `tooling:`, `testing:`, `workflow:`, `bugfix:`, `decision:`, or `preference:`.",
     "- Avoid commands, logs, code snippets, raw stdout/stderr, stack traces, task completion notes, or obvious facts.",
     "- Write `- None.` when there is nothing worth remembering.",
+    claimLedgerOutputContract(agent),
   ].filter(Boolean).join("\n");
 }
 
@@ -171,9 +176,14 @@ function implementationReviewText(text: string): boolean {
   return /\b(implement|implementation|changed|worker|verification|tests?|edit|mutation|mutaci[oó]n|fix|bugfix|refactor|feature|scaffold|code|c[oó]digo|build|update|actualiza|modifica)\b/i.test(text);
 }
 
+function claimLedgerOutputContract(agent: AgentDefinition | undefined): string | undefined {
+  if (!agent || agent.concern === "implementation" || agent.concern === "conflict-resolution") return undefined;
+  return "## Claim Ledger\n- Optional JSON for auditable claims: `{kind,subject,summary,evidence,evidenceKind,confidence}`; kinds include `transient-status`, `negative-claim`, `unknown`, `contradiction`.";
+}
+
 export function childToolNames(agent: AgentDefinition | undefined, task = "", needsArtifacts = false, hasPrevious = false, options: ChildToolOptions = {}): string[] {
   const deepHandoff = options.budgetProfile === "deep" || options.budgetProfile === "extended" || options.routeKind === "multi-agent-dag";
-  if (hasPrevious && shouldUseHandoffOnlyMode(agent, deepHandoff, task)) return [];
+  if (hasPrevious && shouldUseHandoffOnlyMode(agent, deepHandoff, task, Boolean(options.previousClaimsNeedAudit))) return [];
   if (!agent?.capabilities.length) {
     const fallback = new Set(agent?.tools.length ? agent.tools : ["read", "grep", "find", "ls"]);
     fallback.add("chalin_project_discovery");
@@ -303,10 +313,26 @@ function extractAgentSection(text: string, start: string, end: string): string {
   return pattern.exec(text)?.[1]?.trim() ?? "";
 }
 
-function shouldUseHandoffOnlyMode(agent: AgentDefinition | undefined, deepHandoff: boolean, task = ""): boolean {
+function shouldUseHandoffOnlyMode(agent: AgentDefinition | undefined, deepHandoff: boolean, task = "", previousClaimsNeedAudit = false): boolean {
   if (!agent || deepHandoff) return false;
+  if (previousClaimsNeedAudit) return false;
   if (taskNeedsCriticalHandoffAudit(task)) return false;
   return agent.concern === "context-building";
+}
+
+function formatStructuredClaimAudit(claims: EvidenceClaim[]): string | undefined {
+  if (claims.length === 0) return undefined;
+  const lines = claims.slice(0, 12).map((claim) => {
+    const evidence = claim.evidence.length > 0 ? `evidence=${claim.evidence.slice(0, 4).join(", ")}` : "evidence=missing";
+    const evidenceKind = claim.evidenceKind ? ` evidenceKind=${claim.evidenceKind}` : "";
+    return `- ${claim.kind} · ${claim.subject} · confidence=${claim.confidence}${evidenceKind} · ${evidence} · ${claim.summary}`;
+  });
+  return [
+    "## Structured claim audit",
+    "- Previous agents marked these claims as needing audit or careful synthesis. Prefer this metadata over wording heuristics.",
+    "- Recheck only claims that affect the final answer; if you cannot recheck, preserve the uncertainty explicitly.",
+    ...lines,
+  ].join("\n");
 }
 
 function taskNeedsCriticalHandoffAudit(task: string): boolean {

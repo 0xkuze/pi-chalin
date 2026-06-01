@@ -95,6 +95,39 @@ test("parseAgentOutput drops transient verification status memory candidates", (
   assert.match(output.warnings.join("\n"), /transient verification status/i);
 });
 
+test("parseAgentOutput uses structured claim ledger before lexical transient detection", () => {
+  const output = parseAgentOutput("scout", [
+    "## Findings",
+    "- Observacion parcial de validacion en progreso.",
+    "## Claim Ledger",
+    "```json",
+    JSON.stringify([
+      {
+        kind: "transient-status",
+        subject: "regression suite",
+        summary: "La suite quedo roja durante una observacion parcial.",
+        evidence: ["partial SDK observation"],
+        confidence: 0.52,
+      },
+      {
+        kind: "stable-fact",
+        subject: "test runner",
+        summary: "Project verification uses Bun scripts from package.json.",
+        evidence: ["package.json"],
+        confidence: 0.91,
+      },
+    ]),
+    "```",
+    "## Memory Candidates",
+    "- testing: La suite quedo roja durante una observacion parcial.",
+    "- tooling: Project verification uses Bun scripts from package.json.",
+  ].join("\n"));
+
+  assert.deepEqual((output.claims ?? []).map((claim) => claim.kind), ["transient-status", "stable-fact"]);
+  assert.deepEqual(output.memoryCandidates.map((candidate) => candidate.category), ["tooling"]);
+  assert.match(output.warnings.join("\n"), /structured transient verification claim/i);
+});
+
 test("buildSdkPrompt requires evidence-grade handling for transient and negative claims", () => {
   const scout = readOnlyAgent("scout", "recon");
   const planner = readOnlyAgent("planner", "planning");
@@ -108,6 +141,23 @@ test("buildSdkPrompt requires evidence-grade handling for transient and negative
   assert.match(scoutPrompt, /Before saying a feature, API, file, route, command, dependency, or pattern is absent/i);
   assert.match(plannerPrompt, /reconcile contradictions/i);
   assert.match(plannerPrompt, /do not concatenate raw upstream output/i);
+});
+
+test("buildSdkPrompt carries structured claim audit context without relying on wording", () => {
+  const planner = readOnlyAgent("planner", "planning");
+  const prompt = buildSdkPrompt(planner, "Synthesize final answer material.", tempDir("pi-chalin-prompt-claims-"), "Prior handoff text.", 12, "normal", {
+    previousClaims: [{
+      kind: "negative-claim",
+      subject: "browser automation capability",
+      summary: "Prior handoff says browser control is unavailable.",
+      evidence: [],
+      confidence: 0.44,
+    }],
+  } as never);
+
+  assert.match(prompt, /Structured claim audit/i);
+  assert.match(prompt, /browser automation capability/i);
+  assert.match(prompt, /negative-claim/i);
 });
 
 test("reviewerHandoffNeedsRepair detects blocking implementation review gaps", () => {
@@ -1186,6 +1236,27 @@ test("childToolNames keeps inspection tools for critical handoff claim checks", 
   };
 
   const tools = childToolNames(agent, "Reconcile contradiction: scout says no web fetch exists but researcher found src/webfetch.ts.", true, true);
+
+  assert.ok(tools.includes("read"));
+  assert.ok(tools.includes("grep"));
+  assert.ok(tools.includes("find"));
+});
+
+test("childToolNames uses structured handoff audit signal before task wording", () => {
+  const agent: AgentDefinition = {
+    name: "context-builder",
+    scope: "built-in",
+    concern: "context-building",
+    capabilities: ["inspect-files", "search-files", "memory-read", "memory-write"],
+    description: "Synthesize context.",
+    model: "inherit",
+    tools: [],
+    memory: { read: true, write: "candidate", categories: [] },
+    systemPrompt: "",
+    diagnostics: [],
+  };
+
+  const tools = childToolNames(agent, "Synthesize final answer material.", true, true, { previousClaimsNeedAudit: true } as never);
 
   assert.ok(tools.includes("read"));
   assert.ok(tools.includes("grep"));

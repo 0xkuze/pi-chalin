@@ -3247,6 +3247,57 @@ test("finalAnswerMaterial prefers final synthesis and keeps prior evidence compa
   assert.doesNotMatch(material, /raw scout crawl raw scout crawl raw scout crawl raw scout crawl raw scout crawl/);
 });
 
+test("finalAnswerMaterial uses structured claim evidence without heading-specific text", () => {
+  const run = createRunState({
+    kind: "multi-agent-dag",
+    agents: ["scout", "planner"],
+    risk: "low",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: false,
+    reason: "Deep analysis.",
+    plan: {
+      kind: "dag",
+      stages: [
+        { id: "evidence", tasks: [{ agent: "scout", task: "Map repo." }] },
+        { id: "synthesis", tasks: [{ agent: "planner", task: "Synthesize." }] },
+      ],
+    },
+  }, tempDir("pi-chalin-final-material-claims-"));
+  run.status = "complete";
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.output = {
+    agent: "scout",
+    text: "Notas compactas sin encabezados convencionales.",
+    handoff: "Notas compactas sin encabezados convencionales.",
+    raw: "",
+    memoryCandidates: [],
+    warnings: [],
+    claims: [{
+      kind: "negative-claim",
+      subject: "browser automation capability",
+      summary: "No direct browser automation entrypoint was found in the repo surface.",
+      evidence: ["src/tools.ts", "src/child-tools.ts"],
+      confidence: 0.72,
+    }],
+  } as never;
+  run.steps[1]!.status = "complete";
+  run.steps[1]!.output = {
+    agent: "planner",
+    text: "Final synthesis: keep direct capability checks in the orchestrator.",
+    handoff: "Final synthesis: keep direct capability checks in the orchestrator.",
+    raw: "",
+    memoryCandidates: [],
+    warnings: [],
+  };
+
+  const material = finalAnswerMaterial(run) ?? "";
+
+  assert.match(material, /browser automation capability/);
+  assert.match(material, /src\/tools\.ts/);
+  assert.doesNotMatch(material, /Notas compactas sin encabezados convencionales/);
+});
+
 test("finalAnswerMaterial preserves single scout analysis instead of compact handoff", () => {
   const run = createRunState({
     kind: "single-agent",

@@ -3,11 +3,11 @@ import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { Context, Effect, Layer } from "effect";
 import type { AgentDefinition, AgentThinkingLevel } from "./schemas.ts";
 import { evaluateBudgetUsage, policyForStep, recordBudgetCheckpoint, scoreProgress, summarizeToolUtility } from "./budget.ts";
-import { isTransientVerificationStateClaim } from "./evidence-claims.ts";
+import { candidateMatchesTransientClaim, claimsNeedingAudit, claimsRequireAudit, isTransientVerificationStateClaim, parseClaimLedger } from "./evidence-claims.ts";
 import type { ChalinPathsOptions } from "./paths.ts";
 import { createMemoryCandidate } from "./memory.ts";
 import { createConfiguredMemoryStore } from "./memory-provider.ts";
-import type { AgentOutput, AgentStep, BudgetCapHit, MemoryCandidate, RouteDecision, RoutePlan, RunState, RunStepMetrics, RunStepState, TokenUsageSummary, ToolBudgetProfile } from "./schemas.ts";
+import type { AgentOutput, AgentStep, BudgetCapHit, EvidenceClaim, MemoryCandidate, RouteDecision, RoutePlan, RunState, RunStepMetrics, RunStepState, TokenUsageSummary, ToolBudgetProfile } from "./schemas.ts";
 import { createChildToolPolicy, createChildTools, type ChalinDelegateParamsShape, type ChildToolActivity, type ChildToolPolicy } from "./child-tools.ts";
 import { createChalinChildSessionManager } from "./child-sessions.ts";
 import { buildProjectSnapshot, formatProjectSnapshot } from "./snapshot.ts";
@@ -733,12 +733,14 @@ async function runSdkStep(
     const maxToolCalls = budgetPolicy.caps.maxToolCalls;
     step.budget = budgetPolicy.profile;
     step.maxToolCalls = maxToolCalls;
+    const previousClaims = previousClaimsBeforeStep(run, step);
     const baseAllowedTools = childToolNames(agent, step.task, run.route.needsArtifacts, Boolean(options.previous), {
       budgetProfile: budgetPolicy.profile,
       routeKind: run.route.kind,
       memoryEnabled: run.route.needsMemory,
       delegationDepth: currentSubagentDepth(run),
       maxDelegationDepth: maxSubagentDepth(),
+      previousClaimsNeedAudit: claimsRequireAudit(previousClaims),
     });
     const allowedTools = effectiveSkillToolNames(baseAllowedTools, skillResolution.active.map((item) => item.skill));
     const prompt = buildSdkPrompt(agent, step.task, options.cwd, options.previous, budgetPolicy, "normal", promptOptions);
@@ -1149,9 +1151,11 @@ function enterChildEnv(): () => void {
 
 function buildPromptOptionsForStep(run: RunState, step: RunStepState, agent: AgentDefinition | undefined, policy: ReturnType<typeof policyForStep>, previous?: string): SdkPromptOptions {
   const priorFilesRead = priorFilesReadBeforeStep(run, step);
+  const previousClaims = claimsNeedingAudit(previousClaimsBeforeStep(run, step)).slice(0, 12);
   return {
     rootTask: run.rootTask,
     priorFilesRead,
+    previousClaims,
     ...(isHandoffGapReadMode(agent, previous, policy.profile === "deep") ? { synthesisGapReadLimit: synthesisGapReadLimit() } : {}),
   };
 }
@@ -1180,6 +1184,12 @@ function priorFilesReadBeforeStep(run: RunState, currentStep: RunStepState): str
   const index = run.steps.indexOf(currentStep);
   const previousSteps = index >= 0 ? run.steps.slice(0, index) : run.steps.filter((step) => step !== currentStep);
   return [...new Set(previousSteps.flatMap((step) => step.metrics?.filesRead ?? []))].slice(0, 80);
+}
+
+function previousClaimsBeforeStep(run: RunState, currentStep: RunStepState): EvidenceClaim[] {
+  const index = run.steps.indexOf(currentStep);
+  const previousSteps = index >= 0 ? run.steps.slice(0, index) : run.steps.filter((step) => step !== currentStep);
+  return previousSteps.flatMap((step) => step.output?.claims ?? []);
 }
 
 export function budgetPolicyForSdkStep(policy: ReturnType<typeof policyForStep>, agent: AgentDefinition | undefined, previous?: string): ReturnType<typeof policyForStep> {
@@ -1227,6 +1237,8 @@ function aggregateCompletedHandoffBefore(steps: RunStepState[], endIndex: number
 
 export function parseAgentOutput(agent: string, raw: string): AgentOutput {
   const warnings: string[] = [];
+  const claimLedger = parseClaimLedger(raw, agent);
+  warnings.push(...claimLedger.warnings);
   let handoff: string | undefined;
   const handoffMatch = raw.match(/##\s*Handoff\s*\n([\s\S]*?)(?:\n##\s|$)/i);
   if (handoffMatch?.[1]) handoff = truncateText(handoffMatch[1].trim(), handoffBudgetChars(agent));
@@ -1237,8 +1249,10 @@ export function parseAgentOutput(agent: string, raw: string): AgentOutput {
     for (const line of memoryBlock.split("\n")) {
       const parsed = parseMemoryCandidateLine(line);
       if (!parsed) continue;
-      if (isTransientVerificationStateClaim(parsed.content)) {
-        warnings.push("Dropped memory candidate with transient verification status; require real non-dry-run command evidence instead.");
+      const structuredTransient = candidateMatchesTransientClaim(parsed.content, claimLedger.claims);
+      if (isTransientVerificationStateClaim(parsed.content) || structuredTransient) {
+        const source = structuredTransient ? "structured transient verification claim" : "transient verification status";
+        warnings.push(`Dropped memory candidate with ${source}; require real non-dry-run command evidence instead.`);
         continue;
       }
       candidates.push(createMemoryCandidate({ category: parsed.category, content: parsed.content, sourceAgent: agent, confidence: parsed.confidence, scope: "project" }));
@@ -1247,7 +1261,7 @@ export function parseAgentOutput(agent: string, raw: string): AgentOutput {
 
   if (raw.includes("## Memory Candidate") && candidates.length === 0) warnings.push("Memory candidate block was present but no valid bullet candidates were parsed.");
   const compactRaw = truncateText(raw.trim(), rawOutputBudgetChars());
-  return { agent, text: compactRaw, handoff, memoryCandidates: candidates.slice(0, memoryCandidateBudget()), raw: compactRaw, warnings };
+  return { agent, text: compactRaw, handoff, memoryCandidates: candidates.slice(0, memoryCandidateBudget()), claims: claimLedger.claims, raw: compactRaw, warnings };
 }
 
 
