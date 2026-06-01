@@ -447,7 +447,7 @@ allowedTools:
 deniedTools:
   - chalin_delegate
 trust: trusted
-`, "## Rules\n- Read the exact target surface before editing.\n- Change the smallest behavior-preserving region.\n- Cover the broken behavior plus the nearest meaningful boundary of the same contract when tests are touched.\n- Run the nearest verification command from repository evidence.\n");
+`, "## Rules\n- Read the exact target surface before editing.\n- Change the smallest behavior-preserving region.\n- Prefer surgical edits to existing files.\n- Once target files are known, avoid extra discovery or re-reading edited files unless verification fails or evidence is missing.\n- Cover the broken behavior plus the nearest meaningful boundary of the same contract when tests are touched.\n- Run the nearest verification command from repository evidence.\n");
   const catalog = SkillCatalog.load({ cwd, packageRoot });
   const agent = worker();
 
@@ -468,6 +468,8 @@ trust: trusted
   assert.deepEqual(matching.resolution.active.map((item) => item.skill.qualifiedName), ["built-in:bugfix-tight-loop"]);
   assert.match(matching.prompt, /## Active Skills/);
   assert.match(matching.prompt, /Read the exact target surface/);
+  assert.match(matching.prompt, /surgical edits/);
+  assert.match(matching.prompt, /avoid extra discovery/);
   assert.match(matching.prompt, /nearest meaningful boundary/);
   assert.match(matching.prompt, /Run the nearest verification command/);
   assert.equal(matching.effectiveTools.includes("chalin_delegate"), false);

@@ -76,7 +76,7 @@ try {
       rootTask: "User reported a parser bugfix regression.",
       routeKind: "single-agent",
       expectedSkill: "built-in:bugfix-tight-loop",
-      expectedPromptPatterns: [/Read the exact target/i, /nearest meaningful boundary/i, /Run nearest verification/i],
+      expectedPromptPatterns: [/Read the exact target/i, /surgical edits/i, /avoid extra discovery/i, /nearest meaningful boundary/i, /Run nearest verification/i],
       expectedRemovedTools: ["chalin_delegate"],
     },
     {
@@ -308,7 +308,7 @@ allowedTools:
 deniedTools:
   - chalin_delegate
 trust: trusted
-`, "## Rules\n- Read the exact target before editing.\n- Cover the broken behavior plus the nearest meaningful boundary of the same contract when tests are touched.\n- Run nearest verification.\n");
+`, "## Rules\n- Read the exact target before editing.\n- Prefer surgical edits to existing files.\n- Once target files are known, avoid extra discovery or re-reading edited files unless verification fails or evidence is missing.\n- Cover the broken behavior plus the nearest meaningful boundary of the same contract when tests are touched.\n- Run nearest verification.\n");
 
   writeSkill(path.join(packageRoot, "skills", "run-verify-project", "SKILL.md"), `
 name: run-verify-project
