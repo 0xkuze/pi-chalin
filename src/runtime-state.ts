@@ -3,6 +3,79 @@ import type { RouteDecision, RunState } from "./schemas.ts";
 
 export type ChalinRouteOutcome = "dry-run" | "ask" | "block" | "failed" | "paused" | "complete";
 type DirectModeKind = "docs-only" | "lean-bounded-code-test" | "bounded-code-test" | "broken-test-triage" | "test-only" | "scaffold-greenfield" | "stateful-time" | "generic";
+export type DirectToolEventPhase = "start" | "completed";
+export type DirectNudgeKind =
+  | "workspace-boundary"
+  | "docs-shell"
+  | "docs-prewrite-shell"
+  | "pre-mutation-verification"
+  | "post-verification-shell"
+  | "post-verification-exploration"
+  | "docs-evidence-loop"
+  | "scaffold-evidence-loop"
+  | "locator-loop"
+  | "stateful-time"
+  | "existing-file-rewrite"
+  | "mutation-loop"
+  | "source-and-test-ready"
+  | "verification-loop"
+  | "post-failure-evidence"
+  | "progress"
+  | "ready-to-verify"
+  | "test-coverage"
+  | "weak-test-coverage"
+  | "package-metadata"
+  | "parallel-surface"
+  | "failure"
+  | "completion";
+
+export interface DirectToolEvent {
+  phase: DirectToolEventPhase;
+  toolName: string;
+  isError?: boolean;
+  command?: string;
+  path?: string;
+  argsText?: string;
+}
+
+export interface DirectNudgePlan {
+  kind: DirectNudgeKind;
+  verificationCommand?: string;
+  docsOnlyMutation: boolean;
+}
+
+export interface DirectToolCompletionAdapter {
+  shouldProgressNudge: boolean;
+  shouldReadyToVerifyNudge: boolean;
+  shouldFailureNudge: boolean;
+  shouldCompletionNudge: boolean;
+  shouldTestCoverageNudge: boolean;
+  shouldWeakTestCoverageNudge: boolean;
+  shouldPackageMetadataNudge: boolean;
+  shouldParallelSurfaceNudge: boolean;
+  shouldWorkspaceBoundaryNudge: boolean;
+  shouldDocsShellNudge: boolean;
+  shouldDocsPreWriteShellNudge: boolean;
+  shouldPreMutationVerificationNudge: boolean;
+  shouldPostVerificationShellNudge: boolean;
+  shouldPostVerificationExplorationNudge: boolean;
+  shouldDocsEvidenceLoopNudge: boolean;
+  shouldScaffoldEvidenceLoopNudge: boolean;
+  shouldLocatorLoopNudge: boolean;
+  shouldStatefulTimeNudge: boolean;
+  shouldExistingFileRewriteNudge: boolean;
+  shouldMutationLoopNudge: boolean;
+  shouldSourceAndTestReadyNudge: boolean;
+  shouldVerificationLoopNudge: boolean;
+  shouldPostFailureEvidenceNudge: boolean;
+  verificationCommand?: string;
+  docsOnlyMutation: boolean;
+  plan?: DirectNudgePlan;
+}
+
+type DirectNudgeFlag = Exclude<keyof DirectToolCompletionAdapter, "verificationCommand" | "docsOnlyMutation" | "plan">;
+
+export type DirectNudgeSelectorInput = Omit<DirectToolCompletionAdapter, "plan">;
 
 interface ChalinRouteInvocation {
   id: number;
@@ -15,6 +88,7 @@ interface DirectCompletionState {
   directModeKind: DirectModeKind;
   docsOnlyPathPrompt: boolean;
   cwd?: string;
+  toolEvents: DirectToolEvent[];
   mutationObserved: boolean;
   sourceMutationObserved: boolean;
   testMutationObserved: boolean;
@@ -235,7 +309,16 @@ export function beginChalinTurn(options: { prompt?: string; cwd?: string } = {})
   directCompletion.docsPreMutationShellBudget = docsEvidenceShellBudget(options.prompt ?? "");
 }
 
-export function recordDirectToolCompletion(options: { toolName: string; isError?: boolean; command?: string; path?: string; argsText?: string }): { shouldProgressNudge: boolean; shouldReadyToVerifyNudge: boolean; shouldFailureNudge: boolean; shouldCompletionNudge: boolean; shouldTestCoverageNudge: boolean; shouldWeakTestCoverageNudge: boolean; shouldPackageMetadataNudge: boolean; shouldParallelSurfaceNudge: boolean; shouldWorkspaceBoundaryNudge: boolean; shouldDocsShellNudge: boolean; shouldDocsPreWriteShellNudge: boolean; shouldPreMutationVerificationNudge: boolean; shouldPostVerificationShellNudge: boolean; shouldPostVerificationExplorationNudge: boolean; shouldDocsEvidenceLoopNudge: boolean; shouldScaffoldEvidenceLoopNudge: boolean; shouldLocatorLoopNudge: boolean; shouldStatefulTimeNudge: boolean; shouldExistingFileRewriteNudge: boolean; shouldMutationLoopNudge: boolean; shouldSourceAndTestReadyNudge: boolean; shouldVerificationLoopNudge: boolean; shouldPostFailureEvidenceNudge: boolean; verificationCommand?: string; docsOnlyMutation: boolean } {
+export function recordDirectToolStart(options: Omit<DirectToolEvent, "phase">): void {
+  appendDirectToolEvent({ ...options, phase: "start" });
+}
+
+export function getDirectToolEventsForTests(): DirectToolEvent[] {
+  return directCompletion.toolEvents.map((event) => ({ ...event }));
+}
+
+export function recordDirectToolCompletion(options: { toolName: string; isError?: boolean; command?: string; path?: string; argsText?: string }): DirectToolCompletionAdapter {
+  appendDirectToolEvent({ ...options, phase: "completed" });
   let shouldProgressNudge = false;
   let shouldWorkspaceBoundaryNudge = false;
   let shouldDocsShellNudge = false;
@@ -291,7 +374,7 @@ export function recordDirectToolCompletion(options: { toolName: string; isError?
     directCompletion.readPaths.add(normalizeWorkflowPath(options.path));
   }
   if (options.toolName === "edit" || options.toolName === "write") {
-    if (options.isError) return { shouldProgressNudge: false, shouldReadyToVerifyNudge: false, shouldFailureNudge: false, shouldCompletionNudge: false, shouldTestCoverageNudge: false, shouldWeakTestCoverageNudge: false, shouldPackageMetadataNudge: false, shouldParallelSurfaceNudge: false, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldDocsPreWriteShellNudge, shouldPreMutationVerificationNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldDocsEvidenceLoopNudge, shouldScaffoldEvidenceLoopNudge, shouldLocatorLoopNudge, shouldStatefulTimeNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, docsOnlyMutation: directDocsOnlyMutation() };
+    if (options.isError) return directCompletionAdapter({ shouldProgressNudge: false, shouldReadyToVerifyNudge: false, shouldFailureNudge: false, shouldCompletionNudge: false, shouldTestCoverageNudge: false, shouldWeakTestCoverageNudge: false, shouldPackageMetadataNudge: false, shouldParallelSurfaceNudge: false, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldDocsPreWriteShellNudge, shouldPreMutationVerificationNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldDocsEvidenceLoopNudge, shouldScaffoldEvidenceLoopNudge, shouldLocatorLoopNudge, shouldStatefulTimeNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, docsOnlyMutation: directDocsOnlyMutation() });
     justMutated = true;
     const recoveringFromVerificationFailure = directCompletion.failedVerificationNudgeSent && !directCompletion.verificationObserved;
     directCompletion.mutationObserved = true;
@@ -451,7 +534,7 @@ export function recordDirectToolCompletion(options: { toolName: string; isError?
     shouldFailureNudge = !directCompletion.failedVerificationNudgeSent;
     if (shouldFailureNudge) directCompletion.failedVerificationNudgeSent = true;
   } else if (options.isError) {
-    return { shouldProgressNudge, shouldReadyToVerifyNudge: false, shouldFailureNudge: false, shouldCompletionNudge: false, shouldTestCoverageNudge: false, shouldWeakTestCoverageNudge: false, shouldPackageMetadataNudge: false, shouldParallelSurfaceNudge: false, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldDocsPreWriteShellNudge, shouldPreMutationVerificationNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldDocsEvidenceLoopNudge, shouldScaffoldEvidenceLoopNudge, shouldLocatorLoopNudge, shouldStatefulTimeNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, verificationCommand: directCompletion.verificationCommand, docsOnlyMutation };
+    return directCompletionAdapter({ shouldProgressNudge, shouldReadyToVerifyNudge: false, shouldFailureNudge: false, shouldCompletionNudge: false, shouldTestCoverageNudge: false, shouldWeakTestCoverageNudge: false, shouldPackageMetadataNudge: false, shouldParallelSurfaceNudge: false, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldDocsPreWriteShellNudge, shouldPreMutationVerificationNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldDocsEvidenceLoopNudge, shouldScaffoldEvidenceLoopNudge, shouldLocatorLoopNudge, shouldStatefulTimeNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, verificationCommand: directCompletion.verificationCommand, docsOnlyMutation });
   }
   if (shouldNudgeStatefulTimeDrift(options.toolName)) {
     shouldStatefulTimeNudge = true;
@@ -539,7 +622,82 @@ export function recordDirectToolCompletion(options: { toolName: string; isError?
     directCompletion.readbackStopNudgeSent = true;
   }
   if (shouldCompletionNudge) directCompletion.nudgeSent = true;
-  return { shouldProgressNudge, shouldReadyToVerifyNudge, shouldFailureNudge, shouldCompletionNudge, shouldTestCoverageNudge, shouldWeakTestCoverageNudge, shouldPackageMetadataNudge, shouldParallelSurfaceNudge, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldDocsPreWriteShellNudge, shouldPreMutationVerificationNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldDocsEvidenceLoopNudge, shouldScaffoldEvidenceLoopNudge, shouldLocatorLoopNudge, shouldStatefulTimeNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, verificationCommand: directCompletion.verificationCommand, docsOnlyMutation };
+  return directCompletionAdapter({ shouldProgressNudge, shouldReadyToVerifyNudge, shouldFailureNudge, shouldCompletionNudge, shouldTestCoverageNudge, shouldWeakTestCoverageNudge, shouldPackageMetadataNudge, shouldParallelSurfaceNudge, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldDocsPreWriteShellNudge, shouldPreMutationVerificationNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldDocsEvidenceLoopNudge, shouldScaffoldEvidenceLoopNudge, shouldLocatorLoopNudge, shouldStatefulTimeNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, verificationCommand: directCompletion.verificationCommand, docsOnlyMutation });
+}
+
+const DIRECT_NUDGE_FLAGS = [
+  "shouldProgressNudge",
+  "shouldReadyToVerifyNudge",
+  "shouldFailureNudge",
+  "shouldCompletionNudge",
+  "shouldTestCoverageNudge",
+  "shouldWeakTestCoverageNudge",
+  "shouldPackageMetadataNudge",
+  "shouldParallelSurfaceNudge",
+  "shouldWorkspaceBoundaryNudge",
+  "shouldDocsShellNudge",
+  "shouldDocsPreWriteShellNudge",
+  "shouldPreMutationVerificationNudge",
+  "shouldPostVerificationShellNudge",
+  "shouldPostVerificationExplorationNudge",
+  "shouldDocsEvidenceLoopNudge",
+  "shouldScaffoldEvidenceLoopNudge",
+  "shouldLocatorLoopNudge",
+  "shouldStatefulTimeNudge",
+  "shouldExistingFileRewriteNudge",
+  "shouldMutationLoopNudge",
+  "shouldSourceAndTestReadyNudge",
+  "shouldVerificationLoopNudge",
+  "shouldPostFailureEvidenceNudge",
+] as const satisfies readonly DirectNudgeFlag[];
+
+const DIRECT_NUDGE_PRIORITY = [
+  ["workspace-boundary", "shouldWorkspaceBoundaryNudge"],
+  ["weak-test-coverage", "shouldWeakTestCoverageNudge"],
+  ["package-metadata", "shouldPackageMetadataNudge"],
+  ["parallel-surface", "shouldParallelSurfaceNudge"],
+  ["test-coverage", "shouldTestCoverageNudge"],
+  ["failure", "shouldFailureNudge"],
+  ["completion", "shouldCompletionNudge"],
+  ["docs-shell", "shouldDocsShellNudge"],
+  ["docs-prewrite-shell", "shouldDocsPreWriteShellNudge"],
+  ["pre-mutation-verification", "shouldPreMutationVerificationNudge"],
+  ["post-verification-shell", "shouldPostVerificationShellNudge"],
+  ["post-verification-exploration", "shouldPostVerificationExplorationNudge"],
+  ["docs-evidence-loop", "shouldDocsEvidenceLoopNudge"],
+  ["scaffold-evidence-loop", "shouldScaffoldEvidenceLoopNudge"],
+  ["stateful-time", "shouldStatefulTimeNudge"],
+  ["locator-loop", "shouldLocatorLoopNudge"],
+  ["existing-file-rewrite", "shouldExistingFileRewriteNudge"],
+  ["mutation-loop", "shouldMutationLoopNudge"],
+  ["source-and-test-ready", "shouldSourceAndTestReadyNudge"],
+  ["verification-loop", "shouldVerificationLoopNudge"],
+  ["post-failure-evidence", "shouldPostFailureEvidenceNudge"],
+  ["ready-to-verify", "shouldReadyToVerifyNudge"],
+  ["progress", "shouldProgressNudge"],
+] as const satisfies readonly (readonly [DirectNudgeKind, DirectNudgeFlag])[];
+
+export function selectDirectNudgePlan(input: DirectNudgeSelectorInput): DirectNudgePlan | undefined {
+  for (const [kind, flag] of DIRECT_NUDGE_PRIORITY) {
+    if (input[flag]) return { kind, verificationCommand: input.verificationCommand, docsOnlyMutation: input.docsOnlyMutation };
+  }
+  return undefined;
+}
+
+function directCompletionAdapter(raw: DirectNudgeSelectorInput): DirectToolCompletionAdapter {
+  const plan = selectDirectNudgePlan(raw);
+  const adapter: DirectToolCompletionAdapter = { ...raw, plan };
+  for (const flag of DIRECT_NUDGE_FLAGS) {
+    adapter[flag] = false;
+  }
+  if (plan) adapter[directNudgeFlagForKind(plan.kind)] = true;
+  return adapter;
+}
+
+function directNudgeFlagForKind(kind: DirectNudgeKind): DirectNudgeFlag {
+  const matched = DIRECT_NUDGE_PRIORITY.find(([item]) => item === kind);
+  if (!matched) return "shouldProgressNudge";
+  return matched[1];
 }
 
 export function getDirectChangedPaths(): string[] {
@@ -657,6 +815,7 @@ function freshDirectCompletionState(): DirectCompletionState {
     directModeKind: "generic",
     docsOnlyPathPrompt: false,
     cwd: undefined,
+    toolEvents: [],
     mutationObserved: false,
     sourceMutationObserved: false,
     testMutationObserved: false,
@@ -707,6 +866,13 @@ function freshDirectCompletionState(): DirectCompletionState {
     postFailureEvidenceNudgeSent: false,
     nudgeSent: false,
   };
+}
+
+function appendDirectToolEvent(event: DirectToolEvent): void {
+  directCompletion.toolEvents.push(event);
+  if (directCompletion.toolEvents.length > 200) {
+    directCompletion.toolEvents.splice(0, directCompletion.toolEvents.length - 200);
+  }
 }
 
 function freshSkillOverrideState(): SkillOverrideState {

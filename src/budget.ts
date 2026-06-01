@@ -5,7 +5,7 @@ import type { AgentDefinition, BudgetCapHit, BudgetCapName, RouteKind, RouteRisk
 export type { BudgetCapHit } from "./schemas.ts";
 
 export type BudgetTaskKind = "recon" | "review" | "implementation" | "migration" | "long-autonomous" | "research" | "planning" | "synthesis";
-export type BudgetHealthStatus = "ok" | "warn" | "budget-capped";
+export type BudgetHealthStatus = "ok" | "warn" | "checkpointed";
 export type BudgetResumeStrategy = "none" | "handoff-only" | "checkpoint-and-continue" | "split-and-continue" | "stage-checkpoint-validate-memory-next";
 
 export interface BudgetCaps {
@@ -189,7 +189,7 @@ export function evaluateBudgetUsage(policy: BudgetPolicy, usage: BudgetUsage, pr
 
   if (caps.length === 0) return { status: "ok", caps, warnings: [], next: "continue" };
   const hard = caps.some((cap) => cap.severity === "hard");
-  const status: BudgetHealthStatus = hard ? "budget-capped" : "warn";
+  const status: BudgetHealthStatus = hard ? "checkpointed" : "warn";
   const progressGate = progress && progress.gate !== "continue" ? progress.gate : undefined;
   const checkpointStatus = progressGate ? checkpointStatusForGate(progressGate) : undefined;
   return {
@@ -200,7 +200,7 @@ export function evaluateBudgetUsage(policy: BudgetPolicy, usage: BudgetUsage, pr
       ...(progressGate ? [`progress gate ${progressGate} from score ${formatNumber(progress?.score ?? 0)}`] : []),
     ],
     ...(checkpointStatus ? { checkpointStatus } : {}),
-    next: progressGate ?? (status === "budget-capped"
+    next: progressGate ?? (status === "checkpointed"
       ? policy.resumeStrategy === "stage-checkpoint-validate-memory-next" ? "split" : "checkpoint-and-continue"
       : "continue"),
   };
@@ -271,13 +271,13 @@ function recordBudgetCheckpointEffect(store: ArtifactStore, featureId: string, s
   return Effect.gen(function* () {
     yield* Effect.tryPromise(() => store.initFeature({
       featureId,
-      goal: `Continue budget-capped pi-chalin step ${step.agent}`,
+      goal: `Continue budget checkpoint for pi-chalin step ${step.agent}`,
       chain: [step.agent],
       currentStep: step.task,
     }));
     return yield* Effect.tryPromise(() => store.appendCheckpoint(featureId, {
       agent: step.agent,
-      title: `${step.agent} budget-capped`,
+      title: `${step.agent} budget checkpoint`,
       summary: compact([step.output?.handoff, step.output?.text, reason].filter(Boolean).join(" "), 900),
       status: "paused",
       stage: step.id,

@@ -6,7 +6,7 @@ import { afterEach, test } from "bun:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import registerPiChalin from "../src/index.ts";
 import { resetAutorouteToolStateForTests, shouldUseCompactDirectOrchestrationPrompt } from "../src/autoroute.ts";
-import { resetRuntimeState, setLatestRun, setLiveStepSession } from "../src/runtime-state.ts";
+import { getDirectToolEventsForTests, resetRuntimeState, setLatestRun, setLiveStepSession } from "../src/runtime-state.ts";
 import { openAgentManager, openAgentModelPicker, openSkillManager } from "../src/ui-agents.ts";
 import { openMemoryReview, openMemoryReviewWithLoading, openSmartPanel, openWebFetchAuditPanel, summarizeRuntimeGuards } from "../src/ui.ts";
 import { finalAnswerMaterial } from "../src/route-format.ts";
@@ -14,6 +14,7 @@ import { formatChalinRoutePlanWidget, formatChalinRunWidget } from "../src/route
 import { createRunState, persistRun } from "../src/runner-state.ts";
 import { chalinFooterText } from "../src/ui-status.ts";
 import { createMemoryCandidate, MemoryStore } from "../src/memory.ts";
+import { buildRunLifecycleSpans, redactTraceAttribute } from "../src/observability.ts";
 import type { AgentDefinition, MemoryRecord, RunState } from "../src/schemas.ts";
 import { SkillCatalog } from "../src/skills.ts";
 import type { WebFetchAuditEntry } from "../src/webfetch.ts";
@@ -57,6 +58,13 @@ function memoryRecord(overrides: Partial<MemoryRecord>): MemoryRecord {
     revisionCount: 1,
     ...overrides,
   };
+}
+
+function directSteerTypesSince(fake: ReturnType<typeof createFakePi>, fromIndex: number): string[] {
+  return fake.messages
+    .slice(fromIndex)
+    .map((item) => (item.message as { customType?: string }).customType ?? "")
+    .filter((customType) => customType.startsWith("pi-chalin-direct-") || customType.startsWith("pi-chalin-docs-"));
 }
 
 function createFakePi() {
@@ -245,7 +253,7 @@ test("pi-chalin forces high thinking only for the parent orchestration decision"
 
 test("pi-chalin gates general no-path orchestration decisions with route-only tools", async () => {
   const fake = createFakePi();
-  const fullToolSet = ["read", "bash", "grep", "find", "ls", "chalin_route"];
+  const fullToolSet = ["read", "bash", "grep", "find", "ls", "chalin_interview", "chalin_route", "chalin_web_search"];
   fake.activeTools = [...fullToolSet];
   fake.thinkingLevel = "low";
   registerPiChalin(fake.api as never);
@@ -265,11 +273,62 @@ test("pi-chalin gates general no-path orchestration decisions with route-only to
   });
 
   assert.equal(fake.thinkingLevel, "high");
-  assert.deepEqual(fake.activeTools, ["chalin_route"]);
+  assert.deepEqual(fake.activeTools, ["chalin_interview", "chalin_route"]);
   toolStart({ toolName: "chalin_route", args: {} });
   assert.equal(fake.thinkingLevel, "low");
   assert.deepEqual(fake.activeTools, fullToolSet);
-  assert.deepEqual(fake.toolSetHistory.slice(-2), [["chalin_route"], fullToolSet]);
+  assert.deepEqual(fake.toolSetHistory.slice(-2), [["chalin_interview", "chalin_route"], fullToolSet]);
+});
+
+test("primary Pi keeps interview and web search available for ambiguous URL/docs decisions without forcing route", async () => {
+  const fake = createFakePi();
+  const fullToolSet = ["read", "bash", "grep", "find", "ls", "edit", "write", "chalin_interview", "chalin_route", "chalin_web_search"];
+  fake.activeTools = [...fullToolSet];
+  registerPiChalin(fake.api as never);
+  const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
+  const ctx = {
+    cwd: tempDir("pi-chalin-main-webfetch-"),
+    hasUI: false,
+    model: undefined,
+    modelRegistry: { getAvailable: () => [] },
+  };
+
+  await beforeAgentStart({
+    type: "before_agent_start",
+    prompt: "Actualiza docs/sdk-notes.md con los cambios puntuales de https://example.com/sdk-release-notes, preguntando si el alcance es ambiguo.",
+    systemPrompt: "base",
+    systemPromptOptions: {},
+  }, ctx);
+
+  assert.ok(fake.activeTools.includes("chalin_interview"));
+  assert.ok(fake.activeTools.includes("chalin_web_search"));
+  assert.ok(fake.activeTools.includes("read"));
+  assert.ok(fake.activeTools.includes("edit"));
+  assert.notDeepEqual(fake.activeTools, ["chalin_route"]);
+});
+
+test("bounded local direct prompts hide WebFetch unless URL or external docs are named", async () => {
+  const fake = createFakePi();
+  const fullToolSet = ["read", "bash", "edit", "write", "grep", "find", "ls", "chalin_interview", "chalin_route", "chalin_web_search"];
+  fake.activeTools = [...fullToolSet];
+  registerPiChalin(fake.api as never);
+  const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
+
+  await beforeAgentStart({
+    type: "before_agent_start",
+    prompt: "Actualiza src/cache.ts y test/cache.test.ts para corregir una clave compuesta local y deja bun test pasando.",
+    systemPrompt: "base",
+    systemPromptOptions: {},
+  }, {
+    cwd: tempDir("pi-chalin-local-no-webfetch-"),
+    hasUI: false,
+    model: undefined,
+    modelRegistry: { getAvailable: () => [] },
+  });
+
+  assert.equal(fake.activeTools.includes("chalin_web_search"), false);
+  assert.ok(fake.activeTools.includes("read"));
+  assert.ok(fake.activeTools.includes("edit"));
 });
 
 test("pi-chalin keeps direct tools for bounded review, root docs edits, and explicit commands", async () => {
@@ -1416,7 +1475,7 @@ test("pi-chalin forces route-only tools for complex routed prompts while preserv
   assert.match(codePrompt?.message?.content ?? "", /For transformations/i);
   assert.doesNotMatch(codePrompt?.message?.content ?? "", /Parsers\/scanners\/state machines/i);
   assert.match(codePrompt?.message?.content ?? "", /No placeholders\/TODO/i);
-  assert.deepEqual(fake.activeTools, activeToolSet);
+  assert.deepEqual(fake.activeTools, activeToolSet.filter((name) => name !== "chalin_web_search"));
   agentEnd({}, ctx);
   assert.deepEqual(fake.activeTools, activeToolSet);
 });
@@ -2127,6 +2186,16 @@ test("direct bash end reuses command captured at tool start", async () => {
   toolExecutionStart({ toolName: "bash", args: { command: "make test" } }, ctx);
   toolExecutionEnd({ toolName: "bash", isError: false }, ctx);
 
+  assert.deepEqual(getDirectToolEventsForTests().map((event) => ({
+    phase: event.phase,
+    toolName: event.toolName,
+    command: event.command,
+    isError: event.isError,
+  })).slice(-2), [
+    { phase: "start", toolName: "bash", command: "make test", isError: undefined },
+    { phase: "completed", toolName: "bash", command: "make test", isError: false },
+  ]);
+
   const nudges = fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-completion-nudge");
   assert.equal(nudges.length, 1);
   assert.match((nudges[0]?.message as { content?: string }).content ?? "", /make test/);
@@ -2462,13 +2531,14 @@ test("direct docs-only edits verify with read instead of shell nudges", async ()
   const shellNudge = fake.messages.find((item) => (item.message as { customType?: string }).customType === "pi-chalin-docs-only-shell-nudge");
   assert.match((shellNudge?.message as { content?: string }).content ?? "", /names only docs artifacts/i);
   assert.match((shellNudge?.message as { content?: string }).content ?? "", /Stop running shell verification/i);
+  const beforeWriteMessages = fake.messages.length;
   toolExecutionEnd({ toolName: "write", isError: false, args: { path: "docs/plan.md" } }, ctx);
 
-  const progress = fake.messages.find((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-progress-nudge");
-  assert.match((progress?.message as { content?: string }).content ?? "", /Docs changed/i);
-  assert.match((progress?.message as { content?: string }).content ?? "", /do not run find\/grep\/bash after the write/i);
-  assert.match((progress?.message as { content?: string }).content ?? "", /searched\/not-found/i);
-
+  assert.deepEqual(
+    directSteerTypesSince(fake, beforeWriteMessages),
+    ["pi-chalin-direct-ready-to-verify-nudge"],
+    "a docs-only write gets one direct steer: read back the artifact",
+  );
   const ready = fake.messages.find((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-ready-to-verify-nudge");
   assert.match((ready?.message as { content?: string }).content ?? "", /Read updated docs/i);
 
@@ -2880,6 +2950,95 @@ test("chalin_route executes the workflow chosen by the primary Pi agent", async 
   assert.ok(statuses.some((status) => status.startsWith("chalin ")));
   assert.ok(statuses.some((status) => status.includes("review")));
   assert.ok(widgets.every((args) => args[1] === undefined), "chalin_route may clear the legacy widget but must not create a duplicate persistent widget");
+});
+
+test("observability lifecycle spans cover run stage review repair checkpoint interview webfetch with redacted attributes", () => {
+  const startedAt = Date.now();
+  const run: RunState = {
+    id: "chalin-observe",
+    route: {
+      kind: "multi-agent-dag",
+      agents: ["worker", "reviewer"],
+      risk: "medium",
+      ambiguity: "high",
+      needsMemory: false,
+      needsArtifacts: true,
+      reason: "Implement with review and repair.",
+      plan: {
+        kind: "dag",
+        stages: [
+          { id: "implementation", tasks: [{ agent: "worker", task: "Implement." }] },
+          { id: "review", tasks: [{ agent: "reviewer", task: "Review." }] },
+        ],
+      },
+    },
+    rootTask: "Use token sk-live-secret against https://example.com/private?api_key=abc",
+    status: "paused",
+    startedAt: new Date(startedAt).toISOString(),
+    endedAt: new Date(startedAt + 25).toISOString(),
+    logsPath: "/tmp/chalin-observe.json",
+    warnings: ["checkpointed partial handoff", "review repair queued"],
+    steps: [
+      {
+        id: "implementation:step-1",
+        agent: "worker",
+        task: "Implement.",
+        status: "checkpointed",
+        checkpoint: { kind: "budget-cap", reason: "Budget cap reached during SDK child execution.", continuation: "continue" },
+        metrics: {
+          durationMs: 10,
+          usage: emptyTestUsage(),
+          toolCalls: 2,
+          toolCallsByName: { chalin_web_search: 1, chalin_artifact_write: 1 },
+          budgetStopCount: 1,
+          spans: [
+            { id: "webfetch-1", parentId: "implementation:step-1", name: "https://example.com/private?api_key=abc", kind: "webfetch", startedAt, endedAt: startedAt + 1, attributes: { url: "https://example.com/private?api_key=abc" } },
+            { id: "checkpoint-1", parentId: "implementation:step-1", name: "checkpoint", kind: "checkpoint", startedAt: startedAt + 2, endedAt: startedAt + 3 },
+          ],
+        },
+      },
+      {
+        id: "review-repair-1-worker",
+        agent: "worker",
+        task: "Repair.",
+        status: "complete",
+        metrics: {
+          durationMs: 7,
+          usage: emptyTestUsage(),
+          toolCalls: 1,
+          toolCallsByName: { chalin_interview: 1 },
+          spans: [
+            { id: "interview-1", parentId: "review-repair-1-worker", name: "clarify token sk-live-secret", kind: "interview", startedAt: startedAt + 4, endedAt: startedAt + 5, attributes: { prompt: "token sk-live-secret" } },
+          ],
+        },
+      },
+      {
+        id: "review-repair-1-reviewer",
+        agent: "reviewer",
+        task: "Review repair.",
+        status: "complete",
+        metrics: {
+          durationMs: 8,
+          usage: emptyTestUsage(),
+          toolCalls: 0,
+          toolCallsByName: {},
+        },
+      },
+    ],
+  };
+
+  const spans = buildRunLifecycleSpans(run);
+  const kinds = new Set(spans.map((span) => span.kind));
+  assert.ok(kinds.has("run"));
+  assert.ok(kinds.has("stage"));
+  assert.ok(kinds.has("handoff"));
+  assert.ok(kinds.has("review"));
+  assert.ok(kinds.has("repair"));
+  assert.ok(kinds.has("checkpoint"));
+  assert.ok(kinds.has("interview"));
+  assert.ok(kinds.has("webfetch"));
+  assert.equal(redactTraceAttribute("token", "sk-live-secret"), "[REDACTED]");
+  assert.doesNotMatch(JSON.stringify(spans), /sk-live-secret|api_key=abc/);
 });
 
 test("finalAnswerMaterial preserves multi-agent analysis evidence instead of only last handoff", () => {
@@ -3347,7 +3506,7 @@ test("Live status opens a tabbed overlay with current subagent history", async (
   }
 });
 
-test("chalin result widget counts budget-capped checkpoints as progressed work", () => {
+test("chalin result widget counts checkpointed steps as progressed work", () => {
   const run: RunState = {
     id: "chalin-budget-panel",
     route: { kind: "multi-agent-dag", agents: ["scout", "context-builder"], risk: "low", ambiguity: "low", needsMemory: false, needsArtifacts: true, reason: "test" },
@@ -3355,7 +3514,7 @@ test("chalin result widget counts budget-capped checkpoints as progressed work",
     startedAt: new Date().toISOString(),
     warnings: [],
     steps: [
-      { id: "discover:step-1", agent: "scout", task: "Map project", status: "budget-capped", output: { agent: "scout", text: "partial", handoff: "Project mapped enough to continue.", memoryCandidates: [], raw: "partial", warnings: [] } },
+      { id: "discover:step-1", agent: "scout", task: "Map project", status: "checkpointed", checkpoint: { kind: "budget-cap", reason: "Budget cap reached during SDK child execution.", continuation: "continue" }, output: { agent: "scout", text: "partial", handoff: "Project mapped enough to continue.", memoryCandidates: [], raw: "partial", warnings: [] } },
       { id: "fanout:step-1", agent: "context-builder", task: "Analyze backend", status: "running" },
     ],
   };
@@ -3365,6 +3524,7 @@ test("chalin result widget counts budget-capped checkpoints as progressed work",
   assert.match(preview, /1\/2/);
   assert.match(preview, /✓ scout/);
   assert.match(preview, /Project mapped enough to continue/);
+  assert.match(preview, /budget limit reached/);
 });
 
 test("/chalin Smart Panel does not auto-open memory when pending memories exist", async () => {
@@ -4179,7 +4339,7 @@ test("chalin_route renders a compact agent tree widget instead of a plain tool l
   assert.match(running, /tools: 0 · guards: checking/);
 });
 
-test("chalin_route marks budget-capped handoff steps as checkpointed, not pending", () => {
+test("chalin_route marks budget checkpoint handoff steps as checkpointed, not pending", () => {
   const running = formatChalinRunWidget({
     id: "chalin-budget-live",
     route: { kind: "multi-agent-dag", agents: ["scout", "context-builder"], risk: "low", ambiguity: "low", needsMemory: false, needsArtifacts: true, reason: "test" },
@@ -4194,7 +4354,7 @@ test("chalin_route marks budget-capped handoff steps as checkpointed, not pendin
       budgetStopCount: 1,
     },
     steps: [
-      { id: "discover:step-1", agent: "scout", task: "Map project.", status: "budget-capped", output: { agent: "scout", text: "Partial map", handoff: "README and docs mapped; continue with backend.", memoryCandidates: [], raw: "Partial map", warnings: [] } },
+      { id: "discover:step-1", agent: "scout", task: "Map project.", status: "checkpointed", checkpoint: { kind: "budget-cap", reason: "Budget cap reached during SDK child execution.", continuation: "continue" }, output: { agent: "scout", text: "Partial map", handoff: "README and docs mapped; continue with backend.", memoryCandidates: [], raw: "Partial map", warnings: [] } },
       { id: "fanout:step-1", agent: "context-builder", task: "Analyze backend.", status: "running" },
     ],
   });

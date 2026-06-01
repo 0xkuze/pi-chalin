@@ -5,7 +5,7 @@ import { loadEffectiveConfig, type ChalinConfig } from "./config.ts";
 import { createConfiguredMemoryStore } from "./memory-provider.ts";
 import { buildCompactChalinOrchestratorSystemPrompt, buildChalinOrchestratorSystemPrompt } from "./orchestration.ts";
 import { isUsableStepHandoff, loadResumableRunState } from "./runner-state.ts";
-import { beginChalinTurn, getDirectChangedPaths, getDirectCriticalGuardContextMessage, getSkillOverridesForTurn, isDirectLeanBoundedTurn, isDirectStatefulTimeTurn, isDirectTestOnlyTurn, recordDirectToolCompletion } from "./runtime-state.ts";
+import { beginChalinTurn, getDirectChangedPaths, getDirectCriticalGuardContextMessage, getSkillOverridesForTurn, isDirectLeanBoundedTurn, isDirectStatefulTimeTurn, isDirectTestOnlyTurn, recordDirectToolCompletion, recordDirectToolStart } from "./runtime-state.ts";
 import type { RunState } from "./schemas.ts";
 import { SkillCatalog, formatActiveSkillsForPrompt } from "./skills.ts";
 import { setChalinStatus } from "./ui-status.ts";
@@ -36,6 +36,8 @@ const DIRECT_CHALIN_TOOL_NAMES = [
 const BOUNDED_DIRECT_HIDDEN_TOOLS = new Set([...DIRECT_CHALIN_TOOL_NAMES, "grep", "find", "ls"]);
 const GREENFIELD_DIRECT_HIDDEN_TOOLS = new Set([...DIRECT_CHALIN_TOOL_NAMES, "read", "grep", "find", "ls"]);
 const ROUTE_ONLY_TOOLS = new Set(["chalin_route"]);
+const INTERVIEW_ROUTE_TOOLS = new Set(["chalin_interview", "chalin_route"]);
+const INTERVIEW_ROUTE_WEB_TOOLS = new Set(["chalin_interview", "chalin_route", "chalin_web_search"]);
 
 function runHookEffect<A>(span: string, run: () => A | Promise<A>): Promise<A> {
   return Effect.runPromise(Effect.tryPromise({ try: async () => run(), catch: (error) => error }).pipe(Effect.withSpan(span)));
@@ -59,7 +61,7 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
     if (forceRouteFirst) {
       applyToolAllowlist(pi, ROUTE_ONLY_TOOLS);
     } else if (useModeGate) {
-      applyDecisionToolAllowlist(pi, ROUTE_ONLY_TOOLS);
+      applyDecisionToolAllowlist(pi, decisionToolAllowlistForPrompt(promptText));
     } else if (hiddenDirectTools) {
       applyDirectToolScope(pi, hiddenDirectTools);
     }
@@ -83,7 +85,7 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
       ? buildCompactChalinOrchestratorSystemPrompt()
       : useCompactPrompt
       ? ""
-      : buildChalinOrchestratorSystemPrompt(catalog?.list() ?? []);
+      : buildChalinOrchestratorSystemPrompt(catalog?.list() ?? [], promptText);
     const memoryContext = useCompactPrompt ? undefined : await globalMemoryContextForPrompt(ctx.cwd, promptText);
     const skillSignal = buildSkillSteeringMessage(ctx.cwd, loaded.config, promptText);
     const systemPrompt = [event.systemPrompt, orchestrationPrompt, memoryContext].filter((item) => item?.trim()).join("\n\n");
@@ -141,7 +143,16 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
   pi.on("tool_execution_start", (event) => {
     restoreOrchestratorThinking(pi);
     restoreDecisionToolSet(pi);
-    rememberToolStart(pi, event);
+    const startedArgs = rememberToolStart(pi, event);
+    const toolName = (event as { toolName?: unknown }).toolName;
+    if (typeof toolName === "string" && toolName) {
+      recordDirectToolStart({
+        toolName,
+        command: startedArgs?.command,
+        path: startedArgs?.path,
+        argsText: startedArgs?.argsText,
+      });
+    }
   });
 
   pi.on("tool_execution_end", (event, ctx) => {
@@ -506,19 +517,21 @@ export function resetAutorouteToolStateForTests(): void {
   // a marker hook for symmetry with runtime-state resets.
 }
 
-function rememberToolStart(pi: ExtensionAPI, event: unknown): void {
+function rememberToolStart(pi: ExtensionAPI, event: unknown): PendingToolArgs | undefined {
   const toolName = (event as { toolName?: unknown }).toolName;
-  if (typeof toolName !== "string" || !toolName) return;
+  if (typeof toolName !== "string" || !toolName) return undefined;
   const args = (event as { args?: unknown }).args;
-  if (!args || typeof args !== "object") return;
+  if (!args || typeof args !== "object") return undefined;
   const pending = pendingArgsFor(pi);
   const queue = pending.get(toolName) ?? [];
-  queue.push({
+  const captured = {
     command: stringArg(args, "command"),
     path: stringArg(args, "path") ?? stringArg(args, "filePath") ?? stringArg(args, "file"),
     argsText: JSON.stringify(args),
-  });
+  };
+  queue.push(captured);
   pending.set(toolName, queue);
+  return captured;
 }
 
 function takeToolStart(pi: ExtensionAPI, toolName: string): PendingToolArgs | undefined {
@@ -663,14 +676,33 @@ function shouldSkipCompactPathPrompt(prompt: string, hasResumeContext: boolean):
 function hiddenDirectToolsForPrompt(prompt: string, hasResumeContext: boolean): Set<string> | undefined {
   if (hasResumeContext) return undefined;
   const paths = promptPathMentions(prompt);
-  if (paths.some(isDocsMarkdownPath) || /\b(no-code|sin c[oó]digo|no cambies c[oó]digo|no implementes c[oó]digo|solo docs|docs-only)\b/i.test(prompt)) return undefined;
+  const needsExternalContext = promptNeedsExternalContext(prompt);
+  if (needsExternalContext) return undefined;
+  if (paths.some(isDocsMarkdownPath) || /\b(no-code|sin c[oó]digo|no cambies c[oó]digo|no implementes c[oó]digo|solo docs|docs-only)\b/i.test(prompt)) return new Set(["chalin_web_search"]);
   if (shouldSkipCompactPathPrompt(prompt, hasResumeContext) || shouldUseLeanDirectToolScope(prompt, hasResumeContext) || looksLikeTestOnlyPathContract(prompt, paths)) {
     return BOUNDED_DIRECT_HIDDEN_TOOLS;
   }
   if (promptLooksScaffoldPathContract(prompt)) {
     return GREENFIELD_DIRECT_HIDDEN_TOOLS;
   }
+  if (paths.length > 0 || promptLooksBoundedDirectLocalWork(prompt)) return new Set(["chalin_web_search"]);
   return undefined;
+}
+
+function decisionToolAllowlistForPrompt(prompt: string): ReadonlySet<string> {
+  return promptNeedsExternalContext(prompt) ? INTERVIEW_ROUTE_WEB_TOOLS : INTERVIEW_ROUTE_TOOLS;
+}
+
+function promptNeedsExternalContext(prompt: string): boolean {
+  return /https?:\/\/\S+/i.test(prompt)
+    || /\b(url|web|internet|external|extern[ao]s?|docs? oficiales|official docs|documentation|release notes|changelog|api docs|sdk docs|current docs|latest docs|documentaci[oó]n oficial)\b/i.test(prompt);
+}
+
+function promptLooksBoundedDirectLocalWork(prompt: string): boolean {
+  return /\b(actualiza|update|corrige|fix|implementa|add|añade|test|tests?|refactor|helper|local|named files?|archivos?)\b/i.test(prompt)
+    && !promptNeedsExternalContext(prompt)
+    && !promptLooksBroadOrchestrationWork(prompt)
+    && !promptLooksRiskyImplementationRoute(prompt, promptPathMentions(prompt));
 }
 
 function shouldForceRouteFirst(prompt: string, hasResumeContext: boolean): boolean {

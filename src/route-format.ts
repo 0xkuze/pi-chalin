@@ -1,6 +1,7 @@
 import type { ChalinHandleResult } from "./kernel.ts";
 import type { ChalinRouteOutcome } from "./runtime-state.ts";
 import type { RouteDecision, RunState } from "./schemas.ts";
+import { isUsableStepStatus } from "./status.ts";
 
 export function formatRoute(route: RouteDecision, result: ChalinHandleResult | undefined, options: { availableAgents?: string[] } = {}): string {
   if (!result) {
@@ -180,10 +181,6 @@ export function compactRouteDetails(route: RouteDecision, result: ChalinHandleRe
     } : undefined,
     diagnostics,
   };
-}
-
-function isUsableStepStatus(status: RunState["status"] | undefined): boolean {
-  return status === "complete" || status === "budget-capped";
 }
 
 function truncate(text: string, max: number): string {

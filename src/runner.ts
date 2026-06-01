@@ -11,7 +11,7 @@ import { createChildToolPolicy, createChildTools, type ChalinDelegateParamsShape
 import { createChalinChildSessionManager } from "./child-sessions.ts";
 import { buildProjectSnapshot, formatProjectSnapshot } from "./snapshot.ts";
 import { ArtifactStore } from "./artifacts.ts";
-import { buildPromptTokenomics, createSkillTraceEvent, createStructuredSpan, mergeTraceSpans, type SkillTraceEvent, type StructuredTraceSpan, type TokenomicsSummary } from "./observability.ts";
+import { buildPromptTokenomics, buildRunLifecycleSpans, createSkillTraceEvent, createStructuredSpan, mergeTraceSpans, type SkillTraceEvent, type StructuredTraceSpan, type StructuredTraceSpanKind, type TokenomicsSummary } from "./observability.ts";
 import { resolveAgentModel, resolveAgentThinking, resolveInheritedModelFallback, type ResolvedAgentModel } from "./model-resolution.ts";
 import { buildSdkPrompt, childToolNames, handoffReviewToolCallLimit, isHandoffGapReadMode, resolveStepCompletionStatus, synthesisCrossStepDuplicateReadLimit, synthesisGapReadLimit, synthesisToolCallLimit, type SdkPromptOptions } from "./runner-prompt.ts";
 import { createRunState, isUsableStepHandoff, persistRun, prepareRunForResume } from "./runner-state.ts";
@@ -19,6 +19,7 @@ import { clearLiveStepSession, setLiveStepSession, type LiveStepSessionRef } fro
 import { cleanupWorktrees, mergeWorktreeChanges, needsWorktreeIsolation, prepareWorktreeIsolation, type WorktreeIsolationPlan } from "./worktrees.ts";
 import { DEFAULT_CONFIG, type ChalinConfig } from "./config.ts";
 import { SkillCatalog, effectiveSkillToolNames, resolveSkillsForStep } from "./skills.ts";
+import { checkpointSummary, isUsableStepStatus } from "./status.ts";
 
 export interface WorkerRunnerContext extends ChalinPathsOptions {
   agents: Map<string, AgentDefinition>;
@@ -618,7 +619,7 @@ export function shouldStopAfterDagStage(stageSteps: Pick<RunStepState, "status" 
   if (stageSteps.some((step) => step.status === "paused")) return true;
   const failedSteps = stageSteps.filter((step) => step.status === "failed");
   if (failedSteps.length === 0) return false;
-  const usableSteps = stageSteps.filter((step) => step.status === "complete" || step.status === "budget-capped");
+  const usableSteps = stageSteps.filter((step) => isUsableStepStatus(step.status));
   if (usableSteps.length === 0) return true;
   return failedSteps.some((step) => isWriterAgent(agents.get(step.agent)));
 }
@@ -809,8 +810,8 @@ async function runSdkStep(
       break;
     }
     step.status = resolveStepCompletionStatus(step);
-    if (step.status === "budget-capped") {
-      run.warnings.push(`${step.agent} reached budget cap; checkpointed partial handoff for continuation.`);
+    if (step.status === "checkpointed") {
+      run.warnings.push(`${step.agent} checkpointed partial handoff for ${step.checkpoint?.continuation ?? "continuation"}.`);
       await recordBudgetCheckpoint(new ArtifactStore({ cwd: context.cwd }), run.id, step, "Budget cap reached during SDK child execution.");
     }
     persistRun(run);
@@ -878,7 +879,7 @@ async function runSdkSessionAttempt(input: {
         id: `${spanIdPrefix}:tool:${toolSpanIndex++}`,
         parentId: `${spanIdPrefix}:step`,
         name: toolActivity.toolName,
-        kind: "tool-call",
+        kind: traceKindForTool(toolActivity.toolName),
         startedAt: toolActivity.at,
         endedAt: toolActivity.at,
         attributes: { toolName: toolActivity.toolName, blocked: true },
@@ -892,7 +893,7 @@ async function runSdkSessionAttempt(input: {
       id: `${spanIdPrefix}:tool:${start?.index ?? toolSpanIndex++}`,
       parentId: `${spanIdPrefix}:step`,
       name: toolActivity.toolName,
-      kind: "tool-call",
+      kind: traceKindForTool(toolActivity.toolName),
       startedAt: start?.at ?? toolActivity.at,
       endedAt: toolActivity.at,
       attributes: { toolName: toolActivity.toolName },
@@ -1417,8 +1418,8 @@ function completeRun(run: RunState, context: WorkerRunnerContext): RunState {
     ? "failed"
     : run.steps.some((step) => step.status === "paused")
       ? "paused"
-      : run.steps.some((step) => step.status === "budget-capped")
-        ? "budget-capped"
+      : run.steps.some((step) => step.status === "checkpointed")
+        ? "paused"
       : "complete";
   run.endedAt = new Date().toISOString();
   run.metrics = summarizeRunMetrics(run);
@@ -1676,7 +1677,7 @@ function isAbortError(error: unknown): boolean {
 
 function isBudgetExceededError(error: unknown, step?: RunStepState): boolean {
   const message = errorMessage(error).toLowerCase();
-  return step?.status === "budget-capped" || message.includes("budget cap") || message.includes("budget exceeded");
+  return step?.status === "checkpointed" || message.includes("budget cap") || message.includes("budget exceeded");
 }
 
 function errorMessage(error: unknown): string {
@@ -1877,6 +1878,24 @@ function finalizeStepMetrics(metrics: RunStepMetrics, step: RunStepState, budget
   const crossStepDuplicateReads = [...new Set((metrics.filesRead ?? []).filter((file) => prior.has(file)))];
   const budgetCapHits = mergeBudgetCapHits(metrics.budgetCapHits, health.caps);
   const budgetStopCount = Math.max(metrics.budgetStopCount ?? 0, countHardBudgetHits(budgetCapHits));
+  if (budgetStopCount > 0 || health.checkpointStatus) {
+    const kind = budgetStopCount > 0
+      ? "budget-cap"
+      : health.checkpointStatus === "checkpointed-low-signal"
+      ? "low-signal"
+      : health.checkpointStatus === "checkpointed-split-recommended"
+        ? "split-recommended"
+        : health.checkpointStatus === "checkpointed-awaiting-review"
+          ? "awaiting-review"
+          : "needs-continuation";
+    step.checkpoint = {
+      kind,
+      continuation: kind === "budget-cap" ? "continue" : kind === "awaiting-review" ? "review" : kind === "split-recommended" ? "split" : "resume",
+      reason: health.warnings[0] ?? "Budget gate checkpointed this step.",
+      progressScore: progress.score,
+      capHits: budgetCapHits,
+    };
+  }
   const skillEvents = mergeSkillTraceEvents([
     ...(step.skillTraceEvents ?? []),
     ...skillEventsForStep(step, utility),
@@ -2008,6 +2027,13 @@ function baseStepSpans(
   return spans;
 }
 
+function traceKindForTool(toolName: string): StructuredTraceSpanKind {
+  if (toolName === "chalin_web_search") return "webfetch";
+  if (toolName === "chalin_interview") return "interview";
+  if (toolName === "chalin_artifact_write") return "checkpoint";
+  return "tool-call";
+}
+
 function extractFindingLines(text: string): string[] {
   const block = text.match(/##\s*Findings\s*\n([\s\S]*?)(?:\n##\s|$)/i)?.[1] ?? text;
   return block.split("\n")
@@ -2085,8 +2111,9 @@ function summarizeRunMetrics(run: RunState): RunState["metrics"] {
     ...(crossStepDuplicateReadCount > 0 ? { crossStepDuplicateReadCount, crossStepDuplicateReads: [...new Set(crossStepDuplicateReads)].slice(0, 50) } : {}),
     ...(filesRead.length ? { filesRead: [...new Set(filesRead)].slice(0, 50) } : {}),
     ...(tokenomics ? { tokenomics } : {}),
-    ...(spans.length ? { spans: mergeTraceSpans(spans) } : {}),
+    ...(spans.length ? { spans: mergeTraceSpans(buildRunLifecycleSpans(run), spans) } : {}),
     ...(skillEvents.length ? { skillEvents: skillEvents.slice(0, 200) } : {}),
+    ...(checkpointSummary(run.steps) ? { checkpoints: checkpointSummary(run.steps) } : {}),
   };
 }
 

@@ -173,7 +173,21 @@ export interface ApprovalDecision {
   reason: string;
 }
 
-export type RunStatus = "pending" | "running" | "complete" | "failed" | "paused" | "budget-capped" | "stale-repaired";
+export type RunStatus = "pending" | "running" | "complete" | "failed" | "paused" | "stale-repaired";
+export type RunStepStatus = "pending" | "running" | "complete" | "failed" | "paused" | "checkpointed";
+export type LegacyRunStatus = RunStatus | "budget-capped";
+export type LegacyRunStepStatus = RunStepStatus | "budget-capped";
+export type CheckpointKind = "budget-cap" | "needs-continuation" | "low-signal" | "awaiting-review" | "split-recommended";
+export type CheckpointContinuation = "continue" | "review" | "split" | "resume";
+
+export interface CheckpointInfo {
+  kind: CheckpointKind;
+  reason: string;
+  continuation: CheckpointContinuation;
+  progressScore?: number;
+  capHits?: BudgetCapHit[];
+  legacyStatus?: "budget-capped";
+}
 
 export interface MemoryCandidate {
   id: string;
@@ -321,6 +335,11 @@ export interface RunStepMetrics {
   skillEvents?: SkillTraceEvent[];
 }
 
+export interface RunMetricsCheckpoint {
+  steps: number;
+  kinds: Partial<Record<CheckpointKind, number>>;
+}
+
 export type ModelResolutionSource = "session-override" | "agent" | "tier" | "inherit";
 export type ModelResolutionStatus = "selected" | "invalid" | "unavailable" | "unauthenticated" | "fallback" | "runtime-error";
 
@@ -342,7 +361,8 @@ export interface RunStepState {
   id: string;
   agent: string;
   task: string;
-  status: RunStatus;
+  status: RunStepStatus;
+  checkpoint?: CheckpointInfo;
   budget?: ToolBudgetProfile;
   maxToolCalls?: number;
   startedAt?: string;
@@ -366,6 +386,7 @@ export interface RunState {
   route: RouteDecision;
   rootTask?: string;
   status: RunStatus;
+  schemaVersion?: number;
   startedAt: string;
   endedAt?: string;
   steps: RunStepState[];
@@ -399,6 +420,7 @@ export interface RunState {
     tokenomics?: TokenomicsSummary;
     spans?: StructuredTraceSpan[];
     skillEvents?: SkillTraceEvent[];
+    checkpoints?: RunMetricsCheckpoint;
   };
 }
 

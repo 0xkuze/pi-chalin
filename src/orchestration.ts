@@ -5,6 +5,7 @@ export function buildCompactChalinOrchestratorSystemPrompt(): string {
     "## pi-chalin orchestration (compact)",
     "You are the primary Pi agent.",
     "Primary Pi owns the work. Decide route before native inspection tools.",
+    "Use `chalin_interview` for blocking ambiguity and `chalin_web_search` for explicit URLs/current external docs before deciding whether route is needed.",
     "Use `chalin_route` as the first tool when specialist context isolation is likely to reduce cost, context pressure, or quality risk.",
     "Stay native only for simple chat, one obvious command, bounded explicit file edits/scaffolds/tests/refactors, or tiny read-only checks.",
     "Use LLM judgment, not prompt keyword classifiers. The compact steering message supplies the direct-work contract; follow it without duplicating exploration.",
@@ -21,17 +22,22 @@ export function buildCompactChalinResumeSystemPrompt(): string {
   ].join("\n");
 }
 
-export function buildChalinOrchestratorSystemPrompt(agents: AgentDefinition[]): string {
-  const roster = agents.map(formatAgentForPrompt).join("\n") || "- none";
+export function buildChalinOrchestratorSystemPrompt(agents: readonly AgentDefinition[], prompt = ""): string {
+  const selectedAgents = selectLikelyAgentsForPrompt(agents, prompt);
+  const roster = selectedAgents.map(formatAgentForPrompt).join("\n") || "- none";
+  const rosterScope = selectedAgents.length < agents.length
+    ? `Likely-fit roster shown (${selectedAgents.length}/${agents.length}). Other configured agents remain available by name if route evidence proves they are needed.`
+    : "Full configured roster shown.";
   return [
     "## pi-chalin orchestration",
-    "You are the primary Pi agent. Decide whether to answer directly, call `chalin_interview`, or call `chalin_route` as an agents-as-tools runtime.",
+    "You are the primary Pi agent. Decide whether to answer directly, call `chalin_interview`, call `chalin_web_search`, or call `chalin_route` as an agents-as-tools runtime.",
     "pi-chalin is optional orchestration for work that benefits from specialist context isolation; the user does not need to invoke it.",
     "",
     "### Gate",
     "Before read/bash/grep/find/ls, decide whether this is repository orchestration work.",
     "MUST call `chalin_resume` first when the user intent is to continue a prior pi-chalin run that was paused, interrupted, or left stale by terminal shutdown. Do not answer from partial findings until resume has no resumable run.",
     "MUST call `chalin_interview` before `chalin_route` when the request is ambiguous, uses a term you cannot resolve from memory/codebase exploration, has missing scope/constraints, or contains an uncovered decision branch that would make subagents guess.",
+    "When the prompt names a URL, current docs, release notes, changelog, or external documentation, call `chalin_web_search` before native local inspection or route unless the answer can be completed without external facts.",
     "Call `chalin_route` first when specialist context isolation is likely to improve quality: clear current branch/diff/PR summaries, project understanding, architecture/migration/project-wide strategy, broad review/audit, complex or risky multi-file implementation, risky long-file/surgical edits, or independent option comparison. For explicit memory recall/remembrance or memory inventory/counts, call `chalin_memory_search` first instead of routing. Do not treat an explicit named-file refactor implementation as project strategy unless your LLM judgment finds real breadth, risk, ambiguity, or no-rewrite constraints.",
     "Direct bias: if the user names a small target set of files and asks for a bounded fix/refactor/test/helper change, start native with exact read/edit/write/bash. Route only when evidence proves broad ownership, high-risk long-file mutation, ambiguous contract, generated-code coupling, or cross-runtime coupling.",
     "Direct bias: if the user names a specific function/symbol/API plus a local verifier, start native with one targeted search/read and edit/test directly; route only if that evidence proves the task is no longer bounded.",
@@ -75,15 +81,41 @@ export function buildChalinOrchestratorSystemPrompt(agents: AgentDefinition[]): 
     "",
     "### Cost, risk, and latency",
     "- Prefer the fewest agents that can prove the result, but never stop early when the reviewer or verification evidence shows a real gap.",
-    "- Use `low` risk for read-only analysis/planning and explicit docs-only artifact edits. Use `medium+` only for product-code mutation, approvals, secrets, destructive actions, or security-sensitive execution.",
     "- Subagents should produce compact handoffs; you own the final answer.",
     "- After a successful chalin run, answer from the handoff in the user language. If `Final answer material` is present, treat it as sufficient and respond now.",
     "- Use `chalin_web_search` only for current external facts, docs, URLs, or explicit web research. It is available globally and to external-context agents; workers should not use it by default.",
     "- Do not send worker agents to browse the web by default.",
     "",
     "### Available pi-chalin agents",
+    rosterScope,
     roster,
   ].join("\n");
+}
+
+export function selectLikelyAgentsForPrompt(agents: readonly AgentDefinition[], prompt: string): AgentDefinition[] {
+  const query = prompt.trim();
+  if (!query) return [...agents];
+  const selected = new Set<string>();
+  const add = (...names: string[]) => names.forEach((name) => selected.add(name));
+
+  if (/\b(conflict|merge conflict|resolver conflicto|conflicto de merge)\b/i.test(query)) add("conflict-resolver", "reviewer");
+  if (/\b(implement|fix|bug|test|tests?|refactor|corrige|implementa|añade|agrega|actualiza|mutation|mutaci[oó]n)\b/i.test(query)) add("worker", "reviewer");
+  if (/\b(review|audit|security|risk|revisa|audita|riesgo|vulnerability|vulnerabilidad)\b/i.test(query)) {
+    if (selected.has("worker")) add("reviewer");
+    else add("reviewer", "scout");
+  }
+  if (/\b(plan|architecture|migration|strategy|compare|option|diseña|arquitectura|migraci[oó]n|estrategia|opciones)\b/i.test(query)) add("planner", "scout", "reviewer");
+  if (/\b(project|codebase|map|understand|estructura|proyecto|repo|repository)\b/i.test(query)) add("scout", "context-builder");
+  if (/\b(url|web|internet|external|extern[ao]s?|docs? oficiales|official docs|documentation|release notes|changelog|api docs|sdk docs|current docs|latest docs|documentaci[oó]n oficial|https?:\/\/)\b/i.test(query)) add("researcher", "context-builder");
+  if (/\b(decision|drift|contradiction|contradicci[oó]n|decisi[oó]n)\b/i.test(query)) add("oracle", "planner");
+
+  if (selected.size === 0) return [...agents];
+  const byName = new Map(agents.map((agent) => [agent.name, agent]));
+  const result = [...selected]
+    .map((name) => byName.get(name))
+    .filter((agent): agent is AgentDefinition => Boolean(agent))
+    .sort((left, right) => left.name.localeCompare(right.name));
+  return result.length > 0 ? result : [...agents];
 }
 
 function formatAgentForPrompt(agent: AgentDefinition): string {

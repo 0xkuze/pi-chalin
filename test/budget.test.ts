@@ -64,7 +64,7 @@ test("estimateBudgetPreflight classifies long autonomous work as resumable DAG/a
   assert.match(preflight.recommendation, /checkpoint/i);
 });
 
-test("evaluateBudgetUsage turns exhausted budget into budget-capped checkpoint state", () => {
+test("evaluateBudgetUsage turns exhausted budget into checkpointed continuation state", () => {
   const reviewer = agent("reviewer", "review");
   const policy = policyForStep(reviewer, { agent: "reviewer", task: "Review project", budget: "tight" }, "multi-agent-chain");
   const health = evaluateBudgetUsage(policy, {
@@ -78,7 +78,7 @@ test("evaluateBudgetUsage turns exhausted budget into budget-capped checkpoint s
     retriesByTool: {},
   });
 
-  assert.equal(health.status, "budget-capped");
+  assert.equal(health.status, "checkpointed");
   assert.ok(health.caps.some((cap) => cap.name === "max_seconds"));
   assert.equal(health.next, "checkpoint-and-continue");
 });
@@ -186,14 +186,15 @@ test("evaluateBudgetUsage keeps soft caps as explicit progress gates", () => {
   assert.ok(health.warnings.some((warning) => warning.includes("progress gate checkpoint-low-signal")));
 });
 
-test("recordBudgetCheckpoint persists partial handoff when a step is budget-capped", async () => {
+test("recordBudgetCheckpoint persists partial handoff when a step is checkpointed", async () => {
   const cwd = tempDir("pi-chalin-budget-checkpoint-");
   try {
     const step: RunStepState = {
       id: "stage-1:step-1",
       agent: "context-builder",
       task: "Analyze backend module",
-      status: "budget-capped",
+      status: "checkpointed",
+      checkpoint: { kind: "budget-cap", reason: "Reached tool cap after useful findings.", continuation: "continue" },
       output: {
         agent: "context-builder",
         text: "Partial backend findings.",

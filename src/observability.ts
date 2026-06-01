@@ -1,3 +1,6 @@
+import type { RoutePlan, RunState, RunStepState } from "./schemas.ts";
+import { isCheckpointStepStatus } from "./status.ts";
+
 export type TokenomicsPhase =
   | "orchestratorPrompt"
   | "roster"
@@ -30,7 +33,10 @@ export type StructuredTraceSpanKind =
   | "verification"
   | "handoff"
   | "review"
-  | "repair";
+  | "repair"
+  | "checkpoint"
+  | "interview"
+  | "webfetch";
 
 export interface StructuredTraceSpan {
   id: string;
@@ -100,7 +106,7 @@ export function createStructuredSpan(input: {
   return {
     id: input.id,
     ...(input.parentId ? { parentId: input.parentId } : {}),
-    name: input.name,
+    name: redactTraceAttribute("name", input.name),
     kind: input.kind,
     startedAt: input.startedAt,
     ...(input.endedAt !== undefined ? { endedAt: input.endedAt } : {}),
@@ -114,12 +120,137 @@ export function mergeTraceSpans(...groups: Array<StructuredTraceSpan[] | undefin
   const seen = new Set<string>();
   for (const group of groups) {
     for (const span of group ?? []) {
-      if (seen.has(span.id)) continue;
-      seen.add(span.id);
-      merged.push(span);
+      const sanitized = sanitizeTraceSpan(span);
+      if (seen.has(sanitized.id)) continue;
+      seen.add(sanitized.id);
+      merged.push(sanitized);
     }
   }
   return merged.slice(0, 200);
+}
+
+export function redactTraceAttribute(key: string, value: string): string {
+  const lowerKey = key.toLowerCase();
+  if (/(?:token|secret|api[_-]?key|authorization|password|credential|cookie)/i.test(lowerKey)) return "[REDACTED]";
+  let redacted = value
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "[REDACTED]")
+    .replace(/\b(api[_-]?key|access[_-]?token|token|secret|password)=([^&\s]+)/gi, "$1=[REDACTED]")
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}\b/gi, "$1[REDACTED]");
+  try {
+    const parsed = new URL(redacted);
+    const sensitiveKeys = ["api_key", "apikey", "key", "token", "access_token", "secret", "password"];
+    let changed = false;
+    for (const param of sensitiveKeys) {
+      if (!parsed.searchParams.has(param)) continue;
+      parsed.searchParams.set(param, "[REDACTED]");
+      changed = true;
+    }
+    if (parsed.username || parsed.password) {
+      parsed.username = parsed.username ? "[REDACTED]" : "";
+      parsed.password = "";
+      changed = true;
+    }
+    if (changed) redacted = parsed.toString();
+  } catch {
+    // Non-URL values still receive token-like redaction above.
+  }
+  return redacted;
+}
+
+export function buildRunLifecycleSpans(run: Pick<RunState, "id" | "route" | "rootTask" | "status" | "startedAt" | "endedAt" | "warnings" | "steps">): StructuredTraceSpan[] {
+  const startedAt = timestampMs(run.startedAt) ?? Date.now();
+  const endedAt = timestampMs(run.endedAt) ?? Math.max(startedAt, ...run.steps.map((step) => timestampMs(step.endedAt) ?? startedAt));
+  const spans: StructuredTraceSpan[] = [
+    createStructuredSpan({
+      id: `${run.id}:run`,
+      name: run.route.kind,
+      kind: "run",
+      startedAt,
+      endedAt,
+      attributes: {
+        routeKind: run.route.kind,
+        status: run.status,
+        risk: run.route.risk,
+        ambiguity: run.route.ambiguity,
+        agents: run.route.agents.join(","),
+        needsArtifacts: run.route.needsArtifacts,
+        rootTask: run.rootTask,
+      },
+    }),
+  ];
+  spans.push(...stageLifecycleSpans(run.id, run.route.plan, run.steps, startedAt, endedAt));
+  for (const step of run.steps) {
+    const stepStartedAt = timestampMs(step.startedAt) ?? startedAt;
+    const stepEndedAt = timestampMs(step.endedAt) ?? stepStartedAt + Math.max(0, step.metrics?.durationMs ?? 0);
+    if (step.output?.handoff || step.output?.text || isCheckpointStepStatus(step.status)) {
+      spans.push(createStructuredSpan({
+        id: `${run.id}:${step.id}:handoff`,
+        parentId: `${run.id}:${step.id}:step`,
+        name: `${step.agent} handoff`,
+        kind: "handoff",
+        startedAt: stepEndedAt,
+        endedAt: stepEndedAt,
+        attributes: { agent: step.agent, status: step.status, checkpointed: isCheckpointStepStatus(step.status) },
+      }));
+    }
+    if (step.agent === "reviewer") {
+      spans.push(createStructuredSpan({
+        id: `${run.id}:${step.id}:review`,
+        parentId: `${run.id}:${step.id}:step`,
+        name: "review gate",
+        kind: "review",
+        startedAt: stepStartedAt,
+        endedAt: stepEndedAt,
+        attributes: { status: step.status },
+      }));
+    }
+    if (step.id.includes("review-repair") || /repair/i.test(step.task)) {
+      spans.push(createStructuredSpan({
+        id: `${run.id}:${step.id}:repair`,
+        parentId: `${run.id}:run`,
+        name: "implementation review repair",
+        kind: "repair",
+        startedAt: stepStartedAt,
+        endedAt: stepEndedAt,
+        attributes: { agent: step.agent, status: step.status },
+      }));
+    }
+    if (isCheckpointStepStatus(step.status) || step.metrics?.budgetStopCount) {
+      spans.push(createStructuredSpan({
+        id: `${run.id}:${step.id}:checkpoint`,
+        parentId: `${run.id}:${step.id}:step`,
+        name: "budget checkpoint",
+        kind: "checkpoint",
+        startedAt: stepEndedAt,
+        endedAt: stepEndedAt,
+        attributes: { budgetStopCount: step.metrics?.budgetStopCount ?? 0 },
+      }));
+    }
+    if ((step.metrics?.toolCallsByName.chalin_web_search ?? 0) > 0) {
+      spans.push(createStructuredSpan({
+        id: `${run.id}:${step.id}:webfetch`,
+        parentId: `${run.id}:${step.id}:step`,
+        name: "chalin_web_search",
+        kind: "webfetch",
+        startedAt: stepStartedAt,
+        endedAt: stepEndedAt,
+        attributes: { toolCalls: step.metrics?.toolCallsByName.chalin_web_search ?? 0 },
+      }));
+    }
+    if ((step.metrics?.toolCallsByName.chalin_interview ?? 0) > 0) {
+      spans.push(createStructuredSpan({
+        id: `${run.id}:${step.id}:interview`,
+        parentId: `${run.id}:${step.id}:step`,
+        name: "chalin_interview",
+        kind: "interview",
+        startedAt: stepStartedAt,
+        endedAt: stepEndedAt,
+        attributes: { toolCalls: step.metrics?.toolCallsByName.chalin_interview ?? 0 },
+      }));
+    }
+  }
+  const existingSpans = run.steps.flatMap((step) => step.metrics?.spans ?? []);
+  return mergeTraceSpans(spans, existingSpans);
 }
 
 function estimateTokens(text: string): number {
@@ -131,11 +262,68 @@ function compactAttributes(attributes: Record<string, unknown> | undefined): Rec
   const compact: Record<string, string | number | boolean> = {};
   for (const [key, value] of Object.entries(attributes ?? {})) {
     if (value === undefined || value === null) continue;
-    if (typeof value === "string") compact[key] = value.length > 500 ? `${value.slice(0, 497)}...` : value;
+    if (typeof value === "string") {
+      const redacted = redactTraceAttribute(key, value);
+      compact[key] = redacted.length > 500 ? `${redacted.slice(0, 497)}...` : redacted;
+    }
     else if (typeof value === "number" && Number.isFinite(value)) compact[key] = value;
     else if (typeof value === "boolean") compact[key] = value;
   }
   return compact;
+}
+
+function sanitizeTraceSpan(span: StructuredTraceSpan): StructuredTraceSpan {
+  const attributes = compactAttributes(span.attributes);
+  const sanitized = {
+    ...span,
+    name: redactTraceAttribute("name", span.name),
+  };
+  if (Object.keys(attributes).length) return { ...sanitized, attributes };
+  const { attributes: _attributes, ...withoutAttributes } = sanitized;
+  return withoutAttributes;
+}
+
+function timestampMs(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function stageLifecycleSpans(runId: string, plan: RoutePlan | undefined, steps: RunStepState[], runStartedAt: number, runEndedAt: number): StructuredTraceSpan[] {
+  if (!plan) return [];
+  if (plan.kind === "dag") {
+    return plan.stages.map((stage) => {
+      const stageSteps = steps.filter((step) => step.id.startsWith(`${stage.id}:`));
+      return createStructuredSpan({
+        id: `${runId}:stage:${stage.id}`,
+        parentId: `${runId}:run`,
+        name: ("name" in stage && typeof stage.name === "string" ? stage.name : stage.id),
+        kind: "stage",
+        startedAt: minStepTime(stageSteps, "startedAt") ?? runStartedAt,
+        endedAt: maxStepTime(stageSteps, "endedAt") ?? runEndedAt,
+        attributes: { stageId: stage.id, tasks: stage.tasks.length },
+      });
+    });
+  }
+  return [createStructuredSpan({
+    id: `${runId}:stage:${plan.kind}`,
+    parentId: `${runId}:run`,
+    name: plan.kind,
+    kind: "stage",
+    startedAt: minStepTime(steps, "startedAt") ?? runStartedAt,
+    endedAt: maxStepTime(steps, "endedAt") ?? runEndedAt,
+    attributes: { stageId: plan.kind, tasks: steps.length },
+  })];
+}
+
+function minStepTime(steps: RunStepState[], field: "startedAt" | "endedAt"): number | undefined {
+  const values = steps.map((step) => timestampMs(step[field])).filter((value): value is number => value !== undefined);
+  return values.length ? Math.min(...values) : undefined;
+}
+
+function maxStepTime(steps: RunStepState[], field: "startedAt" | "endedAt"): number | undefined {
+  const values = steps.map((step) => timestampMs(step[field])).filter((value): value is number => value !== undefined);
+  return values.length ? Math.max(...values) : undefined;
 }
 
 const tokenomicsPhases: TokenomicsPhase[] = [

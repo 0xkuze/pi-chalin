@@ -1455,7 +1455,7 @@ test("buildSdkPrompt tells deep recon to cover surfaces without exhaustive crawl
   assert.match(prompt, /report them as runnable invocations/);
 });
 
-test("resolveStepCompletionStatus treats useful budget handoffs as complete", () => {
+test("resolveStepCompletionStatus turns budget-capped SDK stops into checkpointed handoffs", () => {
   const useful = resolveStepCompletionStatus({
     metrics: {
       durationMs: 100,
@@ -1486,7 +1486,53 @@ test("resolveStepCompletionStatus treats useful budget handoffs as complete", ()
   });
 
   assert.equal(useful, "complete");
-  assert.equal(empty, "budget-capped");
+  assert.equal(empty, "checkpointed");
+});
+
+test("loadResumableRunState normalizes legacy budget-capped steps at the storage edge", () => {
+  const cwd = tempDir("legacy-budget-run-");
+  const runId = "chalin-legacy-budget";
+  const runsDir = path.join(cwd, ".pi-chalin", "runs");
+  fs.mkdirSync(runsDir, { recursive: true });
+  fs.writeFileSync(path.join(runsDir, `${runId}.json`), JSON.stringify({
+    id: runId,
+    route: {
+      kind: "multi-agent-chain",
+      agents: ["scout", "worker"],
+      risk: "low",
+      ambiguity: "low",
+      needsMemory: false,
+      needsArtifacts: true,
+      reason: "legacy budget checkpoint",
+      plan: { kind: "chain", steps: [
+        { agent: "scout", task: "Map", budget: "tight" },
+        { agent: "worker", task: "Implement", budget: "normal" },
+      ] },
+    },
+    status: "paused",
+    startedAt: new Date().toISOString(),
+    warnings: [],
+    steps: [
+      {
+        id: "step-1",
+        agent: "scout",
+        task: "Map",
+        status: "budget-capped",
+        output: { agent: "scout", text: "partial", handoff: "Mapped enough to continue.", memoryCandidates: [], raw: "partial", warnings: [] },
+      },
+      { id: "step-2", agent: "worker", task: "Implement", status: "pending" },
+    ],
+  }, null, 2), "utf-8");
+
+  const loaded = loadResumableRunState({ cwd, runId });
+
+  assert.equal(loaded?.steps[0]?.status, "checkpointed");
+  assert.deepEqual(loaded?.steps[0]?.checkpoint, {
+    kind: "budget-cap",
+    reason: "legacy budget-capped step status",
+    continuation: "continue",
+    legacyStatus: "budget-capped",
+  });
 });
 
 test("resolveStepCompletionStatus fails errored child steps even without budget caps", () => {

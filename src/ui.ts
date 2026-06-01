@@ -10,7 +10,8 @@ import { Container, Spacer, Text, type Component, type Focusable, type TUI } fro
 import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ArtifactStore, FeatureArtifactState } from "./artifacts.ts";
 import { getLatestRun, getLiveStepSession } from "./runtime-state.ts";
-import type { AgentDefinition, ApprovalDecision, BudgetCapHit, ChalinRuntimeState, MemoryRecord, RouteDecision, RunState, RunStepState } from "./schemas.ts";
+import type { AgentDefinition, ApprovalDecision, BudgetCapHit, ChalinRuntimeState, MemoryRecord, RouteDecision, RunState, RunStepState, RunStepStatus } from "./schemas.ts";
+import { isUsableStepStatus } from "./status.ts";
 import { clearLegacyChalinControlWidget, setChalinStatus } from "./ui-status.ts";
 import { formatWebFetchAudit, type WebFetchAuditEntry } from "./webfetch.ts";
 
@@ -1485,8 +1486,8 @@ function summarizeActivity(state: ChalinRuntimeState): string {
   return "none";
 }
 
-function isUsableActivityStatus(status: RunState["status"] | undefined): boolean {
-  return status === "complete" || status === "budget-capped";
+function isUsableActivityStatus(status: RunStepStatus | undefined): boolean {
+  return isUsableStepStatus(status);
 }
 
 function formatActivity(run: RunState): string[] {
@@ -2005,8 +2006,8 @@ function summarizeWorktreeGuard(run: RunState): string {
 }
 
 
-function statusIcon(status: RunState["status"]): string {
-  if (status === "complete" || status === "budget-capped") return "✓";
+function statusIcon(status: RunState["status"] | RunStepStatus): string {
+  if (status === "complete" || status === "checkpointed") return "✓";
   if (status === "running") return "◆";
   if (status === "pending") return "·";
   if (status === "paused") return "■";
@@ -2015,7 +2016,6 @@ function statusIcon(status: RunState["status"]): string {
 }
 
 function displayActivityStatus(status: RunState["status"]): string {
-  if (status === "budget-capped") return "done · budget limit reached";
   return status;
 }
 

@@ -1,11 +1,13 @@
 import type { ChalinFooterState } from "./ui-status.ts";
-import type { BudgetCapHit, RouteDecision, RunState, RunStatus } from "./schemas.ts";
+import type { BudgetCapHit, CheckpointInfo, RouteDecision, RunState, RunStatus, RunStepStatus } from "./schemas.ts";
+import { checkpointLabel, isCheckpointStepStatus, isUsableStepStatus as isUsableCheckpointStepStatus } from "./status.ts";
 
 type ChalinRouteWidgetStep = {
   id?: string;
   agent: string;
   task?: string;
-  status?: RunStatus;
+  status?: RunStepStatus;
+  checkpoint?: CheckpointInfo;
   model?: string;
   thinkingLevel?: string;
   skills?: string[];
@@ -55,7 +57,7 @@ export function formatChalinRunWidgetFromDetails(details: ChalinRouteWidgetDetai
   const completed = steps.filter((step) => isUsableStepStatus(step.status)).length;
   const active = activeWidgetStep(run.status, steps);
   const title = route ? routeIntent(route) : "workflow";
-  const displayStatus = run.status === "budget-capped" && completed === (steps.length || 1) ? "done" : statusLabel(run.status);
+  const displayStatus = statusLabel(run.status);
   const activeLabel = run.status === "failed" ? "blocked" : "current";
   return [
     `pi-chalin · ${title} · ${displayStatus} · ${completed}/${steps.length || 1}`,
@@ -96,6 +98,7 @@ export function chalinRouteUpdateDetails(run: RunState): ChalinRouteWidgetDetail
         agent: step.agent,
         task: step.task,
         status: step.status,
+        checkpoint: step.checkpoint,
         model: step.model,
         thinkingLevel: step.thinkingLevel,
         skills: step.activeSkills?.map((item) => item.skill.name),
@@ -132,35 +135,35 @@ function formatWidgetStep(step: ChalinRouteWidgetStep, index: number, total: num
       ? step.error || "failed"
       : step.status === "paused"
         ? step.error || "paused"
-        : step.status === "budget-capped"
+        : isCheckpointStepStatus(step.status)
           ? step.handoff || step.error || step.task || "checkpoint saved"
           : step.status === "pending" && runStatus === "failed"
             ? "skipped after failure"
           : step.task || "working";
-  const suffix = step.status === "budget-capped" ? " · budget limit reached" : "";
+  const suffix = isCheckpointStepStatus(step.status) ? ` · ${checkpointLabel(step.checkpoint).replace(/^checkpointed · /, "")}` : "";
   const skills = step.skills?.length ? ` · skills:${step.skills.join(",")}` : "";
   return `${treePrefix(index, total)} ${statusGlyph(step.status)} ${step.agent}${skills} — ${truncate(detail, 88)}${suffix}`;
 }
 
-function statusGlyph(status: RunStatus | undefined): string {
-  if (status === "complete" || status === "budget-capped") return "✓";
+function statusGlyph(status: RunStepStatus | undefined): string {
+  if (status === "complete" || isCheckpointStepStatus(status)) return "✓";
   if (status === "running") return "◆";
   if (status === "failed") return "×";
   if (status === "paused") return "■";
   return "○";
 }
 
-function statusLabel(status: RunStatus): string {
+function statusLabel(status: RunStatus | RunStepStatus): string {
   if (status === "complete") return "done";
   if (status === "failed") return "failed";
   if (status === "paused") return "paused";
-  if (status === "budget-capped") return "checkpointed";
+  if (isCheckpointStepStatus(status)) return "checkpointed";
   if (status === "running") return "running";
   return "pending";
 }
 
-export function isUsableStepStatus(status: RunStatus | undefined): boolean {
-  return status === "complete" || status === "budget-capped";
+export function isUsableStepStatus(status: RunStepStatus | undefined): boolean {
+  return isUsableCheckpointStepStatus(status);
 }
 
 function treePrefix(index: number, total: number): string {

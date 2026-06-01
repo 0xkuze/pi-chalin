@@ -82,7 +82,7 @@ export function analyzeTrajectory(run: RunState): TrajectoryReport {
   const wasteEvidence = steps.filter((step) => {
     const metrics = step.metrics;
     if (!metrics) return false;
-    const resumableCap = step.status === "budget-capped" && hasEvidence(step.output?.handoff) && (metrics.utility?.findingsPerTool ?? 0) >= 0.08;
+    const resumableCap = step.status === "checkpointed" && hasEvidence(step.output?.handoff) && (metrics.utility?.findingsPerTool ?? 0) >= 0.08;
     if (resumableCap) return false;
     const utility = metrics.utility;
     const hardBudgetStops = (metrics.budgetCapHits ?? []).some((hit) => hit.severity === "hard") || (metrics.budgetStopCount ?? 0) > 0;

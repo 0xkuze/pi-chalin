@@ -5,7 +5,7 @@ import {
   ORCHESTRATION_EVAL_CASES,
   summarizeOrchestrationEvalCases,
 } from "../evals/orchestration-cases.ts";
-import { buildChalinOrchestratorSystemPrompt } from "../src/orchestration.ts";
+import { buildChalinOrchestratorSystemPrompt, selectLikelyAgentsForPrompt } from "../src/orchestration.ts";
 import { routeFromPlan } from "../src/kernel.ts";
 import { collapseReadOnlyScoutContextRoute, ensureMutationRouteHasWorkerAndReviewer, inferRouteRequiresWorkspaceMutation, normalizeRouteForExecution } from "../src/route-guards.ts";
 import type { RouteDecision } from "../src/schemas.ts";
@@ -46,8 +46,10 @@ test("orchestrator prompt teaches LLM-first routing without prompt keyword class
   const prompt = buildChalinOrchestratorSystemPrompt(catalog.list());
 
   assert.match(prompt, /primary Pi agent/i);
-  assert.match(prompt, /answer directly, call `chalin_interview`, or call `chalin_route`/i);
+  assert.match(prompt, /answer directly, call `chalin_interview`, call `chalin_web_search`, or call `chalin_route`/i);
   assert.match(prompt, /MUST call `chalin_interview` before `chalin_route`/i);
+  assert.match(prompt, /URL, current docs, release notes, changelog, or external documentation/i);
+  assert.match(prompt, /call `chalin_web_search` before native local inspection or route/i);
   assert.match(prompt, /Interview when/i);
   assert.match(prompt, /Call `chalin_route` first when specialist context isolation/i);
   assert.match(prompt, /Gate/i);
@@ -106,6 +108,22 @@ test("orchestrator prompt teaches LLM-first routing without prompt keyword class
   assert.match(prompt, /scout/);
   assert.match(prompt, /reviewer/);
   assert.doesNotMatch(prompt, /regex|if the prompt contains|hard-coded prompt/i);
+});
+
+test("orchestrator prompt shows a selective likely roster with fallback guidance for clear prompts", () => {
+  const catalog = AgentCatalog.load({ cwd: process.cwd() });
+  const agents = catalog.list();
+  const selected = selectLikelyAgentsForPrompt(agents, "Implementa src/cache.ts con tests y luego revisa la cobertura.");
+  const names = selected.map((agent) => agent.name);
+
+  assert.deepEqual(names, ["reviewer", "worker"]);
+
+  const prompt = buildChalinOrchestratorSystemPrompt(agents, "Implementa src/cache.ts con tests y luego revisa la cobertura.");
+  assert.match(prompt, /Likely-fit roster shown \(2\/\d+\)/);
+  assert.match(prompt, /Other configured agents remain available by name/i);
+  assert.match(prompt, /worker/);
+  assert.match(prompt, /reviewer/);
+  assert.doesNotMatch(prompt, /conflict-resolver: Resolves isolated worktree merge conflicts/);
 });
 
 test("chalin mutation routes without workers are normalized before execution and review", () => {

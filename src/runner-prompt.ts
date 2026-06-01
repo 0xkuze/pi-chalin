@@ -231,7 +231,7 @@ export function resolveStepCompletionStatus(step: Pick<RunStepState, "metrics" |
   if (step.error) return "failed";
   if (!step.metrics?.budgetStopCount) return "complete";
   if (hasUsableHandoff(step)) return "complete";
-  return "budget-capped";
+  return "checkpointed";
 }
 
 export function isHandoffGapReadMode(agent: AgentDefinition | undefined, previous?: string, deepProjectAnalysis = false): boolean {
