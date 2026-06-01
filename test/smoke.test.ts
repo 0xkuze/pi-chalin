@@ -3316,8 +3316,13 @@ test("paused DAGs do not expose partial evidence as final answer material", () =
   assert.match(text, /pi-chalin paused: scout → reviewer → researcher → planner/);
   assert.doesNotMatch(text, /pi-chalin completed/);
   assert.doesNotMatch(text, /Final answer material:/);
-  assert.match(text, /Supporting findings:/);
+  assert.doesNotMatch(text, /Supporting findings:/);
+  assert.doesNotMatch(text, /Subagent handoff:/);
+  assert.match(text, /Partial subagent summary:/);
+  assert.equal((text.match(/Scout evidence/g) ?? []).length, 1);
   assert.match(text, /researcher: SDK runner idle stalled/);
+  assert.match(text, /planner: waiting for resume/);
+  assert.ok(text.length < 1200);
 });
 
 test("finalAnswerMaterial uses structured claim evidence without heading-specific text", () => {

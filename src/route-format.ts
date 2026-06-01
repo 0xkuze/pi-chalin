@@ -17,7 +17,7 @@ export function formatRoute(route: RouteDecision, result: ChalinHandleResult | u
 
   const finalMaterial = finalAnswerMaterial(result.run);
   const memoryMaterial = !finalMaterial && result.memories.length > 0 ? formatMemoryMaterial(result.memories) : undefined;
-  const supportingFindings = finalMaterial ? undefined : supportingAgentFindings(result.run);
+  const partialSummary = !finalMaterial ? partialSubagentSummary(result.run) : undefined;
   const lines = [
     routeResultHeadline(route, result),
     `status: ${result.run?.status ?? result.approval.action}`,
@@ -28,10 +28,8 @@ export function formatRoute(route: RouteDecision, result: ChalinHandleResult | u
     finalMaterial,
     memoryMaterial ? "\nMemory material:" : undefined,
     memoryMaterial,
-    supportingFindings ? "\nSupporting findings:" : undefined,
-    supportingFindings,
-    !finalMaterial && result.run ? "\nSubagent handoff:" : undefined,
-    !finalMaterial && result.run ? result.run.steps.map(formatStep).join("\n") : undefined,
+    partialSummary ? "\nPartial subagent summary:" : undefined,
+    partialSummary,
     options.availableAgents ? `\nAvailable agents: ${options.availableAgents.join(", ") || "none"}` : undefined,
   ];
   return lines.filter((line): line is string => line !== undefined && line.length > 0).join("\n");
@@ -74,18 +72,18 @@ function routeResultHeadline(route: RouteDecision, result: ChalinHandleResult): 
 
 function routeResultInstruction(result: ChalinHandleResult, finalMaterial: string | undefined): string {
   if (result.approval.action !== "allow") {
-    return "Instruction for the primary Pi agent: pi-chalin did not execute because approval is required. Do not claim completion. If this is a safe explicit user-requested edit, continue directly with native tools; otherwise explain that approval is required.";
+    return "Instruction: approval required; do not claim completion.";
   }
   if (finalMaterial) {
-    return "Instruction for the primary Pi agent: answer the user now from the Final answer material below. Do not call more tools unless it explicitly says a critical gap remains.";
+    return "Instruction: answer from Final answer material; use more tools only for an explicit critical gap.";
   }
   if (result.run?.status === "paused") {
-    return "Instruction for the primary Pi agent: pi-chalin paused before final synthesis. Treat the material below as partial context, do not claim the DAG completed, and resume only when the missing work is required.";
+    return "Instruction: paused before final synthesis; treat summary as partial context.";
   }
   if (result.run?.status === "failed") {
-    return "Instruction for the primary Pi agent: pi-chalin failed before final synthesis. Use the material below only to explain the gap and next repair step.";
+    return "Instruction: failed before final synthesis; explain the gap and next repair step.";
   }
-  return "Instruction for the primary Pi agent: answer from the subagent handoff below and name any remaining gap explicitly.";
+  return "Instruction: answer from the summary and name any remaining gap explicitly.";
 }
 
 function finalMaterialWithEvidence(run: RunState, material: string, max: number): string {
@@ -198,14 +196,41 @@ function finalAnswerMaterialBudget(run: RunState): number {
   return 1200;
 }
 
-function supportingAgentFindings(run: RunState | undefined): string | undefined {
+function partialSubagentSummary(run: RunState | undefined): string | undefined {
   if (!run) return undefined;
-  const completeSteps = run.steps.filter((step) => isUsableStepStatus(step.status));
-  if (completeSteps.length <= 1) return undefined;
-  return completeSteps
-    .slice(0, -1)
-    .map((step) => `- ${step.agent}: ${truncate(stepOutput(step) || "no output", 260)}`)
-    .join("\n");
+  const items = run.steps
+    .slice(0, 8)
+    .map(formatPartialStep)
+    .filter((item): item is string => Boolean(item));
+  if (run.steps.length > 8) items.push(`- +${run.steps.length - 8} more subagents omitted`);
+  return items.length ? items.join("\n") : undefined;
+}
+
+function formatPartialStep(step: RunState["steps"][number]): string | undefined {
+  const signal = partialStepSignal(step);
+  if (!signal) return undefined;
+  return `- ${step.agent}: ${signal}`;
+}
+
+function partialStepSignal(step: RunState["steps"][number]): string | undefined {
+  if (isUsableStepStatus(step.status)) {
+    const output = stepFullOutput(step);
+    const claimSignal = structuredClaimExcerpt(step.output?.claims);
+    const evidenceSignal = output ? curatedEvidenceExcerpt(output) : undefined;
+    return truncate(cleanPartialSignal(claimSignal ?? evidenceSignal ?? "completed"), 220);
+  }
+  if (step.status === "failed" || step.status === "paused") return truncate(step.error || step.status, 220);
+  if (step.status === "running") return "running";
+  if (step.status === "pending") return "waiting for resume";
+  return undefined;
+}
+
+function cleanPartialSignal(text: string): string {
+  return text
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/\s*\|\s*/g, " | ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function stepOutput(step: RunState["steps"][number]): string | undefined {
@@ -229,10 +254,6 @@ export function outcomeForResult(result: ChalinHandleResult): ChalinRouteOutcome
   if (result.run?.status === "failed") return "failed";
   if (result.run?.status === "paused") return "paused";
   return "complete";
-}
-
-function formatStep(step: RunState["steps"][number]): string {
-  return `- ${step.agent}: ${truncate(stepOutput(step) || "no output", 420)}`;
 }
 
 export function compactRouteDetails(route: RouteDecision, result: ChalinHandleResult, diagnostics: unknown[]) {
