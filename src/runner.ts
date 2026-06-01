@@ -11,7 +11,7 @@ import { createChildToolPolicy, createChildTools, type ChalinDelegateParamsShape
 import { createChalinChildSessionManager } from "./child-sessions.ts";
 import { buildProjectSnapshot, formatProjectSnapshot } from "./snapshot.ts";
 import { ArtifactStore } from "./artifacts.ts";
-import { buildPromptTokenomics, buildRunLifecycleSpans, createSkillTraceEvent, createStructuredSpan, mergeTraceSpans, type SkillTraceEvent, type StructuredTraceSpan, type StructuredTraceSpanKind, type TokenomicsSummary } from "./observability.ts";
+import { buildPromptTokenomics, buildRunLifecycleSpans, buildToolOutputTokenomics, createSkillTraceEvent, createStructuredSpan, mergeTraceSpans, type SkillTraceEvent, type StructuredTraceSpan, type StructuredTraceSpanKind, type TokenomicsSummary } from "./observability.ts";
 import { resolveAgentModel, resolveAgentThinking, resolveInheritedModelFallback, type ResolvedAgentModel } from "./model-resolution.ts";
 import { buildSdkPrompt, childToolNames, handoffReviewToolCallLimit, isHandoffGapReadMode, resolveStepCompletionStatus, synthesisCrossStepDuplicateReadLimit, synthesisGapReadLimit, synthesisToolCallLimit, type SdkPromptOptions } from "./runner-prompt.ts";
 import { createRunState, isUsableStepHandoff, persistRun, prepareRunForResume } from "./runner-state.ts";
@@ -741,8 +741,11 @@ async function runSdkStep(
     });
     const allowedTools = effectiveSkillToolNames(baseAllowedTools, skillResolution.active.map((item) => item.skill));
     const prompt = buildSdkPrompt(agent, step.task, options.cwd, options.previous, budgetPolicy, "normal", promptOptions);
+    const promptPhase = promptTokenomicsPhaseForStep(step, agent);
     const tokenomics = buildPromptTokenomics({
-      childPrompt: prompt,
+      childPrompt: promptPhase === "childPrompt" ? prompt : "",
+      reviewer: promptPhase === "reviewer" ? prompt : "",
+      repair: promptPhase === "repair" ? prompt : "",
       memory: promptOptions.memoryContext ?? "",
       handoff: options.previous ?? "",
     });
@@ -915,11 +918,15 @@ async function runSdkSessionAttempt(input: {
     },
     onActivity: recordToolActivity,
   });
-  const attemptMetrics = (messages: unknown[] = []) => ({
-    ...mergePolicyMetrics(extractSessionMetrics(messages, stepStartedAtMs), childPolicy),
-    tokenomics: input.tokenomics,
-    spans: mergeTraceSpans(baseStepSpans(spanIdPrefix, input.step, stepStartedAtMs, Date.now(), input.tokenomics, input.promptOptions), toolSpans),
-  });
+  const attemptMetrics = (messages: unknown[] = []) => {
+    const metrics = mergePolicyMetrics(extractSessionMetrics(messages, stepStartedAtMs), childPolicy);
+    const tokenomics = mergeTokenomics(input.tokenomics, tokenomicsForToolOutputs(metrics)) ?? input.tokenomics;
+    return {
+      ...metrics,
+      tokenomics,
+      spans: mergeTraceSpans(baseStepSpans(spanIdPrefix, input.step, stepStartedAtMs, Date.now(), tokenomics, input.promptOptions), toolSpans),
+    };
+  };
   const { createAgentSession } = await import("@earendil-works/pi-coding-agent");
   const sessionManager = createChalinChildSessionManager({ cwd: input.cwd, runId: input.run.id, step: input.step, extensionContext: input.extensionContext });
   const releaseChildEnv = enterChildEnv();
@@ -1103,6 +1110,15 @@ function currentSubagentDepth(run: RunState): number {
 function maxSubagentDepth(): number {
   const parsed = Number(process.env.PI_CHALIN_MAX_SUBAGENT_DEPTH);
   return Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : 2;
+}
+
+export function promptTokenomicsPhaseForStep(
+  step: Pick<RunStepState, "id" | "agent">,
+  agent?: Pick<AgentDefinition, "concern">,
+): "childPrompt" | "reviewer" | "repair" {
+  if (/^review-repair(?:-|:|$)/.test(step.id)) return "repair";
+  if (agent?.concern === "review" || step.agent === "reviewer") return "reviewer";
+  return "childPrompt";
 }
 
 const childEnv = { active: 0, previousChild: undefined as string | undefined, previousDisabled: undefined as string | undefined };
@@ -1805,6 +1821,7 @@ function mergeAttemptMetrics(previous: RunStepMetrics | undefined, next: RunStep
     filesRead: [...new Set([...(previous.filesRead ?? []), ...(next.filesRead ?? [])])].slice(0, 50),
     readBytes: (previous.readBytes ?? 0) + (next.readBytes ?? 0),
     outputChars: (previous.outputChars ?? 0) + (next.outputChars ?? 0),
+    outputCharsByToolName: mergeNumberRecords(previous.outputCharsByToolName, next.outputCharsByToolName),
     outputTruncatedCount: (previous.outputTruncatedCount ?? 0) + (next.outputTruncatedCount ?? 0),
     filesTouched: [...new Set([...(previous.filesTouched ?? []), ...(next.filesTouched ?? [])])].slice(0, 50),
     shellCommands: [...(previous.shellCommands ?? []), ...(next.shellCommands ?? [])].slice(0, 50),
@@ -1830,6 +1847,7 @@ function mergePolicyMetrics(metrics: RunStepMetrics, policy: ChildToolPolicy): R
   const shellCommands = [...(metrics.shellCommands ?? []), ...policyMetrics.shellCommands].slice(0, 50);
   const postMutationShellCommands = Math.max(metrics.postMutationShellCommands ?? 0, policyMetrics.postMutationShellCommands);
   const successfulPostMutationShellCommands = Math.max(metrics.successfulPostMutationShellCommands ?? 0, policyMetrics.successfulPostMutationShellCommands);
+  const outputCharsByToolName = mergeNumberRecordsByMax(metrics.outputCharsByToolName, policyMetrics.outputCharsByToolName);
   return {
     ...metrics,
     toolCalls: Math.max(metrics.toolCalls, policyMetrics.toolCalls),
@@ -1842,6 +1860,7 @@ function mergePolicyMetrics(metrics: RunStepMetrics, policy: ChildToolPolicy): R
     ...(filesRead.length ? { filesRead: filesRead.slice(0, 50) } : {}),
     readBytes: Math.max(metrics.readBytes ?? 0, policyMetrics.readBytes),
     outputChars: Math.max(metrics.outputChars ?? 0, policyMetrics.outputChars),
+    ...(Object.keys(outputCharsByToolName).length ? { outputCharsByToolName } : {}),
     outputTruncatedCount: Math.max(metrics.outputTruncatedCount ?? 0, policyMetrics.outputTruncatedCount),
     filesTouched: [...new Set([...(metrics.filesTouched ?? []), ...policyMetrics.filesTouched])].slice(0, 50),
     ...(shellCommands.length ? { shellCommands } : {}),
@@ -1849,6 +1868,32 @@ function mergePolicyMetrics(metrics: RunStepMetrics, policy: ChildToolPolicy): R
     ...(successfulPostMutationShellCommands > 0 ? { successfulPostMutationShellCommands } : {}),
     retriesByTool: { ...(metrics.retriesByTool ?? {}), ...policyMetrics.retriesByTool },
   };
+}
+
+function tokenomicsForToolOutputs(metrics: RunStepMetrics): TokenomicsSummary | undefined {
+  return buildToolOutputTokenomics(metrics.outputChars ?? 0, metrics.outputCharsByToolName);
+}
+
+function mergeNumberRecords(left: Record<string, number> | undefined, right: Record<string, number> | undefined): Record<string, number> {
+  const merged: Record<string, number> = {};
+  for (const [key, value] of Object.entries(left ?? {})) {
+    if (Number.isFinite(value)) merged[key] = (merged[key] ?? 0) + value;
+  }
+  for (const [key, value] of Object.entries(right ?? {})) {
+    if (Number.isFinite(value)) merged[key] = (merged[key] ?? 0) + value;
+  }
+  return merged;
+}
+
+function mergeNumberRecordsByMax(left: Record<string, number> | undefined, right: Record<string, number> | undefined): Record<string, number> {
+  const merged: Record<string, number> = {};
+  for (const [key, value] of Object.entries(left ?? {})) {
+    if (Number.isFinite(value)) merged[key] = Math.max(merged[key] ?? 0, value);
+  }
+  for (const [key, value] of Object.entries(right ?? {})) {
+    if (Number.isFinite(value)) merged[key] = Math.max(merged[key] ?? 0, value);
+  }
+  return merged;
 }
 
 function finalizeStepMetrics(metrics: RunStepMetrics, step: RunStepState, budgetPolicy: ReturnType<typeof policyForStep>, priorFilesRead: string[] = []): RunStepMetrics {

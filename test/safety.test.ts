@@ -58,6 +58,21 @@ test("child policy compresses oversized tool output and records output/read budg
   assert.match(result.content[0]!.text, /compressed by pi-chalin/);
   assert.equal(policy.metrics().outputTruncatedCount, 1);
   assert.ok(policy.metrics().readBytes < 7000);
+  assert.equal(policy.metrics().outputCharsByToolName.read, policy.metrics().readBytes);
+});
+
+test("child policy tracks WebFetch output separately for tokenomics attribution", () => {
+  const policy = createChildToolPolicy({ cwd: process.cwd(), maxToolCalls: 4, allowedTools: ["chalin_web_search"] });
+  assert.deepEqual(policy.beforeTool("chalin_web_search", { url: "https://example.com/docs" }), { allowed: true });
+
+  policy.afterTool("chalin_web_search", {
+    content: [{ type: "text", text: "external docs evidence".repeat(100) }],
+    details: {},
+  });
+
+  const metrics = policy.metrics();
+  assert.ok((metrics.outputCharsByToolName.chalin_web_search ?? 0) > 0);
+  assert.equal(metrics.outputCharsByToolName.chalin_web_search, metrics.outputChars);
 });
 
 test("child policy limits synthesis cross-step duplicate reads", () => {

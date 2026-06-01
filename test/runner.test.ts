@@ -9,7 +9,7 @@ import { chalinChildSessionDir, createChalinChildSessionManager, hideLegacyTopLe
 import { policyForStep } from "../src/budget.ts";
 import { resolveAgentModel, resolveAgentThinking, resolveInheritedModelFallback } from "../src/model-resolution.ts";
 import { buildSdkPrompt, childToolNames, resolveStepCompletionStatus, toolBudgetForStep } from "../src/runner-prompt.ts";
-import { DEFAULT_SDK_STEP_IDLE_STALL_MS, MockWorkerRunner, budgetPolicyForSdkStep, buildConflictResolverTask, extractAssistantRuntimeError, hasUnrecoverableFailedSteps, normalizeThinkingForBudget, parseAgentOutput, reviewerHandoffNeedsRepair, runWithIdleStallMonitor, sdkStepIdleStallMs, shouldStopAfterDagStage } from "../src/runner.ts";
+import { DEFAULT_SDK_STEP_IDLE_STALL_MS, MockWorkerRunner, budgetPolicyForSdkStep, buildConflictResolverTask, extractAssistantRuntimeError, hasUnrecoverableFailedSteps, normalizeThinkingForBudget, parseAgentOutput, promptTokenomicsPhaseForStep, reviewerHandoffNeedsRepair, runWithIdleStallMonitor, sdkStepIdleStallMs, shouldStopAfterDagStage } from "../src/runner.ts";
 import { createRunState, loadResumableRunState, prepareRunForResume } from "../src/runner-state.ts";
 import type { AgentDefinition, RouteDecision, RunState, RunStepMetrics } from "../src/schemas.ts";
 
@@ -36,6 +36,17 @@ function assistantMessage(content: string): Parameters<SessionManager["appendMes
 function readOnlyAgent(name: string, concern: AgentDefinition["concern"] = "context-building"): AgentDefinition {
   return { name, scope: "built-in", concern, capabilities: ["inspect-files", "search-files"], description: name, model: "inherit", tools: [], memory: { read: false, write: "never", categories: [] }, systemPrompt: "", diagnostics: [] };
 }
+
+test("promptTokenomicsPhaseForStep does not treat normal repair tasks as review repair phases", () => {
+  const worker = agent("worker", ["edit-files"]);
+  const reviewer = { ...agent("reviewer", ["inspect-files"]), concern: "review" as const };
+
+  assert.equal(promptTokenomicsPhaseForStep({ id: "step-1", agent: "worker" }, worker), "childPrompt");
+  assert.equal(promptTokenomicsPhaseForStep({ id: "repair-parser-bug:step-1", agent: "worker" }, worker), "childPrompt");
+  assert.equal(promptTokenomicsPhaseForStep({ id: "step-2", agent: "reviewer" }, reviewer), "reviewer");
+  assert.equal(promptTokenomicsPhaseForStep({ id: "review-repair-1-worker", agent: "worker" }, worker), "repair");
+  assert.equal(promptTokenomicsPhaseForStep({ id: "review-repair-1-reviewer", agent: "reviewer" }, reviewer), "repair");
+});
 
 function stepMetrics(overrides: Partial<RunStepMetrics> = {}): RunStepMetrics {
   return {

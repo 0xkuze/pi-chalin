@@ -199,6 +199,7 @@ export interface ChildToolPolicyMetrics {
   filesRead: string[];
   readBytes: number;
   outputChars: number;
+  outputCharsByToolName: Record<string, number>;
   outputTruncatedCount: number;
   filesTouched: string[];
   shellCommands: string[];
@@ -236,6 +237,7 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
   let toolCalls = 0;
   let readBytes = 0;
   let outputChars = 0;
+  const outputCharsByToolName: Record<string, number> = {};
   let outputTruncatedCount = 0;
   let crossStepDuplicateReadCount = 0;
   let mutationSucceeded = false;
@@ -402,6 +404,7 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
       const compressed = compressToolResult(result, toolName, caps.maxOutputChars);
       if (compressed.truncated) outputTruncatedCount += 1;
       outputChars += compressed.outputChars;
+      outputCharsByToolName[toolName] = (outputCharsByToolName[toolName] ?? 0) + compressed.outputChars;
       if (toolName === "read") readBytes += compressed.outputChars;
       recordPostToolBudgetWarnings(toolName);
       activity(toolName, "end");
@@ -418,6 +421,7 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
         filesRead: [...new Set(filesRead)].slice(0, 50),
         readBytes,
         outputChars,
+        outputCharsByToolName: { ...outputCharsByToolName },
         outputTruncatedCount,
         filesTouched: [...new Set(filesTouched)].slice(0, 50),
         shellCommands: shellCommands.slice(0, 30),

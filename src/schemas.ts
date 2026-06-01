@@ -308,6 +308,7 @@ export interface RunStepMetrics {
   filesRead?: string[];
   readBytes?: number;
   outputChars?: number;
+  outputCharsByToolName?: Record<string, number>;
   outputTruncatedCount?: number;
   filesTouched?: string[];
   shellCommands?: string[];

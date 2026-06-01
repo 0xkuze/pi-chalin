@@ -7,6 +7,7 @@ export type TokenomicsPhase =
   | "childPrompt"
   | "memory"
   | "toolOutputs"
+  | "webContextFetch"
   | "handoff"
   | "reviewer"
   | "repair"
@@ -82,14 +83,27 @@ export function createSkillTraceEvent(input: Omit<SkillTraceEvent, "at"> & { at?
 }
 
 export function buildPromptTokenomics(input: Partial<Record<TokenomicsPhase, string>>): TokenomicsSummary {
+  return buildTokenomicsFromCharCounts(Object.fromEntries(Object.entries(input).map(([phase, text]) => [phase, promptPhaseChars(text)])) as Partial<Record<TokenomicsPhase, number>>);
+}
+
+export function buildTokenomicsFromCharCounts(input: Partial<Record<TokenomicsPhase, number>>): TokenomicsSummary {
   const phases = Object.fromEntries(tokenomicsPhases.map((phase) => {
-    const text = input[phase] ?? "";
-    const estimatedChars = text.length;
-    return [phase, { estimatedChars, estimatedTokens: estimateTokens(text) }];
+    const estimatedChars = Math.max(0, Math.floor(input[phase] ?? 0));
+    return [phase, { estimatedChars, estimatedTokens: estimateTokensFromChars(estimatedChars) }];
   })) as Record<TokenomicsPhase, PhaseTokenEstimate>;
   const totalEstimatedChars = Object.values(phases).reduce((sum, phase) => sum + phase.estimatedChars, 0);
   const totalEstimatedTokens = Object.values(phases).reduce((sum, phase) => sum + phase.estimatedTokens, 0);
   return { phases, totalEstimatedChars, totalEstimatedTokens };
+}
+
+export function buildToolOutputTokenomics(outputChars: number, outputCharsByToolName: Record<string, number> = {}): TokenomicsSummary | undefined {
+  const safeOutputChars = Math.max(0, Math.floor(outputChars));
+  const webContextFetchChars = Math.max(0, Math.floor(outputCharsByToolName.chalin_web_search ?? 0));
+  if (safeOutputChars <= 0 && webContextFetchChars <= 0) return undefined;
+  return buildTokenomicsFromCharCounts({
+    toolOutputs: Math.max(0, safeOutputChars - webContextFetchChars),
+    webContextFetch: webContextFetchChars,
+  });
 }
 
 export function createStructuredSpan(input: {
@@ -258,6 +272,14 @@ function estimateTokens(text: string): number {
   return Math.max(1, Math.ceil(text.length / 4));
 }
 
+function promptPhaseChars(text: string | undefined): number {
+  return text?.trim() ? text.length : 0;
+}
+
+function estimateTokensFromChars(chars: number): number {
+  return chars <= 0 ? 0 : Math.max(1, Math.ceil(chars / 4));
+}
+
 function compactAttributes(attributes: Record<string, unknown> | undefined): Record<string, string | number | boolean> {
   const compact: Record<string, string | number | boolean> = {};
   for (const [key, value] of Object.entries(attributes ?? {})) {
@@ -332,6 +354,7 @@ const tokenomicsPhases: TokenomicsPhase[] = [
   "childPrompt",
   "memory",
   "toolOutputs",
+  "webContextFetch",
   "handoff",
   "reviewer",
   "repair",
