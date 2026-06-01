@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { afterEach, test } from "bun:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import registerPiChalin from "../src/index.ts";
-import { resetAutorouteToolStateForTests, shouldUseCompactDirectOrchestrationPrompt } from "../src/autoroute.ts";
+import { resetAutorouteToolStateForTests } from "../src/autoroute.ts";
 import { getDirectToolEventsForTests, getLatestRun, resetRuntimeState, setLatestRun, setLiveStepSession } from "../src/runtime-state.ts";
 import { openAgentManager, openAgentModelPicker, openSkillManager } from "../src/ui-agents.ts";
 import { openMemoryReview, openMemoryReviewWithLoading, openSmartPanel, openWebFetchAuditPanel, summarizeRuntimeGuards } from "../src/ui.ts";
@@ -203,26 +203,16 @@ test("pi-chalin keeps the native prompt and teaches the primary Pi agent to deci
   assert.match(promptResult?.systemPrompt ?? "", /chalin_resume/i);
   assert.match(promptResult?.systemPrompt ?? "", /chalin_interview/i);
   assert.match(promptResult?.systemPrompt ?? "", /chalin_route/i);
-  assert.match(promptResult?.systemPrompt ?? "", /Choose `chalin_route` when specialist context isolation/i);
-  assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /named-file bugfixes\/refactors/i);
-  assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /Do not route or dry-run unless/i);
-  assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /changed-file readback/i);
-  assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /bounded read-only mini-project reviews/i);
-  assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /satisfy every explicit criterion/i);
-  assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /exact requested files\/APIs/i);
-  assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /nearest verification/i);
-  assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /test\/evidence path/i);
-  assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /command-only verification evidence is incomplete/i);
-  assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /package runner coherence/i);
-  assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /Evidence lock/i);
-  assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /searched\/not-found/i);
-  assert.doesNotMatch(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /dependency-free TypeScript/i);
-  assert.match(promptResult?.systemPrompt ?? "", /branch\/diff\/PR/i);
-  assert.match(promptResult?.systemPrompt ?? "", /Architecture\/migration/i);
+  assert.match(promptResult?.systemPrompt ?? "", /At the start choose one path: `DIRECT` or `ROUTE`/i);
+  assert.match(promptResult?.systemPrompt ?? "", /topology=sequential.*topology=dag/i);
+  assert.match(promptResult?.systemPrompt ?? "", /memory is a capability, not a route category/i);
+  assert.match(promptResult?.systemPrompt ?? "", /Routed file mutation needs a worker and a later reviewer/i);
+  assert.doesNotMatch(promptResult?.systemPrompt ?? "", /branch\/diff\/PR/i);
   assert.match(promptResult?.systemPrompt ?? "", /scout/);
   assert.match(promptResult?.systemPrompt ?? "", /reviewer/);
   assert.equal(promptResult?.message?.customType, "pi-chalin-orchestration");
   assert.equal(promptResult?.message?.display, false);
+  assert.match(JSON.stringify(promptResult?.message ?? {}), /Decide DIRECT or ROUTE/i);
 });
 
 test("pi-chalin forces high thinking only for the parent orchestration decision", async () => {
@@ -423,144 +413,6 @@ test("pi-chalin keeps direct tools for bounded review, root docs edits, and expl
   }
 });
 
-test("primary Pi agent receives compact global memory context before direct or routed decisions", async () => {
-  const fake = createFakePi();
-  registerPiChalin(fake.api as never);
-  const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<{ systemPrompt?: string; message?: { customType?: string; content?: string; display?: boolean } } | undefined>;
-  const cwd = tempDir("pi-chalin-global-memory-");
-  const memory = new MemoryStore({ cwd });
-  const [record] = await memory.submitCandidates([createMemoryCandidate({
-    category: "testing",
-    content: "Async retry tests should avoid time.Sleep and prefer channel barriers, deterministic fake timers, or promise hooks.",
-    sourceAgent: "reviewer",
-    confidence: 0.96,
-    evidence: "Prior retry testing review",
-    scope: "project",
-  })]);
-  assert.ok(record);
-
-  const previousProvider = process.env.PI_CHALIN_MEMORY_PROVIDER;
-  process.env.PI_CHALIN_MEMORY_PROVIDER = "pi-chalin";
-  try {
-    const promptResult = await beforeAgentStart({
-      type: "before_agent_start",
-      prompt: "Implementa una mejora pequeña en tests async retry evitando sleeps frágiles",
-      systemPrompt: "base",
-      systemPromptOptions: {},
-    }, { cwd, hasUI: false, model: undefined, modelRegistry: { getAvailable: () => [] } });
-
-    assert.match(promptResult?.systemPrompt ?? "", /pi-chalin global memory context/i);
-    assert.match(promptResult?.systemPrompt ?? "", /Async retry tests should avoid time\.Sleep/i);
-    const events = await memory.events(record.id);
-    assert.ok(events.some((event) => event.type === "retrieve" && event.actor === "primary-pi-global"));
-  } finally {
-    if (previousProvider === undefined) delete process.env.PI_CHALIN_MEMORY_PROVIDER;
-    else process.env.PI_CHALIN_MEMORY_PROVIDER = previousProvider;
-  }
-});
-
-test("compact global orchestration requires routing for broad analysis and keeps direct work cost-aware", async () => {
-  const fake = createFakePi();
-  registerPiChalin(fake.api as never);
-  const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<{ systemPrompt?: string; message?: { customType?: string; content?: string; display?: boolean } } | undefined>;
-
-  const promptResult = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "revisa este proyecto en profundidad y compara opciones de mejora de arquitectura",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, {
-    cwd: tempDir("pi-chalin-compact-global-"),
-    hasUI: false,
-    model: undefined,
-    modelRegistry: { getAvailable: () => [] },
-  });
-
-  assert.equal(promptResult?.message?.customType, "pi-chalin-compact-orchestration");
-  assert.match(promptResult?.systemPrompt ?? "", /^base/);
-  assert.match(promptResult?.systemPrompt ?? "", /pi-chalin orchestration \(compact\)/i);
-  assert.match(promptResult?.message?.content ?? "", /the LM decides route, then tools/i);
-  assert.match(promptResult?.message?.content ?? "", /Decision guidance, not runtime classification/i);
-  assert.match(promptResult?.message?.content ?? "", /bounded read-only mini-project reviews/i);
-  assert.match(promptResult?.message?.content ?? "", /Bounded read-only auth\/security review guidance/i);
-  assert.match(promptResult?.message?.content ?? "", /avoid repeated ls\/find after source hits/i);
-  assert.match(promptResult?.message?.content ?? "", /exploit\/request path or bypass chain/i);
-  assert.match(promptResult?.message?.content ?? "", /project understanding/i);
-  assert.match(promptResult?.message?.content ?? "", /project\/service structure with entrypoints or testing map/i);
-  assert.match(promptResult?.message?.content ?? "", /deep project analysis/i);
-  assert.match(promptResult?.message?.content ?? "", /independent option comparison/i);
-  assert.match(promptResult?.message?.content ?? "", /explicit memory recall\/remembrance/i);
-  assert.match(promptResult?.message?.content ?? "", /Spanish prompts like recuerda\/recordar\/memoria\/decidimos/i);
-  assert.match(promptResult?.message?.content ?? "", /chalin_memory_search/i);
-  assert.match(promptResult?.message?.content ?? "", /mode=list/i);
-  assert.match(promptResult?.message?.content ?? "", /auth\/security\/token\/session behavior with tests/i);
-  assert.match(promptResult?.message?.content ?? "", /choose topology deliberately from the prompt, agent roster, and evidence/i);
-  assert.match(promptResult?.message?.content ?? "", /smallest workflow that can prove the result/i);
-  assert.match(promptResult?.message?.content ?? "", /add discovery, planning, parallelism, or synthesis only when/i);
-  assert.match(promptResult?.message?.content ?? "", /Do not route plain memory recall\/inventory/i);
-  assert.match(promptResult?.message?.content ?? "", /Routed implementation\/file mutation must include worker execution plus a later reviewer/i);
-  assert.match(promptResult?.message?.content ?? "", /reviewer FAIL\/GAP requires focused repair/i);
-  assert.match(promptResult?.message?.content ?? "", /Bounded greenfield\/scaffold efficiency/i);
-  assert.match(promptResult?.message?.content ?? "", /repeated bash without an intervening edit is invalid/i);
-  assert.match(promptResult?.message?.content ?? "", /The LM may choose otherwise from evidence/i);
-  assert.match(promptResult?.message?.content ?? "", /starter test imports win over function names/i);
-  assert.match(promptResult?.message?.content ?? "", /parallel-module bug/i);
-  assert.match(promptResult?.message?.content ?? "", /first mutation before source\/test surface evidence is invalid/i);
-  assert.match(promptResult?.message?.content ?? "", /Parser\/scanner\/tokenizer direct work/i);
-  assert.match(promptResult?.message?.content ?? "", /doubled single quotes/i);
-  assert.match(promptResult?.message?.content ?? "", /Quality-equivalent bounded direct work/i);
-  assert.match(promptResult?.message?.content ?? "", /lower cost\/time\/tool count/i);
-  assert.match(promptResult?.message?.content ?? "", /node --test\/\.cjs uses require\('node:test'\) plus node:assert/i);
-  assert.match(promptResult?.message?.content ?? "", /README\/API\/usage docs/i);
-  assert.match(promptResult?.message?.content ?? "", /Predicate guards: cover each condition branch\/value class/i);
-  assert.match(promptResult?.message?.content ?? "", /Domain-practical coverage means success plus distinct failure\/edge classes/i);
-  assert.match(promptResult?.message?.content ?? "", /Canonical surface discipline/i);
-  assert.match(promptResult?.message?.content ?? "", /do not create parallel modules\/tests/i);
-  assert.match(promptResult?.message?.content ?? "", /Prefer standard-library parsers\/serializers for known wire formats/i);
-  assert.match(promptResult?.message?.content ?? "", /extra helper files must buy clear ownership\/testability/i);
-  assert.match(promptResult?.message?.content ?? "", /CLI packages need `bin`, test script, runnable start\/run script/i);
-  assert.match(promptResult?.message?.content ?? "", /`module` field is not a substitute for `type: module`/i);
-  assert.match(promptResult?.message?.content ?? "", /Publishable TypeScript libraries need a build script\/tsconfig/i);
-  assert.match(promptResult?.message?.content ?? "", /runtime type validation should use a public signature broad enough/i);
-  assert.match(promptResult?.message?.content ?? "", /Normalization used for validation must feed returned output/i);
-  assert.match(promptResult?.message?.content ?? "", /existing source stubs, starter tests, imports, and prompt paths define the acceptance surface/i);
-  assert.match(promptResult?.message?.content ?? "", /python -m unittest discover -s tests/i);
-  assert.match(promptResult?.message?.content ?? "", /Normalized validation computes trimmed\/casefolded locals before regex\/type-domain checks/i);
-  assert.match(promptResult?.message?.content ?? "", /Request\/API validators cover body missing\/null\/array/i);
-  assert.match(promptResult?.message?.content ?? "", /explicit domain bounds such as 1-based, positive, max, cap, or finite/i);
-  assert.match(promptResult?.message?.content ?? "", /Scaffold test-path symmetry/i);
-  assert.match(promptResult?.message?.content ?? "", /Broken-test triage is not coverage expansion/i);
-  assert.match(promptResult?.message?.content ?? "", /Final quality/i);
-  assert.match(promptResult?.message?.content ?? "", /answer in the user's language/i);
-});
-
-test("bounded read-only auth reviews keep the model route decision open", async () => {
-  const fake = createFakePi();
-  const fullToolSet = ["read", "bash", "grep", "find", "ls", "edit", "write", "chalin_interview", "chalin_route", "chalin_web_search"];
-  fake.activeTools = [...fullToolSet];
-  registerPiChalin(fake.api as never);
-  const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<{ message?: { customType?: string; content?: string; display?: boolean } } | undefined>;
-
-  const promptResult = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Revisa este mini proyecto y dime si hay riesgo de seguridad en el boundary de auth. No modifiques archivos; entrega evidencia con paths concretos.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, {
-    cwd: tempDir("pi-chalin-review-compact-"),
-    hasUI: false,
-    model: undefined,
-    modelRegistry: { getAvailable: () => [] },
-  });
-
-  assert.equal(promptResult?.message?.customType, "pi-chalin-compact-orchestration");
-  assert.match(promptResult?.message?.content ?? "", /the code does not classify prompts for you/i);
-  assert.match(promptResult?.message?.content ?? "", /bounded read-only mini-project reviews/i);
-  assert.match(promptResult?.message?.content ?? "", /Bounded read-only auth\/security review guidance/i);
-  assert.ok(fake.activeTools.includes("read"));
-  assert.ok(fake.activeTools.includes("chalin_route"));
-  assert.deepEqual(fake.activeTools, fullToolSet);
-});
 
 test("resumable run context lets the parent decide chalin_resume without a prompt classifier", async () => {
   const fake = createFakePi();
@@ -568,14 +420,14 @@ test("resumable run context lets the parent decide chalin_resume without a promp
   const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<{ systemPrompt?: string; message?: { customType?: string; content?: string; display?: boolean } } | undefined>;
   const cwd = tempDir("pi-chalin-resume-steer-");
   const route: RunState["route"] = {
-    kind: "multi-agent-chain",
+    kind: "multi-agent-sequential",
     agents: ["scout", "planner", "worker"],
     risk: "medium",
     ambiguity: "low",
     needsMemory: false,
     needsArtifacts: true,
     reason: "interrupted workflow",
-    plan: { kind: "chain", steps: [{ agent: "scout", task: "scan" }, { agent: "planner", task: "plan" }, { agent: "worker", task: "implement" }] },
+    plan: { kind: "sequential", steps: [{ agent: "scout", task: "scan" }, { agent: "planner", task: "plan" }, { agent: "worker", task: "implement" }] },
   };
   const stale = createRunState(route, cwd);
   stale.status = "running";
@@ -619,14 +471,14 @@ test("new unrelated prompts do not inherit stale resumable run context", async (
   const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<{ systemPrompt?: string; message?: { customType?: string; content?: string; display?: boolean } } | undefined>;
   const cwd = tempDir("pi-chalin-resume-isolation-");
   const route: RunState["route"] = {
-    kind: "multi-agent-chain",
+    kind: "multi-agent-sequential",
     agents: ["scout", "planner", "worker"],
     risk: "medium",
     ambiguity: "low",
     needsMemory: false,
     needsArtifacts: true,
     reason: "old interrupted workflow",
-    plan: { kind: "chain", steps: [{ agent: "scout", task: "scan" }, { agent: "planner", task: "plan" }, { agent: "worker", task: "implement" }] },
+    plan: { kind: "sequential", steps: [{ agent: "scout", task: "scan" }, { agent: "planner", task: "plan" }, { agent: "worker", task: "implement" }] },
   };
   const stale = createRunState(route, cwd, "old docs spec task");
   stale.status = "paused";
@@ -658,14 +510,14 @@ test("session_start resets stale in-memory chalin run state", async () => {
   const sessionStart = fake.handlers.get("session_start")?.[0] as (event: unknown, ctx: unknown) => void;
   const cwd = tempDir("pi-chalin-session-reset-");
   const run = createRunState({
-    kind: "single-agent",
+    kind: "multi-agent-sequential",
     agents: ["worker"],
     risk: "low",
     ambiguity: "low",
     needsMemory: false,
     needsArtifacts: true,
     reason: "stale running state",
-    plan: { kind: "single", agent: "worker", task: "old work" },
+    plan: { kind: "sequential", steps: [{ agent: "worker", task: "old work" }] },
   }, cwd, "old task");
   setLatestRun(run);
 
@@ -679,893 +531,6 @@ test("session_start resets stale in-memory chalin run state", async () => {
   assert.equal(getLatestRun(), undefined);
 });
 
-test("pi-chalin uses compact orchestration context for bounded scaffold prompts", async () => {
-  assert.equal(shouldUseCompactDirectOrchestrationPrompt("Scaffoldea una mini librería TypeScript de config: package.json, src/config.ts, tests y README. Sin dependencias externas."), true);
-  assert.equal(shouldUseCompactDirectOrchestrationPrompt("Implementa un rate limiter in-memory en src/rateLimit.ts con ventanas por key, límite configurable, reset por tiempo y tests."), true);
-  assert.equal(shouldUseCompactDirectOrchestrationPrompt("Implementa lru.Cache con Get/Set y capacidad fija, evicción LRU, updates y tests. Sin dependencias."), false);
-  assert.equal(shouldUseCompactDirectOrchestrationPrompt("revisa este proyecto dime que hace, en profundidad"), false);
-
-  const fake = createFakePi();
-  registerPiChalin(fake.api as never);
-  const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<{ systemPrompt?: string; message?: { customType?: string; content?: string; display?: boolean } } | undefined>;
-  const agentEnd = fake.handlers.get("agent_end")?.[0] as (event: unknown, ctx: unknown) => void;
-  const ctx = {
-    cwd: tempDir("pi-chalin-compact-direct-"),
-    hasUI: false,
-    model: undefined,
-    modelRegistry: { getAvailable: () => [] },
-  };
-  const promptResult = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Scaffoldea una mini librería TypeScript de config: package.json, src/config.ts, tests y README. Sin dependencias externas.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(promptResult?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.equal(promptResult?.systemPrompt, "base");
-  assert.doesNotMatch(promptResult?.systemPrompt ?? "", /Available pi-chalin agents/i);
-  assert.match(promptResult?.message?.content ?? "", /compact path preflight/i);
-  assert.match(promptResult?.message?.content ?? "", /Scaffold\/API/i);
-  assert.match(promptResult?.message?.content ?? "", /exact files\/APIs/i);
-  assert.match(promptResult?.message?.content ?? "", /current workspace root/i);
-  assert.match(promptResult?.message?.content ?? "", /No pre-edit shell\/discovery or environment probes/i);
-  assert.match(promptResult?.message?.content ?? "", /`which bun`\/`node`\/`npx`/i);
-  assert.match(promptResult?.message?.content ?? "", /relative paths/i);
-  assert.match(promptResult?.message?.content ?? "", /after the last requested mutation/i);
-  assert.match(promptResult?.message?.content ?? "", /package\/bin\/config metadata/i);
-  assert.match(promptResult?.message?.content ?? "", /module format metadata/i);
-  assert.match(promptResult?.message?.content ?? "", /Source syntax and package metadata must agree/i);
-  assert.match(promptResult?.message?.content ?? "", /language\/toolchain, and runner agree/i);
-  assert.match(promptResult?.message?.content ?? "", /runner-discoverable cases/i);
-  assert.match(promptResult?.message?.content ?? "", /preserve explicit requested test path\/glob\/extension/i);
-  assert.match(promptResult?.message?.content ?? "", /mirror it with `test\/<entry>\.test\.\*`/i);
-  assert.match(promptResult?.message?.content ?? "", /no fake builds/i);
-  assert.doesNotMatch(promptResult?.message?.content ?? "", /compact TypeScript library scaffold path|prompt-named factory|Bun CLI|tsx/i);
-
-  const tokenLibraryPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Crea una librería TypeScript pequeña readable-tokens con createToken(prefix, id), tests, package.json y README. Debe validar entradas vacías y devolver prefix-id en minúsculas.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(tokenLibraryPrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(tokenLibraryPrompt?.message?.content ?? "", /Scaffold\/API/i);
-  assert.match(tokenLibraryPrompt?.message?.content ?? "", /exact files\/APIs/i);
-  assert.match(tokenLibraryPrompt?.message?.content ?? "", /Tests register runner-discoverable cases under root `test\/` or `tests\/`/i);
-  assert.match(tokenLibraryPrompt?.message?.content ?? "", /do not put package tests in `src\/` or compiled publish output/i);
-  assert.match(tokenLibraryPrompt?.message?.content ?? "", /requested public entrypoint as the API surface/i);
-  assert.match(tokenLibraryPrompt?.message?.content ?? "", /minimal `tsconfig\.json`, build\/typecheck script/i);
-  assert.match(tokenLibraryPrompt?.message?.content ?? "", /fields aligned to the generated surface/i);
-  assert.match(tokenLibraryPrompt?.message?.content ?? "", /documented error surface/i);
-  assert.match(tokenLibraryPrompt?.message?.content ?? "", /public signature broad enough for tested invalid inputs/i);
-  assert.match(tokenLibraryPrompt?.message?.content ?? "", /trimmed locals feed returned\/composed output/i);
-  assert.match(tokenLibraryPrompt?.message?.content ?? "", /cover one spaced-input output/i);
-  assert.match(tokenLibraryPrompt?.message?.content ?? "", /package scripts use declared\/reproducible runners/i);
-  assert.match(tokenLibraryPrompt?.message?.content ?? "", /no `npx`, experimental TS strip flags, or undeclared runner binaries/i);
-  assert.match(tokenLibraryPrompt?.message?.content ?? "", /small custom errors help public validation APIs/i);
-  assert.match(tokenLibraryPrompt?.message?.content ?? "", /No fake builds\/duplicate logic/i);
-  assert.doesNotMatch(tokenLibraryPrompt?.message?.content ?? "", /createToken|TokenError|number overload|prefix`\/`id|compact TypeScript library scaffold path/i);
-
-  const cliScaffoldPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Scaffoldea un CLI TypeScript mínimo llamado note-pack: package.json, src/cli.ts, README con uso, y test básico en test/cli.test.ts. Usa Bun para ejecutar el test TypeScript sin agregar frameworks de test externos. El comando debe aceptar un argumento de texto y devolverlo normalizado a minúsculas.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(cliScaffoldPrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(cliScaffoldPrompt?.message?.content ?? "", /Scaffold\/API/i);
-  assert.match(cliScaffoldPrompt?.message?.content ?? "", /ESM import\/export requires ESM package\/config/i);
-  assert.match(cliScaffoldPrompt?.message?.content ?? "", /runnable start\/run script/i);
-  assert.match(cliScaffoldPrompt?.message?.content ?? "", /not a substitute for `type: module`/i);
-  assert.match(cliScaffoldPrompt?.message?.content ?? "", /Import-safe CLI modules are mandatory/i);
-  assert.match(cliScaffoldPrompt?.message?.content ?? "", /guard process\.argv\/console\/process\.exit behind the runtime entrypoint check/i);
-  assert.match(cliScaffoldPrompt?.message?.content ?? "", /import\.meta\.main/i);
-  assert.match(cliScaffoldPrompt?.message?.content ?? "", /do not create a separate project in home/i);
-  assert.match(cliScaffoldPrompt?.message?.content ?? "", /Write README\/docs before the first verification/i);
-  assert.match(cliScaffoldPrompt?.message?.content ?? "", /Package bin targets must point to a delivered executable\/source file/i);
-  assert.match(cliScaffoldPrompt?.message?.content ?? "", /extra helper files must buy clear ownership\/testability/i);
-  assert.match(cliScaffoldPrompt?.message?.content ?? "", /must not broaden arbitrary behavior beyond the prompt/i);
-  assert.match(cliScaffoldPrompt?.message?.content ?? "", /conventional config\/env string enums should trim\/casefold only prompt-named literals/i);
-  assert.match(cliScaffoldPrompt?.message?.content ?? "", /CLI tests cover logic, real command path, exit status, stdout\/stderr, multi-word argument text, and no-input\/error behavior/i);
-  assert.match(cliScaffoldPrompt?.message?.content ?? "", /process\.argv\.slice\(2\)\.join\(" "\)/i);
-  assert.match(cliScaffoldPrompt?.message?.content ?? "", /mirror it with `test\/<entry>\.test\.\*`/i);
-  assert.match(cliScaffoldPrompt?.message?.content ?? "", /do not run a separate post-test CLI smoke shell/i);
-  assert.match(cliScaffoldPrompt?.message?.content ?? "", /Do not point bin at dist\/build output unless that artifact is generated and exercised/i);
-  assert.doesNotMatch(cliScaffoldPrompt?.message?.content ?? "", /compact TypeScript CLI scaffold path|src\/normalize\.ts|bun test && bun src\/cli\.ts "HELLO"/i);
-
-  const configScaffoldPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Scaffoldea una mini librería TypeScript de config: package.json, src/config.ts, tests y README. API esperada: loadConfig(env) devuelve { port, nodeEnv }, default port 3000, acepta development/test/production y rechaza ports inválidos. Sin dependencias externas.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(configScaffoldPrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /Scaffold\/API/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /API contract/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /prompt-named exported functions, parameter names, examples, and return shape are acceptance criteria/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /Write tests against that public shape before implementation choices/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /dependency injection or helper seams may be additive/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /must not replace or reinterpret the requested API/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /API\/validation correctness outranks package finish/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /do not drop source-map mode, overload\/union compatibility, or boundary validation to add build metadata/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /support the conservative compatible union/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /Keep README\/final centered on the requested public shape/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /document alternate compatibility briefly/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /Config\/env\/options APIs/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /preserve prompt-named public parameter meaning/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /do not silently retype a scalar\/domain parameter into a dependency map/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /Put dependency injection in an `options`\/`source` object with a safe default empty object/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /support both common meanings with overloads\/union/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /keep the primary API simple in docs/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /env name string and env-source map/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /Source-map mode uses conventional `PORT`\/`NODE_ENV` keys as optional source keys/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /do not make `NODE_ENV` required unless prompt\/repo evidence says required/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /string-env mode injects PORT\/source through options/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /Tests cover both env-source calls such as empty object\/defaults and string-env calls/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /avoid reading global process state/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /Package test scripts should discover the conventional test root\/glob/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /instead of hard-coding only one visible test file/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /Missing\/undefined config values may default independently/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /absent `NODE_ENV` defaults to `development`/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /absent `PORT` defaults to `3000`/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /Do not read `process\.env` to fill missing values from an injected env object/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /provided blank strings must pass through validation and fail/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /plain object should return an immutable\/frozen config/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /Finite validated string domains in TypeScript public APIs/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /exported literal union types/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /return canonical literals/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /not plain `string`/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /canonicalization or explicit exact-case policy/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /trim\/casefold only prompt-named literals/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /exact-case only when prompt\/repo evidence says case-sensitive/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /Do not add aliases such as `dev`\/`prod` or short env names/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /reject alias values in tests when the domain is finite/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /Prefer zero-install native TS runners/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /final in the user's language with 2-4 design decisions/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /preserve explicit requested test path\/glob\/extension/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /TypeScript library scaffolds with tests should deliver source tests such as `test\/<name>\.test\.ts`/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /document package installation\/imports or expose `main`\/`types` should be publishable when it does not crowd out requested API\/validation/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /use `src` source, `dist` main\/types, minimal `tsconfig\.json`, build\/typecheck script, and declared compiler devDependency/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /unless the prompt explicitly asks for source-only\/no-build or no external tooling/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /compiled or JS-only tests do not satisfy a TypeScript test artifact/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /whole-string finite integer in 1\.\.65535/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /reject 0, empty strings, whitespace-only values, leading\/trailing whitespace around digits, negatives, fractions, trailing text, `NaN`, and infinities/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /do not use `parseInt` prefix parsing or trim before numeric validation/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /compile `node:test`, `node:assert`, `process`, or other Node built-ins with `tsc`/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /declare matching Node type metadata such as `@types\/node` before the first install\/test/i);
-  assert.match(configScaffoldPrompt?.message?.content ?? "", /Dev-only type packages are not runtime dependencies/i);
-  assert.doesNotMatch(configScaffoldPrompt?.message?.content ?? "", /compact TypeScript library scaffold path|present empty numeric config value is invalid|Do not write a defaulting test for an empty string/i);
-
-  const rateLimitPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Implementa un rate limiter in-memory en src/rateLimit.ts con ventanas por key, límite configurable, reset por tiempo y tests.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(rateLimitPrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.equal(rateLimitPrompt?.systemPrompt, "base");
-  assert.match(rateLimitPrompt?.message?.content ?? "", /minimal bounded path/i);
-  assert.match(rateLimitPrompt?.message?.content ?? "", /preserve public behavior/i);
-  assert.match(rateLimitPrompt?.message?.content ?? "", /boundary\/counterexample/i);
-  assert.match(rateLimitPrompt?.message?.content ?? "", /read `test\/rateLimit\.test\.ts` before search/i);
-  assert.match(rateLimitPrompt?.message?.content ?? "", /copy primitive `limit`\/`windowMs` locals/i);
-  assert.match(rateLimitPrompt?.message?.content ?? "", /Rate\/window limiters/i);
-  assert.match(rateLimitPrompt?.message?.content ?? "", /explicit source\/test paths mean no ls\/find/i);
-  assert.match(rateLimitPrompt?.message?.content ?? "", /finite positive integers inline or through a small shared helper/i);
-  assert.match(rateLimitPrompt?.message?.content ?? "", /throw `RangeError`/i);
-  assert.match(rateLimitPrompt?.message?.content ?? "", /8-10 visible named cases/i);
-  assert.match(rateLimitPrompt?.message?.content ?? "", /allow\/block\/retryAfter/i);
-  assert.match(rateLimitPrompt?.message?.content ?? "", /fractional limit\/windowMs/i);
-  assert.match(rateLimitPrompt?.message?.content ?? "", /zero\/negative\/nonfinite/i);
-  assert.match(rateLimitPrompt?.message?.content ?? "", /injected clock option\/closure/i);
-  assert.match(rateLimitPrompt?.message?.content ?? "", /now\?: \(\) => number/i);
-  assert.match(rateLimitPrompt?.message?.content ?? "", /over global `Date\.now` monkey-patching/i);
-  assert.match(rateLimitPrompt?.message?.content ?? "", /never sleeps\/wall-clock/i);
-  assert.match(rateLimitPrompt?.message?.content ?? "", /Manual reset only if prompt\/source\/tests say manual\/API reset/i);
-  assert.match(rateLimitPrompt?.message?.content ?? "", /sin dependencias externas/i);
-  assert.doesNotMatch(rateLimitPrompt?.message?.content ?? "", /Scaffold\/API/i);
-  assert.doesNotMatch(rateLimitPrompt?.message?.content ?? "", /Collection\/key/i);
-  assert.doesNotMatch(rateLimitPrompt?.message?.content ?? "", /Package bin targets must point/i);
-  assert.doesNotMatch(rateLimitPrompt?.message?.content ?? "", /rate-limit config|non-integer config|integer limits\/windows/i);
-
-  const webhookPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Implementa verifyWebhook en src/webhook.ts: HMAC sha256 sobre payload, timingSafeEqual, rechaza firma faltante/incorrecta. Añade tests con crypto stdlib.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(webhookPrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(webhookPrompt?.message?.content ?? "", /Crypto\/webhook verification/i);
-  assert.match(webhookPrompt?.message?.content ?? "", /missing, malformed\/non-hex, length-mismatch, well-formed-wrong, empty-payload, and tampered-payload signatures/i);
-  assert.match(webhookPrompt?.message?.content ?? "", /decode received hex signatures to raw bytes/i);
-  assert.match(webhookPrompt?.message?.content ?? "", /malformed\/non-hex/i);
-  assert.match(webhookPrompt?.message?.content ?? "", /empty-payload/i);
-
-  const middlewarePrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Implementa un HTTP middleware en src/requestid.go que asigna request id, lo expone en header/context y añade tests con go test.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(middlewarePrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(middlewarePrompt?.message?.content ?? "", /Auth\/middleware/i);
-  assert.match(middlewarePrompt?.message?.content ?? "", /downstream handler\/next step/i);
-  assert.match(middlewarePrompt?.message?.content ?? "", /generated request IDs or context values/i);
-  assert.match(middlewarePrompt?.message?.content ?? "", /compact uniqueness sanity check/i);
-
-  const errorMiddlewarePrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Implementa error middleware estilo Koa en src/errorMiddleware.ts: catch errors, status/body, hide 500 y tests.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(errorMiddlewarePrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(errorMiddlewarePrompt?.message?.content ?? "", /Error middleware/i);
-  assert.match(errorMiddlewarePrompt?.message?.content ?? "", /catch as `unknown`/i);
-  assert.match(errorMiddlewarePrompt?.message?.content ?? "", /type guards/i);
-  assert.match(errorMiddlewarePrompt?.message?.content ?? "", /`expose=false`\/non-exposed client errors/i);
-  assert.match(errorMiddlewarePrompt?.message?.content ?? "", /`status`\/`statusCode` fallbacks/i);
-
-  const debouncerPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Implementa createDebouncer en src/debounce.ts con cancel, timer provider/fake clock y tests.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(debouncerPrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(debouncerPrompt?.message?.content ?? "", /Debounce\/timer helpers/i);
-  assert.match(debouncerPrompt?.message?.content ?? "", /reset\/reschedule/i);
-  assert.match(debouncerPrompt?.message?.content ?? "", /call-after-cancel scheduling a fresh invocation/i);
-  assert.match(debouncerPrompt?.message?.content ?? "", /argument preservation/i);
-
-  const featureFlagPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Implementa evaluateFlag en src/flags.ts: default value, boolean rules por userId allowlist y percentage rollout determinístico. Añade tests, sin dependencias.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(featureFlagPrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(featureFlagPrompt?.message?.content ?? "", /Feature flags\/rollouts/i);
-  assert.match(featureFlagPrompt?.message?.content ?? "", /Use flag key\/salt only when prompt or starter API exposes one/i);
-  assert.match(featureFlagPrompt?.message?.content ?? "", /do not add a required unrequested key field/i);
-  assert.match(featureFlagPrompt?.message?.content ?? "", /runner-discovered path, not a skipped root duplicate/i);
-  assert.match(featureFlagPrompt?.message?.content ?? "", /ordered rule entries/i);
-  assert.match(featureFlagPrompt?.message?.content ?? "", /rule ordering\/short-circuit/i);
-
-  const retryPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Implementa retry.Backoff(attempt, base, max) en Go: exponential backoff capped, attempt empieza en 1, sin sleep real ni dependencias. Añade tests.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(retryPrompt?.message?.customType, "pi-chalin-compact-orchestration");
-  assert.match(retryPrompt?.message?.content ?? "", /Retry\/backoff/i);
-  assert.match(retryPrompt?.message?.content ?? "", /attempt==max vs attempt>max/i);
-  assert.match(retryPrompt?.message?.content ?? "", /max-attempts=1/i);
-  assert.match(retryPrompt?.message?.content ?? "", /non-transient\/permanent failures with attempts remaining/i);
-  assert.match(retryPrompt?.message?.content ?? "", /invalid attempt\/base\/max domains/i);
-
-  const paginationPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Hay un helper de paginación incompleto. Completa paginator.py con page 1-based, errores claros y tests de bordes.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(paginationPrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(paginationPrompt?.message?.content ?? "", /First-action invariant/i);
-  assert.match(paginationPrompt?.message?.content ?? "", /first `write` before evidence creates parallel surfaces/i);
-  assert.match(paginationPrompt?.message?.content ?? "", /Pagination helpers/i);
-  assert.match(paginationPrompt?.message?.content ?? "", /do not create a sibling paginate\/paginator module pair/i);
-  assert.match(paginationPrompt?.message?.content ?? "", /numeric strings and integer-equivalent numeric values/i);
-  assert.match(paginationPrompt?.message?.content ?? "", /invalid argument\/domain errors separate from out-of-range empty-page errors/i);
-  assert.match(paginationPrompt?.message?.content ?? "", /numeric coercion compatibility/i);
-  assert.match(paginationPrompt?.message?.content ?? "", /large collection\/sample-volume case/i);
-  assert.match(paginationPrompt?.message?.content ?? "", /empty-collection total_pages policy explicit/i);
-
-  const queryParserPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Corrige parse_query(query) en request_parser.py inspirado en Flask request.args: soporta URL querystring, valores repetidos como lista y decode percent-encoding. Añade unittest.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(queryParserPrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(queryParserPrompt?.message?.content ?? "", /Query parsers/i);
-  assert.match(queryParserPrompt?.message?.content ?? "", /prefer the language stdlib query parser/i);
-  assert.match(queryParserPrompt?.message?.content ?? "", /urllib\.parse\.parse_qs/i);
-
-  const apiPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Corrige src/api/createUser.ts estilo Next API route: validate email y name, devuelve 400 con error para payload inválido y 201 con user normalizado. Añade tests sin instalar Next.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(apiPrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(apiPrompt?.message?.content ?? "", /HTTP\/API payload validation/i);
-  assert.match(apiPrompt?.message?.content ?? "", /canonical runner-discovered test path, not a sibling or nested parallel test/i);
-  assert.match(apiPrompt?.message?.content ?? "", /Keep the package\/existing runner and assertion API/i);
-  assert.match(apiPrompt?.message?.content ?? "", /Check body object-ness with a small type guard before destructuring/i);
-  assert.match(apiPrompt?.message?.content ?? "", /Preserve the prompt\/starter error surface/i);
-  assert.match(apiPrompt?.message?.content ?? "", /whole-string finite pattern, not `includes`\/substring checks/i);
-  assert.match(apiPrompt?.message?.content ?? "", /no-at, no-dot-after-at, whitespace, and malformed tiny strings/i);
-  assert.match(apiPrompt?.message?.content ?? "", /singular `error`/i);
-  assert.match(apiPrompt?.message?.content ?? "", /status-discriminated response union/i);
-  assert.match(apiPrompt?.message?.content ?? "", /narrow on `status` before reading body fields/i);
-  assert.match(apiPrompt?.message?.content ?? "", /return it under that noun/i);
-
-  const lruPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Implementa lru.Cache con Get/Set y capacidad fija. Debe evictar least-recently-used al superar capacidad, actualizar existing keys y tener tests. Sin dependencias.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(lruPrompt?.message?.customType, "pi-chalin-compact-orchestration");
-  assert.match(lruPrompt?.message?.content ?? "", /Bounded caches\/LRU/i);
-  assert.match(lruPrompt?.message?.content ?? "", /existing-key Set update that promotes without growth/i);
-  assert.match(lruPrompt?.message?.content ?? "", /multiple consecutive evictions/i);
-
-  const brokenTestPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "El test está fallando. Encuentra la causa raíz en src/normalizeEmail.ts, corrígela y deja bun test pasando. No cambies el test para ocultar el bug.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(brokenTestPrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(brokenTestPrompt?.message?.content ?? "", /compact broken-test triage path/i);
-  assert.match(brokenTestPrompt?.message?.content ?? "", /The existing failing test is the contract/i);
-  assert.match(brokenTestPrompt?.message?.content ?? "", /Direct test candidate: `test\/normalizeEmail\.test\.ts`/i);
-  assert.match(brokenTestPrompt?.message?.content ?? "", /Edit source only/i);
-  assert.match(brokenTestPrompt?.message?.content ?? "", /Do not add, rewrite, broaden, skip, or weaken tests/i);
-  assert.match(brokenTestPrompt?.message?.content ?? "", /Do not add preservation\/no-op tests/i);
-  assert.match(brokenTestPrompt?.message?.content ?? "", /same failing command or direct nearest test/i);
-
-  const pricingPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Refactoriza src/pricing.ts para extraer funciones puras pequeñas, mantener el API calculateInvoice igual, y añade/actualiza tests relevantes.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(pricingPrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(pricingPrompt?.message?.content ?? "", /minimal bounded path/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /Prompt path: `src\/pricing\.ts`/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /No pre-edit bash\/test unless existing tests already fail/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /preserve public behavior/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /assert changed behavior, one boundary\/counterexample, and one no-op\/preservation path/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /Refactors with tests preserve public API behavior/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /existing branches\/defaults\/formulas\/formatting/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /source-of-truth types/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /source-of-truth return types\/interfaces/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /broad casts, duplicate type definitions, or object-bag typing/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /extracted pure helpers/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /atomic per-entry\/per-step total helper/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /optional\/default inputs/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /helper owns that default/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /short responsibility comment/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /zero\/one\/many/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /composed public-API case/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /equivalence classes/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /neutral\/default value/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /meaningful extreme\/ceiling\/floor value/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /empty\/one\/many collection sizes/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /zero-value and zero-rate cases/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /Per-entry formula helpers should get direct zero-value and fractional-rate coverage/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /object-shaped public results should keep an explicit return type\/interface/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /rate, percentage, or value input/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /omitted\/undefined default and explicit zero/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /do not collapse all zero\/default behavior into one public smoke test/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /fractional values\/rates that force rounding/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /composed public-API proof/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /non-integer or threshold case/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /order-sensitive intermediates/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /approval-style API-level/i);
-  assert.match(pricingPrompt?.message?.content ?? "", /API-level multi-input\/default\/rounding coverage/i);
-  assert.doesNotMatch(pricingPrompt?.message?.content ?? "", /money-calculation|line amount|subtotal|discount|tax|100%|12\.5\/7\.25/i);
-
-  const safeDividePrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Añade un test unitario que cubra división por cero en src/safeDivide.ts. Si el comportamiento ya existe, no refactorices de más.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(safeDividePrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(safeDividePrompt?.message?.content ?? "", /compact test-only path/i);
-  assert.match(safeDividePrompt?.message?.content ?? "", /Prompt path: `src\/safeDivide\.ts`/i);
-  assert.match(safeDividePrompt?.message?.content ?? "", /Read source once, then read or create nearest test `test\/safeDivide\.test\.ts`/i);
-  assert.match(safeDividePrompt?.message?.content ?? "", /If source already has the requested behavior, do not refactor or edit source/i);
-  assert.match(safeDividePrompt?.message?.content ?? "", /if an existing test already covers normal behavior, do not add another preservation case/i);
-  assert.match(safeDividePrompt?.message?.content ?? "", /Singular\/unit-test request means one focused test change/i);
-  assert.match(safeDividePrompt?.message?.content ?? "", /split semantically distinct guard branches into separate named test blocks/i);
-  assert.match(safeDividePrompt?.message?.content ?? "", /compound guards\/predicates/i);
-  assert.match(safeDividePrompt?.message?.content ?? "", /each condition branch and representative value class/i);
-  assert.match(safeDividePrompt?.message?.content ?? "", /do not add alternate samples of the same class/i);
-  assert.match(safeDividePrompt?.message?.content ?? "", /JS\/TS safe division or ratio tests/i);
-  assert.match(safeDividePrompt?.message?.content ?? "", /include `-0` as a named zero-denominator assertion/i);
-  assert.match(safeDividePrompt?.message?.content ?? "", /raw division by `-0` produces `-Infinity`/i);
-  assert.match(safeDividePrompt?.message?.content ?? "", /if the guard explicitly uses finite-number policy such as `Number\.isFinite`/i);
-  assert.match(safeDividePrompt?.message?.content ?? "", /add one compact non-finite denominator test block/i);
-  assert.match(safeDividePrompt?.message?.content ?? "", /otherwise do not add NaN\/Infinity matrices/i);
-  assert.match(safeDividePrompt?.message?.content ?? "", /Do not use bash\/cat to discover test files/i);
-  assert.match(safeDividePrompt?.message?.content ?? "", /No ls\/find\/grep\/package\/config/i);
-  assert.match(safeDividePrompt?.message?.content ?? "", /final in the user's language with exactly 3 bullets/i);
-  assert.doesNotMatch(safeDividePrompt?.message?.content ?? "", /numeric test-only|denominator `0`|NaN, \+Infinity|safe arithmetic|missing behavior assertion/i);
-
-  const pyUnitPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "En Python, implementa parse_date en src/dateutil.py y cubre el caso invalido con unittest.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(pyUnitPrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(pyUnitPrompt?.message?.content ?? "", /minimal bounded path/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /Python unittest: after target read/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /update `tests\/test_<stem>\.py` and run `python -m unittest discover -s tests`/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /use root `test_<stem>\.py` only when no tests root exists/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /no source-module rename from the function name/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /No pre-edit bash/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /edit source\+tests before the first verification/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /ls\/find\/config unless the target read fails/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /Large\/partial edit/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /tiny stubs replace once/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /Date\/format parsers/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /one single-line regex\/match capture/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /no newline inside regex/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /native UTC full component round-trip preferred/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /never use timestamp sign or day-only checks/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /no manual leap tables\/fallback parsing/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /Use 10-12 visible tests\/cases/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /valid normal date/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /valid pre-1970 date/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /invalid 30-day month/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /February overflow or non-leap day/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /month `00`\/`13`/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /leading\/trailing spaces rejected/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /ISO datetime\/trailing data rejected/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /empty\/non-date text/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /missing zero padding/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /do not assert UTC hours\/min\/sec/i);
-  assert.match(pyUnitPrompt?.message?.content ?? "", /avoid broad calendar matrices/i);
-
-  const datePrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Corrige src/parseDate.ts para validar fechas YYYY-MM-DD con calendario real y añade tests bun test.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(datePrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(datePrompt?.message?.content ?? "", /minimal bounded path/i);
-  assert.match(datePrompt?.message?.content ?? "", /Date\/format parsers/i);
-  assert.match(datePrompt?.message?.content ?? "", /one single-line regex\/match capture/i);
-  assert.match(datePrompt?.message?.content ?? "", /native UTC full component round-trip preferred/i);
-  assert.match(datePrompt?.message?.content ?? "", /never use timestamp sign or day-only checks/i);
-  assert.match(datePrompt?.message?.content ?? "", /No manual leap tables\/fallback parsing/i);
-  assert.match(datePrompt?.message?.content ?? "", /Use 10-12 visible tests\/cases/i);
-  assert.match(datePrompt?.message?.content ?? "", /valid normal date/i);
-  assert.match(datePrompt?.message?.content ?? "", /leap day/i);
-  assert.match(datePrompt?.message?.content ?? "", /valid pre-1970 date/i);
-  assert.match(datePrompt?.message?.content ?? "", /invalid 30-day month/i);
-  assert.match(datePrompt?.message?.content ?? "", /February overflow or non-leap day/i);
-  assert.match(datePrompt?.message?.content ?? "", /day `00`\/`32`/i);
-  assert.match(datePrompt?.message?.content ?? "", /leading\/trailing spaces rejected/i);
-  assert.match(datePrompt?.message?.content ?? "", /ISO datetime\/trailing data rejected/i);
-  assert.match(datePrompt?.message?.content ?? "", /missing zero padding/i);
-  assert.doesNotMatch(datePrompt?.message?.content ?? "", /tiny date-parser|`utc >= 0`/i);
-
-  const delimiterPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Corrige lib/parseFlags.cjs para soportar --name=value y flags booleanas. Añade tests CommonJS.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(delimiterPrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(delimiterPrompt?.message?.content ?? "", /minimal bounded path/i);
-  assert.match(delimiterPrompt?.message?.content ?? "", /CommonJS\/CJS/i);
-  assert.match(delimiterPrompt?.message?.content ?? "", /never `bun:test`/i);
-  assert.match(delimiterPrompt?.message?.content ?? "", /If source\+test paths are known, no package\/config read before first edit/i);
-  assert.match(delimiterPrompt?.message?.content ?? "", /Tiny source\/tests may be replaced once/i);
-  assert.match(delimiterPrompt?.message?.content ?? "", /first-index\/slice/i);
-  assert.match(delimiterPrompt?.message?.content ?? "", /embedded `=`/i);
-  assert.match(delimiterPrompt?.message?.content ?? "", /bare boolean flags/i);
-  assert.match(delimiterPrompt?.message?.content ?? "", /bare `--` as the standard end-of-options terminator/i);
-  assert.match(delimiterPrompt?.message?.content ?? "", /empty value/i);
-  assert.match(delimiterPrompt?.message?.content ?? "", /realistic mixed argv/i);
-  assert.match(delimiterPrompt?.message?.content ?? "", /single-dash ignore/i);
-  assert.match(delimiterPrompt?.message?.content ?? "", /duplicate-key policy/i);
-  assert.match(delimiterPrompt?.message?.content ?? "", /unless prompt\/docs\/tests require/i);
-  assert.doesNotMatch(delimiterPrompt?.message?.content ?? "", /tiny CJS delimiter|Low-entropy CJS parser fix|no `flags\[""\]`/i);
-
-  const regexPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "En Python, implementa slug normalizer en src/slug.py con tests unittest para espacios y puntuacion.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(regexPrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(regexPrompt?.message?.content ?? "", /minimal bounded path/i);
-  assert.match(regexPrompt?.message?.content ?? "", /Python unittest: after target read/i);
-  assert.match(regexPrompt?.message?.content ?? "", /Regex normalizers/i);
-  assert.match(regexPrompt?.message?.content ?? "", /avoid redundant cleanup passes unless a test proves they are needed/i);
-  assert.match(regexPrompt?.message?.content ?? "", /separator collapse/i);
-  assert.match(regexPrompt?.message?.content ?? "", /String\/slug normalizers/i);
-  assert.match(regexPrompt?.message?.content ?? "", /No transliteration\/accent policy/i);
-  assert.doesNotMatch(regexPrompt?.message?.content ?? "", /tiny Python slug path|one `re\.sub|unittest\.main/i);
-
-  const explicitSlugifyPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "En Python, implementa slugify.py con tests unittest.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(explicitSlugifyPrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(explicitSlugifyPrompt?.message?.content ?? "", /String\/slug normalizers/i);
-  assert.match(explicitSlugifyPrompt?.message?.content ?? "", /stdlib-only accent folding when available/i);
-  assert.match(explicitSlugifyPrompt?.message?.content ?? "", /accented Latin example/i);
-  assert.match(explicitSlugifyPrompt?.message?.content ?? "", /No external slugify dependency/i);
-  assert.doesNotMatch(explicitSlugifyPrompt?.message?.content ?? "", /tiny Python slug path|NFKD ASCII folding/i);
-
-  const goSlugPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Implementa slug.Slugify en Go: lowercase, espacios/puntuación a guiones, colapsa guiones y trim. Añade tests sin dependencias.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(goSlugPrompt?.message?.customType, "pi-chalin-compact-orchestration");
-  assert.match(goSlugPrompt?.message?.content ?? "", /Go string\/slug normalizers/i);
-  assert.match(goSlugPrompt?.message?.content ?? "", /strings\.Builder/i);
-  assert.match(goSlugPrompt?.message?.content ?? "", /Grow\(len\(input\)\)/i);
-  assert.match(goSlugPrompt?.message?.content ?? "", /unicode\.IsLetter/i);
-  assert.match(goSlugPrompt?.message?.content ?? "", /strings\.Trim\(result, "-"\)/i);
-  assert.match(goSlugPrompt?.message?.content ?? "", /WriteByte/i);
-  assert.match(goSlugPrompt?.message?.content ?? "", /accented\/Unicode-letter input/i);
-  assert.match(goSlugPrompt?.message?.content ?? "", /separate named tests/i);
-
-  const activeToolSet = ["read", "bash", "edit", "write", "grep", "find", "ls", "chalin_project_discovery", "chalin_project_snapshot", "chalin_route"];
-  fake.activeTools = [...activeToolSet];
-  const clampPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Implementa packages/math/src/clamp.ts y su test package-local para min/max.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(clampPrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(clampPrompt?.message?.content ?? "", /minimal bounded path/i);
-  assert.match(clampPrompt?.message?.content ?? "", /native work is usually enough/i);
-  assert.match(clampPrompt?.message?.content ?? "", /Numeric bounds\/clamp\/range/i);
-  assert.match(clampPrompt?.message?.content ?? "", /Do not invent reversed-bound, decimal, or non-finite policy/i);
-  assert.deepEqual(fake.activeTools, activeToolSet);
-  assert.deepEqual(fake.activeTools, activeToolSet);
-
-  const cautiousPackageLocalPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Implementa packages/math/src/clamp.ts y su test package-local para min/max, incluyendo reversed bounds.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(cautiousPackageLocalPrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(cautiousPackageLocalPrompt?.message?.content ?? "", /if the prompt already names `packages\/<pkg>\/src\/<stem>\.\*`/i);
-  assert.match(cautiousPackageLocalPrompt?.message?.content ?? "", /do not infer `<pkg>` or `<stem>` from words/i);
-  assert.doesNotMatch(cautiousPackageLocalPrompt?.message?.content ?? "", /try before ls\/find/i);
-
-  const uvPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "En este workspace Rust inspirado en uv, corrige normalize_index_url en crates/index-url/src/lib.rs. Debe normalizar scheme/host case-insensitive, quitar credenciales, tratar /simple y /simple/ como equivalentes y preservar path final con slash. Añade/actualiza tests y deja cargo test pasando.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(uvPrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(uvPrompt?.message?.content ?? "", /Prompt path: `crates\/index-url\/src\/lib\.rs`/i);
-  assert.match(uvPrompt?.message?.content ?? "", /minimal bounded path/i);
-  assert.match(uvPrompt?.message?.content ?? "", /LM finds broad ownership/i);
-  assert.ok((uvPrompt?.message?.content?.length ?? Infinity) < 3200);
-  assert.deepEqual(fake.activeTools, activeToolSet);
-
-  const cachePrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "En este workspace Rust, implementa build_cache_key en crates/cache-key/src/lib.rs. Debe normalizar package con trim + lowercase, normalizar version con trim sin cambiar su contenido, aplicar trim a markers, ignorar markers vacios despues del trim, ordenar markers, preservar case y duplicados de markers, producir una key deterministica y cubrirlo con tests. Deja cargo test pasando.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(cachePrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(cachePrompt?.message?.content ?? "", /Prompt path: `crates\/cache-key\/src\/lib\.rs`/i);
-  assert.match(cachePrompt?.message?.content ?? "", /minimal bounded path/i);
-  assert.match(cachePrompt?.message?.content ?? "", /Collection\/key/i);
-  assert.ok((cachePrompt?.message?.content?.length ?? Infinity) < 3600);
-  assert.deepEqual(fake.activeTools, activeToolSet);
-
-  const ttlPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Implementa TTL cache en cache/cache.go con reloj inyectable, expiracion lazy y tests go test.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.match(ttlPrompt?.message?.content ?? "", /minimal bounded path/i);
-  assert.match(ttlPrompt?.message?.content ?? "", /Go: read same-dir `<stem>_test\.go` directly before find\/ls/i);
-  assert.match(ttlPrompt?.message?.content ?? "", /mutable local `now` variable/i);
-  assert.match(ttlPrompt?.message?.content ?? "", /batch source\+test edits before one `go test`/i);
-  assert.match(ttlPrompt?.message?.content ?? "", /Cache\/TTL/i);
-  assert.match(ttlPrompt?.message?.content ?? "", /lazy expiry through `Get`/i);
-  assert.match(ttlPrompt?.message?.content ?? "", /delete expired entries on access when using an internal store/i);
-  assert.match(ttlPrompt?.message?.content ?? "", /Prefer precomputed expiresAt\+After/i);
-  assert.match(ttlPrompt?.message?.content ?? "", /Exact TTL boundary valid unless evidenced otherwise/i);
-  assert.match(ttlPrompt?.message?.content ?? "", /No sleeps, fakeClock structs, TTL=0\/noExpire, or sweeper semantics unless named/i);
-  assert.match(ttlPrompt?.message?.content ?? "", /Use 5-6 compact tests/i);
-  assert.match(ttlPrompt?.message?.content ?? "", /one expiry test covering before\/exact\/past TTL/i);
-  assert.match(ttlPrompt?.message?.content ?? "", /Derive boundary test times from variables/i);
-  assert.match(ttlPrompt?.message?.content ?? "", /Do not split before\/exact\/past into separate tests/i);
-  assert.match(ttlPrompt?.message?.content ?? "", /overwrite value plus TTL renewal/i);
-  assert.match(ttlPrompt?.message?.content ?? "", /independent entries/i);
-  assert.match(ttlPrompt?.message?.content ?? "", /stagger/i);
-  assert.doesNotMatch(ttlPrompt?.message?.content ?? "", /exactly 3 tests/i);
-  assert.doesNotMatch(ttlPrompt?.message?.content ?? "", /No cleanup-after-delete/);
-  assert.match(ttlPrompt?.message?.content ?? "", /Verify once: named script if requested, else nearest focused test/i);
-  assert.doesNotMatch(ttlPrompt?.message?.content ?? "", /gofmt -w cache\/cache\.go cache\/cache_test\.go/i);
-  assert.doesNotMatch(ttlPrompt?.message?.content ?? "", /bounded Go state\/time path|Direct test candidate: read `cache\/cache_test\.go`|Changed names both source and test paths/i);
-
-  const implicitGoTestPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "En este módulo Go implementa Cache.Get/Set en cache/cache.go con TTL y reloj inyectable para tests determinísticos. Añade tests para expiración y no uses goroutines ni dependencias externas.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.match(implicitGoTestPrompt?.message?.content ?? "", /minimal bounded path/i);
-  assert.match(implicitGoTestPrompt?.message?.content ?? "", /Cache\/TTL/i);
-  assert.doesNotMatch(implicitGoTestPrompt?.message?.content ?? "", /bounded Go state\/time path|Final exactly 3 bullets/i);
-
-  const cPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Corrige la regresión C de unicode: ascii_trim debe recortar whitespace ASCII sin tocar bytes UTF-8 ni espacios Unicode. Deja make test pasando.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(cPrompt?.message?.customType, "pi-chalin-compact-orchestration");
-  assert.match(cPrompt?.message?.content ?? "", /the code does not classify prompts for you/i);
-  assert.match(cPrompt?.message?.content ?? "", /the LM decides route, then tools/i);
-  assert.match(cPrompt?.message?.content ?? "", /Native work is usually appropriate/i);
-  assert.match(cPrompt?.message?.content ?? "", /specific function\/symbol\/API plus local verification/i);
-  assert.match(cPrompt?.message?.content ?? "", /small bounded package\/class\/function work without prompt paths/i);
-  assert.match(cPrompt?.message?.content ?? "", /edit source\+tests/i);
-  assert.match(cPrompt?.message?.content ?? "", /tiny fully read stubs may be replaced in one write per file/i);
-  assert.match(cPrompt?.message?.content ?? "", /not a routing keyword/i);
-  assert.match(cPrompt?.message?.content ?? "", /no-op\/boundary\/error paths/i);
-  assert.match(cPrompt?.message?.content ?? "", /Strict decoders\/parsers consume the full input/i);
-  assert.match(cPrompt?.message?.content ?? "", /trailing non-whitespace data after a valid value is an error/i);
-  assert.match(cPrompt?.message?.content ?? "", /capacity\/limit, cover negative\/zero\/one and update-without-growth/i);
-  assert.match(cPrompt?.message?.content ?? "", /Go exported APIs get concise doc comments/i);
-  assert.match(cPrompt?.message?.content ?? "", /Do not read back after passing verification/i);
-  assert.match(cPrompt?.systemPrompt ?? "", /You are the primary Pi agent/i);
-  assert.doesNotMatch(cPrompt?.message?.content ?? "", /C\/string bugfix|preserve bytes outside the requested mutation/i);
-
-  const filterPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Implementa filterTasks en src/filterTasks.ts y tests para búsqueda por texto en title/description.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(filterPrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(filterPrompt?.message?.content ?? "", /Text\/query filters/i);
-  assert.match(filterPrompt?.message?.content ?? "", /Direct test candidate: read `test\/filterTasks\.test\.ts`/i);
-  assert.match(filterPrompt?.message?.content ?? "", /normalize the query once with trim\+lowercase/i);
-  assert.match(filterPrompt?.message?.content ?? "", /10-12 visible named behaviors/i);
-  assert.match(filterPrompt?.message?.content ?? "", /empty-string description/i);
-  assert.match(filterPrompt?.message?.content ?? "", /no input-array mutation/i);
-  assert.match(filterPrompt?.message?.content ?? "", /assert full returned object shape/i);
-  assert.match(filterPrompt?.message?.content ?? "", /id-only assertions only as secondary order checks/i);
-  assert.match(filterPrompt?.message?.content ?? "", /one behavior per test/i);
-  assert.match(filterPrompt?.message?.content ?? "", /do not group blank\+whitespace/i);
-  assert.match(filterPrompt?.message?.content ?? "", /existing nearest test file/i);
-  assert.match(filterPrompt?.message?.content ?? "", /do not create a second sibling `src\/<stem>\.test\.\*` file/i);
-
-  const sortPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Implementa sortTasks en src/sortTasks.ts: ordena por prioridad high > medium > low, luego por dueDate ascendente, conserva orden estable si empatan y no muta el array original. Añade tests.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(sortPrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(sortPrompt?.message?.content ?? "", /minimal bounded path/i);
-  assert.match(sortPrompt?.message?.content ?? "", /Stable sorts/i);
-  assert.match(sortPrompt?.message?.content ?? "", /Direct test candidate: read `test\/sortTasks\.test\.ts` before search\/find/i);
-  assert.match(sortPrompt?.message?.content ?? "", /copy before sort \(`\[\.\.\.items\]\.sort/i);
-  assert.match(sortPrompt?.message?.content ?? "", /use original-index decorate only if runtime stability is unknown/i);
-  assert.match(sortPrompt?.message?.content ?? "", /Compare ISO date\/datetime strings lexicographically/i);
-  assert.match(sortPrompt?.message?.content ?? "", /test date-only and datetime ordering/i);
-  assert.match(sortPrompt?.message?.content ?? "", /No structuredClone, broad matrices, readback, or second verification/i);
-  assert.doesNotMatch(sortPrompt?.message?.content ?? "", /tiny stable-sort path|Low-entropy transform/i);
-  assert.match(sortPrompt?.message?.content ?? "", /Multiple prompt criteria need visible assertions/i);
-  assert.match(sortPrompt?.message?.content ?? "", /no smoke-only coverage/i);
-  assert.match(sortPrompt?.message?.content ?? "", /Use 7-9 compact tests/i);
-  assert.match(sortPrompt?.message?.content ?? "", /single\/no-op/i);
-  assert.match(sortPrompt?.message?.content ?? "", /datetime secondary when applicable/i);
-  assert.match(sortPrompt?.message?.content ?? "", /Use root direct test candidate/i);
-  assert.match(sortPrompt?.message?.content ?? "", /no sibling `src\/<stem>\.test\.\*`/i);
-  assert.match(sortPrompt?.message?.content ?? "", /Do not verify\/final on empty\/smoke-only tests/i);
-  assert.match(sortPrompt?.message?.content ?? "", /combined primary\+secondary/i);
-  assert.match(sortPrompt?.message?.content ?? "", /new reference/i);
-  assert.match(sortPrompt?.message?.content ?? "", /import helper types with `import type`/i);
-  assert.match(sortPrompt?.message?.content ?? "", /Verify once/i);
-  assert.ok((sortPrompt?.message?.content ?? "").length < 2500);
-
-  const dottedIdentifierPrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Implementa lru.Cache con Get/Set y capacidad fija. Debe evictar least-recently-used al superar capacidad, actualizar existing keys y tener tests. Sin dependencias.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(dottedIdentifierPrompt?.message?.customType, "pi-chalin-compact-orchestration");
-  assert.match(dottedIdentifierPrompt?.message?.content ?? "", /one small package\/module\/class\/function implementation with tests and no prompt paths/i);
-  assert.match(dottedIdentifierPrompt?.message?.content ?? "", /do not guess directories from identifiers/i);
-  assert.match(dottedIdentifierPrompt?.message?.content ?? "", /Use evidence-backed direct candidates only/i);
-  assert.match(dottedIdentifierPrompt?.message?.content ?? "", /one targeted find\/rg by identifier/i);
-  assert.doesNotMatch(dottedIdentifierPrompt?.message?.content ?? "", /Prompt paths: `lru\.Cache`/i);
-});
-
-
-
-test("pi-chalin leaves surgical no-path routing to the model instead of a regex fast path", async () => {
-  assert.equal(shouldUseCompactDirectOrchestrationPrompt("en un archivo largo cambia solo la validacion puntual de auth y evita reescribir el archivo completo"), false);
-
-  const fake = createFakePi();
-  registerPiChalin(fake.api as never);
-  const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<{ systemPrompt?: string; message?: { customType?: string; content?: string; display?: boolean } } | undefined>;
-  const ctx = { cwd: tempDir("pi-chalin-critical-"), hasUI: false, model: undefined, modelRegistry: { getAvailable: () => [] } };
-  const promptResult = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "en un archivo largo cambia solo la validacion puntual de auth y evita reescribir el archivo completo",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(promptResult?.message?.customType, "pi-chalin-compact-orchestration");
-  assert.match(promptResult?.message?.content ?? "", /the code does not classify prompts for you/i);
-  assert.match(promptResult?.message?.content ?? "", /risky surgical\/long-file edits/i);
-  assert.match(promptResult?.message?.content ?? "", /bounded read-only mini-reviews that explicitly forbid file modification/i);
-  assert.match(promptResult?.message?.content ?? "", /If parent context compaction becomes likely/i);
-  assert.match(promptResult?.message?.content ?? "", /route or split work into subagents/i);
-  assert.match(promptResult?.systemPrompt ?? "", /You are the primary Pi agent/i);
-});
-
-test("pi-chalin gives complex prompts routing guidance without forcing tool scopes", async () => {
-  const prompt = "En esta base multi-lenguaje inspirada en Bun, haz un analisis profundo cross-language del fallo de `sync` con paquetes duplicados entre Zig y Rust. No cambies codigo: actualiza docs/lockfile-triage.md.";
-  assert.equal(shouldUseCompactDirectOrchestrationPrompt(prompt), true);
-  assert.equal(shouldUseCompactDirectOrchestrationPrompt("En este workspace Rust, implementa build_cache_key en crates/cache-key/src/lib.rs y deja cargo test pasando."), true);
-
-  const fake = createFakePi();
-  registerPiChalin(fake.api as never);
-  const inputHandler = fake.handlers.get("input")?.[0] as (event: unknown, ctx: unknown) => Promise<{ action: string }>;
-  const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<{ systemPrompt?: string; message?: { customType?: string; content?: string; display?: boolean } } | undefined>;
-  const ctx = { cwd: tempDir("pi-chalin-cross-language-"), hasUI: false, model: undefined, modelRegistry: { getAvailable: () => [] } };
-  const activeToolSet = ["chalin_project_discovery", "chalin_project_snapshot", "read", "bash", "grep", "find", "ls", "edit", "write", "chalin_interview", "chalin_route", "chalin_resume", "chalin_web_search", "chalin_memory_search"];
-  fake.activeTools = [...activeToolSet];
-  const inputResult = await inputHandler({ type: "input", text: prompt, source: "interactive" }, ctx);
-  assert.equal(inputResult.action, "continue");
-  assert.deepEqual(fake.activeTools, activeToolSet);
-  const promptResult = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt,
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-
-  assert.equal(promptResult?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(promptResult?.message?.content ?? "", /architecture docs context/i);
-  assert.match(promptResult?.message?.content ?? "", /compact docs-artifact preflight/i);
-  assert.match(promptResult?.message?.content ?? "", /Architecture docs decision/i);
-  assert.match(promptResult?.message?.content ?? "", /often benefit from chalin_route/i);
-  assert.match(promptResult?.message?.content ?? "", /choose the smallest agent set/i);
-  assert.match(promptResult?.message?.content ?? "", /review evidence\/contract\/gaps\/readback/i);
-  assert.match(promptResult?.message?.content ?? "", /not substitutes for route/i);
-  assert.match(promptResult?.message?.content ?? "", /The routed workflow still updates only the requested docs artifact/i);
-  assert.match(promptResult?.message?.content ?? "", /Cross-language\/runtime plans/i);
-  assert.match(promptResult?.message?.content ?? "", /ABI-stable fixed-width integers or bitfields/i);
-  assert.doesNotMatch(promptResult?.message?.content ?? "", /Direct source candidate from prompt operation `sync`/i);
-  assert.doesNotMatch(promptResult?.message?.content ?? "", /read `src\/sync\.ts` before any find/i);
-  assert.doesNotMatch(promptResult?.message?.content ?? "", /Use fallback `src\/sync\.js` only if that direct read fails/i);
-  assert.match(promptResult?.message?.content ?? "", /Native docs mode is only for bounded\/local docs artifacts/i);
-  assert.match(promptResult?.message?.content ?? "", /first read the requested artifact, package\/build\/test script if present/i);
-  assert.match(promptResult?.message?.content ?? "", /one concrete source surface per named responsibility/i);
-  assert.match(promptResult?.message?.content ?? "", /bare filenames or public symbols without paths/i);
-  assert.match(promptResult?.message?.content ?? "", /do not invent path candidates/i);
-  assert.match(promptResult?.message?.content ?? "", /TODO\/TBD\/WIP\/placeholder/i);
-  assert.doesNotMatch(promptResult?.message?.content ?? "", /at most 1 targeted `find` and 1 targeted `grep`/i);
-  assert.match(promptResult?.message?.content ?? "", /After evidence, write the docs next/i);
-  assert.match(promptResult?.message?.content ?? "", /One write, one readback, at most one corrective edit\+readback/i);
-  assert.match(promptResult?.message?.content ?? "", /Native final should be concise but complete/i);
-  assert.deepEqual(fake.activeTools, activeToolSet);
-
-  const broadNoPath = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Revisa este proyecto en profundidad y compara opciones de mejora de arquitectura con riesgos, tradeoffs y proximos pasos.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(broadNoPath?.message?.customType, "pi-chalin-compact-orchestration");
-  assert.match(broadNoPath?.message?.content ?? "", /chalin_route is useful/i);
-  assert.match(broadNoPath?.message?.content ?? "", /deep project analysis/i);
-  assert.deepEqual(fake.activeTools, activeToolSet);
-
-  const runtimePlan = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "En esta base multi-lenguaje inspirada en Bun, planifica una implementacion segura y cross-language para propagar un nuevo runtime flag `--deny-net` desde CLI Zig hasta el runtime Rust. No escribas codigo: actualiza docs/deny-net-plan.md con arquitectura, archivos tocados, riesgos, pasos incrementales y validacion.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(runtimePlan?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(runtimePlan?.message?.content ?? "", /Prompt paths: `docs\/deny-net-plan\.md`/i);
-  assert.match(runtimePlan?.message?.content ?? "", /exact evidence paths, requested artifact fields covered/i);
-  assert.match(runtimePlan?.message?.content ?? "", /architecture docs context/i);
-  assert.match(runtimePlan?.message?.content ?? "", /often benefit from chalin_route/i);
-  assert.match(runtimePlan?.message?.content ?? "", /Cross-language\/runtime plans/i);
-  assert.match(runtimePlan?.message?.content ?? "", /ABI-stable fixed-width integers or bitfields/i);
-  assert.match(runtimePlan?.message?.content ?? "", /compatibility wrappers/i);
-  assert.deepEqual(fake.activeTools, activeToolSet);
-
-  const rustWorkspaceFeature = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "En este workspace Rust, implementa build_cache_key en crates/cache-key/src/lib.rs y deja cargo test pasando.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(rustWorkspaceFeature?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(rustWorkspaceFeature?.message?.content ?? "", /minimal bounded path/i);
-  assert.match(rustWorkspaceFeature?.message?.content ?? "", /native work is usually enough/i);
-  assert.match(rustWorkspaceFeature?.message?.content ?? "", /LM finds broad ownership/i);
-  assert.deepEqual(fake.activeTools, activeToolSet);
-
-  const diagnosticPlan = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "En esta base C++ inspirada en LLVM/Clang, haz un analisis profundo de arquitectura para mover la responsabilidad de formateo de diagnostics fuera de Parser.cpp hacia DiagnosticEngine sin cambiar comportamiento. No implementes codigo: actualiza docs/diagnostic-refactor-plan.md con mapa de dependencias, plan por etapas, riesgos y pruebas.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(diagnosticPlan?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(diagnosticPlan?.message?.content ?? "", /Prompt paths: `docs\/diagnostic-refactor-plan\.md`/i);
-  assert.doesNotMatch(diagnosticPlan?.message?.content ?? "", /Prompt paths: `Parser\.cpp`/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /Named surfaces without exact paths: `Parser\.cpp`/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /Treat these as search keys, not files to read directly/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /A raw inventory or one targeted find\/rg is evidence/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /conventional path candidates are not/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /architecture docs context/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /Architecture docs decision/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /responsibility\/ownership maps/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /evidence-derived validation/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /problem taxonomy with evidence/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /data-flow\/coupling map/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /ownership\/coupling-by-responsibility table/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /design decision matrix with options\/recommendation/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /dependency delta to add\/remove includes\/imports\/modules/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /stage-0 golden-test capture/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /reverse-dependency check/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /target ownership\/layers/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /staged migration with exit criteria/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /risk register with severity and mitigation/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /rollback strategy/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /phase checklist/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /out-of-scope boundaries/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /literal TODO\/TBD\/WIP\/placeholder tokens/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /bare filenames or public symbols without paths/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /do not invent path candidates/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /targeted find\/rg by exact basename or symbol/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /Do not run wildcard `\*\*\/\*\.h`, `\*\*\/\*\.cpp`, docs, tests, or build-file searches/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /roughly 80-120 lines/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /often benefit from chalin_route/i);
-  assert.doesNotMatch(diagnosticPlan?.message?.content ?? "", /Diagnostic\/formatter planning|dependency-and-responsibility map/i);
-  assert.deepEqual(fake.activeTools, activeToolSet);
-
-  const codePrompt = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "Actualiza src/cache.ts y test/cache.test.ts para corregir la clave compuesta y deja bun test test/cache.test.ts pasando.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.equal(codePrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(codePrompt?.message?.content ?? "", /Code\+test decision/i);
-  assert.match(codePrompt?.message?.content ?? "", /route when evidence or the prompt indicates broader scope/i);
-  assert.match(codePrompt?.message?.content ?? "", /batch implementation\+tests/i);
-  assert.match(codePrompt?.message?.content ?? "", /skip grep\/find\/ls and manifest\/config/i);
-  assert.match(codePrompt?.message?.content ?? "", /do not grep the same symbol\/file/i);
-  assert.match(codePrompt?.message?.content ?? "", /one root-cause rerun/i);
-  assert.match(codePrompt?.message?.content ?? "", /For transformations/i);
-  assert.doesNotMatch(codePrompt?.message?.content ?? "", /Parsers\/scanners\/state machines/i);
-  assert.match(codePrompt?.message?.content ?? "", /No placeholders\/TODO/i);
-  assert.deepEqual(fake.activeTools, activeToolSet);
-});
 
 test("production autoroute prompts do not embed workflow fixture-specific shortcuts", () => {
   const productionPromptFiles = [
@@ -1741,43 +706,6 @@ test("direct bounded edits get one completion nudge after verification", async (
   assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-completion-nudge").length, 3, "new edits after verification require a new completion nudge");
 });
 
-test("package-local bounded direct mode stays austere before verification", async () => {
-  const fake = createFakePi();
-  registerPiChalin(fake.api as never);
-  const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<{ message?: { content?: string; customType?: string } } | undefined>;
-  const toolExecutionEnd = fake.handlers.get("tool_execution_end")?.[0] as (event: { toolName: string; isError?: boolean; args?: Record<string, unknown> }, ctx: unknown) => void;
-  const ctx = {
-    cwd: tempDir("pi-chalin-lean-package-local-"),
-    hasUI: false,
-    model: undefined,
-    modelRegistry: { getAvailable: () => [] },
-  };
-  const promptResult = await beforeAgentStart({
-    type: "before_agent_start",
-    prompt: "En este mini monorepo, implementa packages/math/src/clamp.ts y su test package-local. Mantén bun test en el root.",
-    systemPrompt: "base",
-    systemPromptOptions: {},
-  }, ctx);
-  assert.match(promptResult?.message?.content ?? "", /Package-local convention/i);
-  assert.match(promptResult?.message?.content ?? "", /read root `package\.json` \+ `packages\/<pkg>\/test\/<stem>\.test\.\*`/i);
-  assert.doesNotMatch(promptResult?.message?.content ?? "", /try before ls\/find/i);
-
-  toolExecutionEnd({ toolName: "chalin_project_discovery", isError: false }, ctx);
-  toolExecutionEnd({ toolName: "read", isError: false, args: { path: "package.json" } }, ctx);
-  toolExecutionEnd({ toolName: "read", isError: false, args: { path: "packages/math/src/clamp.ts" } }, ctx);
-  toolExecutionEnd({ toolName: "read", isError: false, args: { path: "packages/math/test/clamp.test.ts" } }, ctx);
-  toolExecutionEnd({ toolName: "edit", isError: false, args: { path: "packages/math/src/clamp.ts" } }, ctx);
-  toolExecutionEnd({ toolName: "edit", isError: false, args: { path: "packages/math/test/clamp.test.ts" } }, ctx);
-  assert.equal(fake.messages.some((item) => /pi-chalin-direct-locator-loop-nudge/.test((item.message as { customType?: string }).customType ?? "")), false);
-  assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-source-test-ready-nudge").length, 1);
-
-  toolExecutionEnd({ toolName: "bash", isError: false, args: { command: "bun test" } }, ctx);
-  const completion = fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-completion-nudge");
-  assert.equal(completion.length, 1);
-  const content = (completion[0]?.message as { content?: string }).content ?? "";
-  assert.match(content, /You changed files and ran `bun test`/i);
-  assert.match(content, /Final should be concise but complete/i);
-});
 
 test("bounded direct prompts do not hide orchestration tools programmatically", async () => {
   const fake = createFakePi();
@@ -2510,33 +1438,6 @@ test("direct inline-test review can satisfy coverage nudge without looping", asy
   assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-test-coverage-nudge").length, 1, "coverage review nudge is not repeated after inline-test readback");
 });
 
-test("direct docs-only evidence gathering does not use fixed evidence-count nudges", async () => {
-  const fake = createFakePi();
-  registerPiChalin(fake.api as never);
-  const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
-  const toolExecutionEnd = fake.handlers.get("tool_execution_end")?.[0] as (event: { toolName: string; isError?: boolean; args?: Record<string, unknown> }, ctx: unknown) => void;
-  const ctx = {
-    cwd: tempDir("pi-chalin-docs-evidence-nudge-"),
-    hasUI: false,
-    model: undefined,
-    modelRegistry: { getAvailable: () => [] },
-  };
-
-  const promptResult = await beforeAgentStart({ type: "before_agent_start", prompt: "actualiza docs/plan.md sin tocar codigo", systemPrompt: "base", systemPromptOptions: {} }, ctx) as { message?: { content?: string } };
-  assert.match(promptResult.message?.content ?? "", /do not answer with a route label/i);
-  assert.match(promptResult.message?.content ?? "", /first read the requested artifact, package\/test script, and one obvious source surface/i);
-  assert.match(promptResult.message?.content ?? "", /no ls\/find before those direct reads unless a read fails/i);
-  toolExecutionEnd({ toolName: "chalin_project_discovery", isError: false, args: {} }, ctx);
-  toolExecutionEnd({ toolName: "read", isError: false, args: { path: "src/a.ts" } }, ctx);
-  assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-docs-evidence-ready-nudge").length, 0);
-  toolExecutionEnd({ toolName: "read", isError: false, args: { path: "src/b.ts" } }, ctx);
-  assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-docs-evidence-ready-nudge").length, 0);
-  toolExecutionEnd({ toolName: "read", isError: false, args: { path: "src/c.ts" } }, ctx);
-  toolExecutionEnd({ toolName: "grep", isError: false, args: { path: "src", pattern: "x" } }, ctx);
-
-  const nudges = fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-docs-evidence-ready-nudge");
-  assert.equal(nudges.length, 0);
-});
 
 test("direct docs-only evidence loop nudges artifact write and readback", async () => {
   const fake = createFakePi();
@@ -2704,37 +1605,6 @@ test("direct docs shell guard is based on post-write docs mutation evidence", as
   assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-docs-only-shell-nudge").length, 1);
 });
 
-test("direct runbook docs use read evidence by default before writing", async () => {
-  const fake = createFakePi();
-  registerPiChalin(fake.api as never);
-  const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
-  const toolExecutionEnd = fake.handlers.get("tool_execution_end")?.[0] as (event: { toolName: string; isError?: boolean; args?: Record<string, unknown> }, ctx: unknown) => void;
-  const ctx = {
-    cwd: tempDir("pi-chalin-docs-prewrite-evidence-"),
-    hasUI: false,
-    model: undefined,
-    modelRegistry: { getAvailable: () => [] },
-  };
-
-  const result = await beforeAgentStart({ type: "before_agent_start", prompt: "Actualiza docs/runbook.md explicando cómo ejecutar tests, diagnosticar fallo de sync y rollback seguro usando evidencia del repo. No cambies código.", systemPrompt: "base", systemPromptOptions: {} }, ctx) as { message?: { content?: string } };
-  assert.match(result.message?.content ?? "", /Do not run shell before writing unless the user explicitly asks/i);
-  assert.match(result.message?.content ?? "", /package\.json\/source evidence is enough to document how to run tests/i);
-  toolExecutionEnd({ toolName: "read", isError: false, args: { path: "docs/runbook.md" } }, ctx);
-  toolExecutionEnd({ toolName: "read", isError: false, args: { path: "package.json" } }, ctx);
-  assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-docs-prewrite-shell-nudge").length, 0);
-  toolExecutionEnd({ toolName: "read", isError: false, args: { path: "src/sync.ts" } }, ctx);
-
-  const nudges = fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-docs-prewrite-shell-nudge");
-  assert.equal(nudges.length, 0);
-  const loopNudges = fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-docs-evidence-loop-nudge");
-  assert.equal(loopNudges.length, 1);
-  assert.match((loopNudges[0]?.message as { content?: string }).content ?? "", /next tool must write or edit the requested docs artifact/i);
-  assert.match((loopNudges[0]?.message as { content?: string }).content ?? "", /Stop ls\/find\/grep\/bash now/i);
-
-  toolExecutionEnd({ toolName: "read", isError: false, args: { path: "src/other.ts" } }, ctx);
-  assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-docs-prewrite-shell-nudge").length, 0);
-  assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-docs-evidence-loop-nudge").length, 1);
-});
 
 test("direct README docs-only prompts use readback verification", async () => {
   const fake = createFakePi();
@@ -3141,11 +2011,12 @@ test("chalin_route executes the workflow chosen by the primary Pi agent", async 
     "tool-1" as never,
     {
       task: "review this project",
-      topology: "chain",
+      topology: "sequential",
       steps: [
         { agent: "scout", task: "Map project structure and testing signals." },
         { agent: "reviewer", task: "Review architecture and risks using scout findings." },
       ],
+      expectedEffects: ["read", "verify"],
       risk: "low",
       reason: "Broad review benefits from isolated context gathering before review.",
     } as never,
@@ -3166,6 +2037,40 @@ test("chalin_route executes the workflow chosen by the primary Pi agent", async 
   assert.ok(statuses.some((status) => status.startsWith("chalin ")));
   assert.ok(statuses.some((status) => status.includes("review")));
   assert.ok(widgets.every((args) => args[1] === undefined), "chalin_route may clear the legacy widget but must not create a duplicate persistent widget");
+});
+
+test("chalin_route rejects public calls without expectedEffects", async () => {
+  const fake = createFakePi();
+  registerPiChalin(fake.api as never);
+  const tool = fake.tools.get("chalin_route") as unknown as { execute: (...args: never[]) => Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }> };
+
+  const result = await tool.execute(
+    "tool-1" as never,
+    {
+      task: "review this project",
+      topology: "sequential",
+      steps: [{ agent: "reviewer", task: "Review architecture and risks." }],
+      risk: "low",
+    } as never,
+    new AbortController().signal as never,
+    (() => {}) as never,
+    { cwd: tempDir("pi-chalin-tool-missing-effects-"), hasUI: false } as never,
+  );
+
+  const text = result.content.map((part) => part.text).join("\n");
+  assert.equal(result.isError, true);
+  assert.match(text, /requires expectedEffects/i);
+});
+
+test("chalin_route schema requires non-empty expectedEffects", () => {
+  const fake = createFakePi();
+  registerPiChalin(fake.api as never);
+  const tool = fake.tools.get("chalin_route") as unknown as {
+    parameters: { required?: string[]; properties?: Record<string, { minItems?: number }> };
+  };
+
+  assert.ok(tool.parameters.required?.includes("expectedEffects"));
+  assert.equal(tool.parameters.properties?.expectedEffects?.minItems, 1);
 });
 
 test("observability lifecycle spans cover run stage review repair checkpoint interview webfetch with redacted attributes", () => {
@@ -3478,14 +2383,14 @@ test("finalAnswerMaterial uses structured claim evidence without heading-specifi
 
 test("finalAnswerMaterial preserves single scout analysis instead of compact handoff", () => {
   const run = createRunState({
-    kind: "single-agent",
+    kind: "multi-agent-sequential",
     agents: ["scout"],
     risk: "low",
     ambiguity: "low",
     needsMemory: false,
     needsArtifacts: false,
     reason: "Deep project analysis.",
-    plan: { kind: "single", agent: "scout", task: "Analyze project.", budget: "deep" },
+    plan: { kind: "sequential", steps: [{ agent: "scout", task: "Analyze project.", budget: "deep" }] },
   }, tempDir("pi-chalin-single-final-material-"));
   run.status = "complete";
   run.steps[0]!.status = "complete";
@@ -3508,14 +2413,14 @@ test("finalAnswerMaterial preserves single scout analysis instead of compact han
 test("finalAnswerMaterial appends implementation evidence omitted by final reviewer wording", () => {
   const cwd = tempDir("pi-chalin-final-material-evidence-");
   const run = createRunState({
-    kind: "multi-agent-chain",
+    kind: "multi-agent-sequential",
     agents: ["scout", "worker", "reviewer"],
     risk: "medium",
     ambiguity: "low",
     needsMemory: false,
     needsArtifacts: true,
     reason: "Routed implementation.",
-    plan: { kind: "chain", steps: [{ agent: "scout", task: "Map." }, { agent: "worker", task: "Implement." }, { agent: "reviewer", task: "Review." }] },
+    plan: { kind: "sequential", steps: [{ agent: "scout", task: "Map." }, { agent: "worker", task: "Implement." }, { agent: "reviewer", task: "Review." }] },
   }, cwd);
   run.status = "complete";
   run.steps[0]!.status = "complete";
@@ -3623,14 +2528,14 @@ test("chalin_route rejects a second committed workflow in the same prompt", asyn
   await beforeAgentStart({ type: "before_agent_start", prompt: "review this project", systemPrompt: "base", systemPromptOptions: {} }, ctx);
   const first = await tool.execute(
     "tool-1" as never,
-    { task: "review this project", topology: "single", steps: [{ agent: "scout", task: "Map the project." }], risk: "low" } as never,
+    { task: "review this project", topology: "sequential", expectedEffects: ["read"], steps: [{ agent: "scout", task: "Map the project." }], risk: "low" } as never,
     new AbortController().signal as never,
     (() => {}) as never,
     ctx,
   );
   const second = await tool.execute(
     "tool-2" as never,
-    { task: "review this project again", topology: "single", steps: [{ agent: "reviewer", task: "Review the project." }], risk: "low" } as never,
+    { task: "review this project again", topology: "sequential", expectedEffects: ["read", "verify"], steps: [{ agent: "reviewer", task: "Review the project." }], risk: "low" } as never,
     new AbortController().signal as never,
     (() => {}) as never,
     ctx,
@@ -3646,14 +2551,14 @@ test("chalin_resume continues the latest persisted paused run instead of returni
   const tool = fake.tools.get("chalin_resume") as unknown as { execute: (...args: never[]) => Promise<{ content: Array<{ type: string; text: string }>; details: { run?: RunState } }> };
   const cwd = tempDir("pi-chalin-resume-tool-");
   const route: RunState["route"] = {
-    kind: "multi-agent-chain",
+    kind: "multi-agent-sequential",
     agents: ["scout", "reviewer"],
     risk: "low",
     ambiguity: "low",
     needsMemory: false,
     needsArtifacts: true,
     reason: "resume smoke",
-    plan: { kind: "chain", steps: [{ agent: "scout", task: "scan" }, { agent: "reviewer", task: "review" }] },
+    plan: { kind: "sequential", steps: [{ agent: "scout", task: "scan" }, { agent: "reviewer", task: "review" }] },
   };
   const paused = createRunState(route, cwd);
   paused.status = "paused";
@@ -3717,14 +2622,14 @@ test("/chalin shows active run status while subagents are running", async () => 
   const run: RunState = {
     id: "chalin-live",
     route: {
-      kind: "multi-agent-chain",
+      kind: "multi-agent-sequential",
       agents: ["scout", "reviewer"],
       risk: "low",
       ambiguity: "low",
       needsMemory: false,
       needsArtifacts: true,
       reason: "test active run",
-      plan: { kind: "chain", steps: [] },
+      plan: { kind: "sequential", steps: [] },
     },
     status: "running",
     startedAt: new Date().toISOString(),
@@ -3758,7 +2663,7 @@ test("/chalin shows active run status while subagents are running", async () => 
   assert.deepEqual(notifications, [], "active /chalin should open controls without printing into the transcript");
   assert.deepEqual(selectedTitles, ["Control"]);
   assert.ok(widgets.every((entry) => entry.content === undefined), "/chalin may clear the legacy widget but must not create a second persistent widget; the tool-result tree is the single live surface");
-  assert.match(statuses.join("\n"), /chalin .*chain.*reviewer 1\/2/);
+  assert.match(statuses.join("\n"), /chalin .*reviewer 1\/2/);
   assert.doesNotMatch(notifications.join("\n"), /Abort \(placeholder\)|run: chalin-live|step-2 running reviewer/);
 });
 
@@ -3769,14 +2674,14 @@ test("Live status opens a tabbed overlay with current subagent history", async (
   const run: RunState = {
     id: "chalin-live-overlay",
     route: {
-      kind: "multi-agent-parallel",
+      kind: "multi-agent-dag",
       agents: ["worker", "reviewer"],
       risk: "low",
       ambiguity: "low",
       needsMemory: true,
       needsArtifacts: true,
       reason: "test live overlay",
-      plan: { kind: "parallel", tasks: [] },
+      plan: { kind: "dag", stages: [] },
     },
     status: "running",
     startedAt: new Date().toISOString(),
@@ -4664,7 +3569,7 @@ test("/chalin settings exposes agents diagnostics and maintenance", async () => 
 test("summarizeRuntimeGuards surfaces policy, budget, worktree, and model fallback state", () => {
   const lines = summarizeRuntimeGuards({
     id: "chalin-test",
-    route: { kind: "multi-agent-parallel", agents: ["worker"], risk: "medium", ambiguity: "low", needsMemory: false, needsArtifacts: true, reason: "test" },
+    route: { kind: "multi-agent-dag", agents: ["worker"], risk: "medium", ambiguity: "low", needsMemory: false, needsArtifacts: true, reason: "test" },
     status: "complete",
     startedAt: new Date().toISOString(),
     steps: [{
@@ -4709,14 +3614,14 @@ test("summarizeRuntimeGuards surfaces policy, budget, worktree, and model fallba
 test("chalin_route renders a compact agent tree widget instead of a plain tool label", () => {
   const planned = formatChalinRoutePlanWidget({
     task: "revisa este proyecto en profundidad",
-    topology: "chain",
+    topology: "sequential",
     steps: [
       { agent: "scout", task: "Map project structure and high-signal files. Include package entrypoints and test commands." },
       { agent: "context-builder", task: "**Synthesize findings for the user:** include risks, modules, and validation." },
     ],
   });
 
-  assert.match(planned, /pi-chalin · chain/);
+  assert.match(planned, /pi-chalin · sequential/);
   assert.match(planned, /├ ○ scout — Map project structure/);
   assert.match(planned, /└ ○ context-builder — Synthesize findings for the user/);
   assert.doesNotMatch(planned, /^chalin_route$/m);
@@ -4725,7 +3630,7 @@ test("chalin_route renders a compact agent tree widget instead of a plain tool l
 
   const running = formatChalinRunWidget({
     id: "chalin-test",
-    route: { kind: "multi-agent-chain", agents: ["scout", "context-builder"], risk: "low", ambiguity: "low", needsMemory: false, needsArtifacts: true, reason: "test" },
+    route: { kind: "multi-agent-sequential", agents: ["scout", "context-builder"], risk: "low", ambiguity: "low", needsMemory: false, needsArtifacts: true, reason: "test" },
     status: "running",
     startedAt: new Date().toISOString(),
     warnings: [],

@@ -38,6 +38,61 @@ export interface DirectNudgePlan {
   kind: DirectNudgeKind;
   verificationCommand?: string;
   docsOnlyMutation: boolean;
+  judge: PolicyJudgeDecision;
+}
+
+export type PolicyJudgeNextAction = "continue" | "nudge" | "verify" | "repair" | "finalize" | "block";
+
+export interface SemanticPolicyJudgeRequest {
+  key: string;
+  turnId: number;
+  trigger: DirectNudgeKind | "uncertain-continue";
+  reasons: string[];
+  snapshot: DirectPolicySnapshot;
+}
+
+export interface SemanticPolicyJudgeResult {
+  nextAction: PolicyJudgeNextAction;
+  reason: string;
+  confidence: number;
+  blockingGap: boolean;
+  requiredEvidence: string[];
+  trace?: SemanticPolicyJudgeTrace;
+}
+
+export interface SemanticPolicyJudgeTrace {
+  mode: "tool-schema" | "json-fallback";
+  api: string;
+  provider: string;
+  model: string;
+  responseModel?: string;
+  responseId?: string;
+  stopReason: string;
+  usage: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    totalTokens: number;
+    cost: {
+      input: number;
+      output: number;
+      cacheRead: number;
+      cacheWrite: number;
+      total: number;
+    };
+  };
+}
+
+export interface PolicyJudgeDecision {
+  nextAction: PolicyJudgeNextAction;
+  reason: string;
+  confidence: number;
+  blockingGap: boolean;
+  nudgeKind?: DirectNudgeKind;
+  source?: "deterministic" | "semantic";
+  semanticReview?: SemanticPolicyJudgeRequest;
+  semanticResult?: SemanticPolicyJudgeResult;
 }
 
 export interface DirectToolCompletionAdapter {
@@ -64,11 +119,12 @@ export interface DirectToolCompletionAdapter {
   verificationCommand?: string;
   docsOnlyMutation: boolean;
   plan?: DirectNudgePlan;
+  policyJudge?: PolicyJudgeDecision;
 }
 
-type DirectNudgeFlag = Exclude<keyof DirectToolCompletionAdapter, "verificationCommand" | "docsOnlyMutation" | "plan">;
+type DirectNudgeFlag = Exclude<keyof DirectToolCompletionAdapter, "verificationCommand" | "docsOnlyMutation" | "plan" | "policyJudge">;
 
-export type DirectNudgeSelectorInput = Omit<DirectToolCompletionAdapter, "plan">;
+export type DirectNudgeSelectorInput = Omit<DirectToolCompletionAdapter, "plan" | "policyJudge">;
 
 interface ChalinRouteInvocation {
   id: number;
@@ -78,6 +134,7 @@ interface ChalinRouteInvocation {
 }
 
 interface DirectCompletionState {
+  turnId: number;
   docsOnlyPathPrompt: boolean;
   cwd?: string;
   toolEvents: DirectToolEvent[];
@@ -88,6 +145,8 @@ interface DirectCompletionState {
   readPaths: Set<string>;
   promptCodePaths: Set<string>;
   deletedPaths: Set<string>;
+  semanticJudgeRequestKeys: Set<string>;
+  semanticJudgeResults: SemanticPolicyJudgeResult[];
   mutationToolCount: number;
   evidenceToolCount: number;
   searchToolCount: number;
@@ -121,6 +180,29 @@ interface DirectCompletionState {
   postFailureEvidenceToolCount: number;
   postFailureEvidenceNudgeSent: boolean;
   nudgeSent: boolean;
+}
+
+export interface DirectPolicySnapshot {
+  cwd?: string;
+  docsOnlyPathPrompt: boolean;
+  mutationObserved: boolean;
+  sourceMutationObserved: boolean;
+  testMutationObserved: boolean;
+  verificationObserved: boolean;
+  verificationCommand?: string;
+  docsOnlyMutation: boolean;
+  changedPaths: string[];
+  readPaths: string[];
+  promptCodePaths: string[];
+  toolEvents: DirectToolEvent[];
+  counters: {
+    mutationToolCount: number;
+    evidenceToolCount: number;
+    searchToolCount: number;
+    readToolCount: number;
+    verificationAttemptCount: number;
+    postFailureEvidenceToolCount: number;
+  };
 }
 
 export interface LiveStepSessionRef {
@@ -166,6 +248,7 @@ const liveStepSessions = refBackedMap(runtimeState.liveStepSessions);
 const routeInvocations = refBackedArray(runtimeState.routeInvocations);
 const directCompletion = refBackedObject(runtimeState.directCompletion);
 const skillOverridesRef = runtimeState.skillOverrides;
+let directCompletionTurnSequence = directCompletion.turnId;
 
 function getRef<T>(ref: Ref.Ref<T>): T {
   return Effect.runSync(Ref.get(ref));
@@ -282,7 +365,7 @@ export function clearSkillOverridesForTurn(): void {
 
 export function beginChalinTurn(options: { prompt?: string; cwd?: string } = {}): void {
   resetRefBackedArray(routeInvocations);
-  replaceRefBackedObject(directCompletion, freshDirectCompletionState());
+  replaceRefBackedObject(directCompletion, freshDirectCompletionState(nextDirectCompletionTurnId()));
   clearSkillOverridesForTurn();
   directCompletion.cwd = options.cwd;
   directCompletion.promptCodePaths = new Set(promptPathTokens(options.prompt ?? "").filter(isCodeLikePath).map(normalizeWorkflowPath));
@@ -295,6 +378,30 @@ export function recordDirectToolStart(options: Omit<DirectToolEvent, "phase">): 
 
 export function getDirectToolEventsForTests(): DirectToolEvent[] {
   return directCompletion.toolEvents.map((event) => ({ ...event }));
+}
+
+export function getDirectPolicySnapshot(): DirectPolicySnapshot {
+  return directPolicySnapshot();
+}
+
+export function recordSemanticPolicyJudgeResult(result: SemanticPolicyJudgeResult): void {
+  directCompletion.semanticJudgeResults.push(result);
+  if (directCompletion.semanticJudgeResults.length > 20) {
+    directCompletion.semanticJudgeResults.splice(0, directCompletion.semanticJudgeResults.length - 20);
+  }
+}
+
+export function getSemanticPolicyJudgeResultsForTests(): SemanticPolicyJudgeResult[] {
+  return directCompletion.semanticJudgeResults.map(cloneSemanticPolicyJudgeResult);
+}
+
+export function isSemanticPolicyJudgeRequestFresh(request: SemanticPolicyJudgeRequest): boolean {
+  if (request.turnId !== directCompletion.turnId) return false;
+  if (!directCompletion.semanticJudgeRequestKeys.has(request.key)) return false;
+  return request.key === semanticPolicyJudgeRequestKey(request.trigger, {
+    verificationCommand: directCompletion.verificationCommand,
+    docsOnlyMutation: directDocsOnlyMutation(),
+  });
 }
 
 export function getDirectDerivedGapDiagnosticsForTests(): { weakTestCoverage: boolean; packageMetadata: boolean; parallelSurface?: { expected: string; actual: string[] } } {
@@ -615,20 +722,145 @@ const DIRECT_NUDGE_PRIORITY = [
 ] as const satisfies readonly (readonly [DirectNudgeKind, DirectNudgeFlag])[];
 
 export function selectDirectNudgePlan(input: DirectNudgeSelectorInput): DirectNudgePlan | undefined {
+  const judge = judgeDirectCompletionPolicy(input);
+  if (!judge.nudgeKind) return undefined;
+  return { kind: judge.nudgeKind, verificationCommand: input.verificationCommand, docsOnlyMutation: input.docsOnlyMutation, judge };
+}
+
+export function judgeDirectCompletionPolicy(input: DirectNudgeSelectorInput): PolicyJudgeDecision {
   for (const [kind, flag] of DIRECT_NUDGE_PRIORITY) {
-    if (input[flag]) return { kind, verificationCommand: input.verificationCommand, docsOnlyMutation: input.docsOnlyMutation };
+    if (input[flag]) return policyJudgeForKind(kind, input);
   }
-  return undefined;
+  return {
+    nextAction: "continue",
+    reason: "No direct-work policy gap is currently signaled by runtime telemetry.",
+    confidence: 0.65,
+    blockingGap: false,
+    source: "deterministic",
+  };
 }
 
 function directCompletionAdapter(raw: DirectNudgeSelectorInput): DirectToolCompletionAdapter {
-  const plan = selectDirectNudgePlan(raw);
-  const adapter: DirectToolCompletionAdapter = { ...raw, plan };
+  const policyJudge = withAutomaticSemanticPolicyReview(judgeDirectCompletionPolicy(raw), raw);
+  const plan = policyJudge.nudgeKind
+    ? { kind: policyJudge.nudgeKind, verificationCommand: raw.verificationCommand, docsOnlyMutation: raw.docsOnlyMutation, judge: policyJudge }
+    : undefined;
+  const adapter: DirectToolCompletionAdapter = { ...raw, plan, policyJudge };
   for (const flag of DIRECT_NUDGE_FLAGS) {
     adapter[flag] = false;
   }
   if (plan) adapter[directNudgeFlagForKind(plan.kind)] = true;
   return adapter;
+}
+
+function policyJudgeForKind(kind: DirectNudgeKind, input: DirectNudgeSelectorInput): PolicyJudgeDecision {
+  const command = input.verificationCommand ? ` Latest verification: ${input.verificationCommand}.` : "";
+  const docs = input.docsOnlyMutation ? " Docs-only mutation is active." : "";
+  const reasonByKind: Record<DirectNudgeKind, string> = {
+    "workspace-boundary": "A mutation or verification left the current workspace boundary.",
+    "docs-shell": "Docs-only work needs readback evidence rather than shell activity.",
+    "pre-mutation-verification": "Verification ran before any mutation, so it cannot prove the requested change.",
+    "post-verification-shell": "Shell use continued after passing verification without a new mutation.",
+    "post-verification-exploration": "Exploration continued after passing verification without a new mutation.",
+    "docs-evidence-loop": "Read-only docs evidence is looping without converging on the requested change.",
+    "locator-loop": "Locator/search activity is looping before mutation.",
+    "existing-file-rewrite": "An existing file was rewritten through a write path after it had been read.",
+    "mutation-loop": "Several mutations happened without verification.",
+    "source-and-test-ready": "Source and test changes are both present; verification should happen next.",
+    "verification-loop": "Verification attempts are repeating without a stable repair result.",
+    "post-failure-evidence": "Evidence gathering continued after failed verification without a repair.",
+    "progress": "First mutation observed; keep the loop bounded and move toward verification.",
+    "ready-to-verify": "Mutation is present and verification is still missing.",
+    "test-coverage": "Source changed without observed permanent test coverage review.",
+    "weak-test-coverage": "Changed tests look too weak to prove the requested behavior.",
+    "package-metadata": "Package metadata does not agree with delivered entrypoints or module shape.",
+    "parallel-surface": "A parallel source/test surface bypassed the expected canonical path.",
+    "failure": "A verification or shell command failed after mutation.",
+    "completion": "Latest mutation has passing verification and no currently blocking runtime gap.",
+  };
+  return {
+    nextAction: nextActionForNudge(kind),
+    reason: `${reasonByKind[kind]}${command}${docs}`.trim(),
+    confidence: confidenceForNudge(kind),
+    blockingGap: blockingGapForNudge(kind),
+    nudgeKind: kind,
+    source: "deterministic",
+  };
+}
+
+function withAutomaticSemanticPolicyReview(judge: PolicyJudgeDecision, input: DirectNudgeSelectorInput): PolicyJudgeDecision {
+  const request = semanticPolicyJudgeRequest(judge, input);
+  return request ? { ...judge, semanticReview: request } : judge;
+}
+
+function semanticPolicyJudgeRequest(judge: PolicyJudgeDecision, input: DirectNudgeSelectorInput): SemanticPolicyJudgeRequest | undefined {
+  const reasons = semanticPolicyJudgeReasons(judge, input);
+  if (reasons.length === 0) return undefined;
+  const trigger = judge.nudgeKind ?? "uncertain-continue";
+  const key = semanticPolicyJudgeRequestKey(trigger, {
+    verificationCommand: input.verificationCommand,
+    docsOnlyMutation: input.docsOnlyMutation,
+  });
+  if (directCompletion.semanticJudgeRequestKeys.has(key)) return undefined;
+  directCompletion.semanticJudgeRequestKeys.add(key);
+  return {
+    key,
+    turnId: directCompletion.turnId,
+    trigger,
+    reasons,
+    snapshot: directPolicySnapshot(),
+  };
+}
+
+function semanticPolicyJudgeRequestKey(trigger: SemanticPolicyJudgeRequest["trigger"], options: { verificationCommand?: string; docsOnlyMutation: boolean }): string {
+  return [
+    directCompletion.turnId,
+    trigger,
+    options.verificationCommand ?? "",
+    options.docsOnlyMutation ? "docs" : "code",
+    [...directCompletion.changedPaths].sort().join(","),
+    directCompletion.toolEvents.length,
+  ].join("|");
+}
+
+function semanticPolicyJudgeReasons(judge: PolicyJudgeDecision, input: DirectNudgeSelectorInput): string[] {
+  const reasons: string[] = [];
+  if (judge.nudgeKind && semanticJudgeRelevantNudges.has(judge.nudgeKind)) {
+    reasons.push(`deterministic ${judge.nudgeKind} depends on semantic quality or sufficiency, not only a mechanical invariant`);
+  }
+  if (input.shouldCompletionNudge && directCompletion.sourceMutationObserved && !directCompletion.testMutationObserved) {
+    reasons.push("completion was reached after source mutation without observed permanent test mutation");
+  }
+  return reasons;
+}
+
+const semanticJudgeRelevantNudges = new Set<DirectNudgeKind>([
+  "docs-evidence-loop",
+  "locator-loop",
+  "post-failure-evidence",
+  "test-coverage",
+  "weak-test-coverage",
+  "package-metadata",
+  "verification-loop",
+]);
+
+function nextActionForNudge(kind: DirectNudgeKind): PolicyJudgeNextAction {
+  if (kind === "completion") return "finalize";
+  if (kind === "ready-to-verify" || kind === "source-and-test-ready" || kind === "pre-mutation-verification") return "verify";
+  if (kind === "failure" || kind === "post-failure-evidence" || kind === "verification-loop") return "repair";
+  if (kind === "workspace-boundary" || kind === "parallel-surface") return "block";
+  return "nudge";
+}
+
+function confidenceForNudge(kind: DirectNudgeKind): number {
+  if (kind === "completion" || kind === "workspace-boundary" || kind === "failure") return 0.9;
+  if (kind === "weak-test-coverage" || kind === "package-metadata" || kind === "parallel-surface") return 0.82;
+  if (kind === "progress") return 0.58;
+  return 0.72;
+}
+
+function blockingGapForNudge(kind: DirectNudgeKind): boolean {
+  return kind !== "progress" && kind !== "completion";
 }
 
 function directNudgeFlagForKind(kind: DirectNudgeKind): DirectNudgeFlag {
@@ -720,7 +952,7 @@ export function resetRuntimeState(): void {
   setLatestRun(undefined);
   liveStepSessions.clear();
   resetRefBackedArray(routeInvocations);
-  replaceRefBackedObject(directCompletion, freshDirectCompletionState());
+  replaceRefBackedObject(directCompletion, freshDirectCompletionState(nextDirectCompletionTurnId()));
   clearSkillOverridesForTurn();
 }
 
@@ -728,8 +960,14 @@ function liveStepKey(runId: string, stepId: string): string {
   return `${runId}:${stepId}`;
 }
 
-function freshDirectCompletionState(): DirectCompletionState {
+function nextDirectCompletionTurnId(): number {
+  directCompletionTurnSequence += 1;
+  return directCompletionTurnSequence;
+}
+
+function freshDirectCompletionState(turnId = 0): DirectCompletionState {
   return {
+    turnId,
     docsOnlyPathPrompt: false,
     cwd: undefined,
     toolEvents: [],
@@ -740,6 +978,8 @@ function freshDirectCompletionState(): DirectCompletionState {
     readPaths: new Set(),
     promptCodePaths: new Set(),
     deletedPaths: new Set(),
+    semanticJudgeRequestKeys: new Set(),
+    semanticJudgeResults: [],
     mutationToolCount: 0,
     evidenceToolCount: 0,
     searchToolCount: 0,
@@ -773,6 +1013,47 @@ function freshDirectCompletionState(): DirectCompletionState {
     postFailureEvidenceToolCount: 0,
     postFailureEvidenceNudgeSent: false,
     nudgeSent: false,
+  };
+}
+
+function cloneSemanticPolicyJudgeResult(result: SemanticPolicyJudgeResult): SemanticPolicyJudgeResult {
+  return {
+    ...result,
+    requiredEvidence: [...result.requiredEvidence],
+    trace: result.trace
+      ? {
+        ...result.trace,
+        usage: {
+          ...result.trace.usage,
+          cost: { ...result.trace.usage.cost },
+        },
+      }
+      : undefined,
+  };
+}
+
+function directPolicySnapshot(): DirectPolicySnapshot {
+  return {
+    cwd: directCompletion.cwd,
+    docsOnlyPathPrompt: directCompletion.docsOnlyPathPrompt,
+    mutationObserved: directCompletion.mutationObserved,
+    sourceMutationObserved: directCompletion.sourceMutationObserved,
+    testMutationObserved: directCompletion.testMutationObserved,
+    verificationObserved: directCompletion.verificationObserved,
+    verificationCommand: directCompletion.verificationCommand,
+    docsOnlyMutation: directDocsOnlyMutation(),
+    changedPaths: [...directCompletion.changedPaths].sort(),
+    readPaths: [...directCompletion.readPaths].sort(),
+    promptCodePaths: [...directCompletion.promptCodePaths].sort(),
+    toolEvents: directCompletion.toolEvents.slice(-16).map((event) => ({ ...event })),
+    counters: {
+      mutationToolCount: directCompletion.mutationToolCount,
+      evidenceToolCount: directCompletion.evidenceToolCount,
+      searchToolCount: directCompletion.searchToolCount,
+      readToolCount: directCompletion.readToolCount,
+      verificationAttemptCount: directCompletion.verificationAttemptCount,
+      postFailureEvidenceToolCount: directCompletion.postFailureEvidenceToolCount,
+    },
   };
 }
 

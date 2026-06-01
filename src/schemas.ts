@@ -1,4 +1,4 @@
-import type { SkillTraceEvent, StructuredTraceSpan, TokenomicsSummary } from "./observability.ts";
+import type { SkillTraceEvent, StructuredTraceSpan, TokenomicsSummary, TrajectoryEvent } from "./observability.ts";
 
 export const AGENT_SCOPES = ["built-in", "project", "user"] as const;
 export type AgentScope = (typeof AGENT_SCOPES)[number];
@@ -53,6 +53,10 @@ export interface AgentMemoryPolicy {
   categories: string[];
 }
 
+export interface AgentBudgetMetadata {
+  baseToolCalls?: number;
+}
+
 export interface AgentDefinition {
   name: string;
   scope: AgentScope;
@@ -61,6 +65,7 @@ export interface AgentDefinition {
   description: string;
   model: "inherit" | string;
   thinking?: AgentThinkingLevel;
+  budget?: AgentBudgetMetadata;
   tools: string[];
   memory: AgentMemoryPolicy;
   systemPrompt: string;
@@ -125,15 +130,14 @@ export interface AgentCatalogDiagnostics {
 
 export type RouteKind =
   | "bypass"
-  | "single-agent"
-  | "multi-agent-chain"
-  | "multi-agent-parallel"
+  | "multi-agent-sequential"
   | "multi-agent-dag"
-  | "memory-only"
   | "ask-user";
 
 export type RouteRisk = "low" | "medium" | "high" | "critical";
 export type RouteAmbiguity = "low" | "medium" | "high";
+export const ROUTE_EXPECTED_EFFECTS = ["read", "write", "verify"] as const;
+export type RouteExpectedEffect = (typeof ROUTE_EXPECTED_EFFECTS)[number];
 
 export interface AgentStep {
   id?: string;
@@ -150,9 +154,7 @@ export interface AgentStage {
 export type ToolBudgetProfile = "tight" | "normal" | "deep" | "extended";
 
 export type RoutePlan =
-  | { kind: "single"; agent: string; task: string; budget?: ToolBudgetProfile }
-  | { kind: "chain"; steps: AgentStep[] }
-  | { kind: "parallel"; tasks: AgentStep[] }
+  | { kind: "sequential"; steps: AgentStep[] }
   | { kind: "dag"; stages: AgentStage[] };
 
 export interface RouteDecision {
@@ -162,6 +164,7 @@ export interface RouteDecision {
   ambiguity: RouteAmbiguity;
   needsMemory: boolean;
   needsArtifacts: boolean;
+  expectedEffects?: RouteExpectedEffect[];
   reason: string;
   plan?: RoutePlan;
 }
@@ -178,7 +181,7 @@ export type RunStepStatus = "pending" | "running" | "complete" | "failed" | "pau
 export type LegacyRunStatus = RunStatus | "budget-capped";
 export type LegacyRunStepStatus = RunStepStatus | "budget-capped";
 export type RunStepPauseReason = "aborted" | "idle-stall";
-export type CheckpointKind = "budget-cap" | "needs-continuation" | "low-signal" | "awaiting-review" | "split-recommended";
+export type CheckpointKind = "budget-cap" | "needs-continuation" | "low-signal" | "awaiting-review" | "split-recommended" | "handoff-contract";
 export type CheckpointContinuation = "continue" | "review" | "split" | "resume";
 
 export interface CheckpointInfo {
@@ -260,10 +263,33 @@ export interface EvidenceClaim {
   sourceAgent?: string;
 }
 
+export const REVIEWER_VERDICT_VALUES = ["pass", "fail", "gap"] as const;
+export type ReviewerVerdictValue = (typeof REVIEWER_VERDICT_VALUES)[number];
+
+export interface ReviewerVerdict {
+  verdict: ReviewerVerdictValue;
+  blockingFindings: string[];
+  missingCoverage: string[];
+  evidence: string[];
+  requiredRepair?: string;
+}
+
+export interface AgentHandoff {
+  summary: string;
+  changedFiles: string[];
+  verification: string[];
+  evidenceClaims: EvidenceClaim[];
+  risks: string[];
+  nextActions: string[];
+}
+
 export interface AgentOutput {
   agent: string;
   text: string;
   handoff?: string;
+  structuredHandoff?: AgentHandoff;
+  handoffContract?: "structured" | "legacy-degraded" | "missing";
+  reviewerVerdict?: ReviewerVerdict;
   memoryCandidates: MemoryCandidate[];
   claims?: EvidenceClaim[];
   raw: string;
@@ -350,6 +376,7 @@ export interface RunStepMetrics {
   };
   tokenomics?: TokenomicsSummary;
   spans?: StructuredTraceSpan[];
+  trajectoryEvents?: TrajectoryEvent[];
   skills?: string[];
   skillEvents?: SkillTraceEvent[];
 }
@@ -439,6 +466,7 @@ export interface RunState {
     filesRead?: string[];
     tokenomics?: TokenomicsSummary;
     spans?: StructuredTraceSpan[];
+    trajectoryEvents?: TrajectoryEvent[];
     skillEvents?: SkillTraceEvent[];
     checkpoints?: RunMetricsCheckpoint;
   };
