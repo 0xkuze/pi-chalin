@@ -40,7 +40,7 @@ export function formatChalinRoutePlanWidget(params: ChalinRouteToolParams): stri
   return [
     `pi-chalin · ${title}`,
     agents.length ? `agents: ${compactAgentPath(agents)} · 0/${steps.length || 1}` : "agents: memory · 0/1",
-    ...steps.slice(0, 8).map((step, index) => `${treePrefix(index, steps.length)} ${statusGlyph(step.status ?? "pending")} ${step.agent} — ${truncate(step.task ?? "waiting", 76)}`),
+    ...steps.slice(0, 8).map((step, index) => `${treePrefix(index, steps.length)} ${statusGlyph(step.status ?? "pending")} ${step.agent} — ${taskTitle(step.task)}`),
     steps.length > 8 ? `└ … +${steps.length - 8} more` : undefined,
   ].filter((line): line is string => Boolean(line)).join("\n");
 }
@@ -61,7 +61,7 @@ export function formatChalinRunWidgetFromDetails(details: ChalinRouteWidgetDetai
   const activeLabel = run.status === "failed" ? "blocked" : "current";
   return [
     `pi-chalin · ${title} · ${displayStatus} · ${completed}/${steps.length || 1}`,
-    active ? `${activeLabel}: ${active.agent} — ${truncate(active.error ?? active.task ?? statusLabel(active.status ?? "pending"), 86)}` : undefined,
+    active ? `${activeLabel}: ${active.agent} — ${active.error ? truncate(active.error, 86) : taskTitle(active.task ?? statusLabel(active.status ?? "pending"))}` : undefined,
     ...steps.slice(0, 8).map((step, index) => formatWidgetStep(step, index, steps.length, run.status)),
     steps.length > 8 ? `└ … +${steps.length - 8} more` : undefined,
     formatWidgetGuards(run.metrics),
@@ -130,16 +130,16 @@ function plannedWidgetSteps(params: ChalinRouteToolParams): ChalinRouteWidgetSte
 
 function formatWidgetStep(step: ChalinRouteWidgetStep, index: number, total: number, runStatus?: RunStatus): string {
   const detail = step.status === "complete"
-    ? step.handoff || "done"
+    ? taskTitle(step.task ?? "done")
     : step.status === "failed"
       ? step.error || "failed"
-      : step.status === "paused"
-        ? step.error || "paused"
-        : isCheckpointStepStatus(step.status)
-          ? step.handoff || step.error || step.task || "checkpoint saved"
+    : step.status === "paused"
+      ? step.error || "paused"
+      : isCheckpointStepStatus(step.status)
+          ? taskTitle(step.task ?? step.error ?? "checkpoint saved")
           : step.status === "pending" && runStatus === "failed"
             ? "skipped after failure"
-          : step.task || "working";
+          : taskTitle(step.task ?? "working");
   const suffix = isCheckpointStepStatus(step.status) ? ` · ${checkpointLabel(step.checkpoint).replace(/^checkpointed · /, "")}` : "";
   const skills = step.skills?.length ? ` · skills:${step.skills.join(",")}` : "";
   return `${treePrefix(index, total)} ${statusGlyph(step.status)} ${step.agent}${skills} — ${truncate(detail, 88)}${suffix}`;
@@ -236,4 +236,15 @@ export function routeIntent(route: RouteDecision): string {
 function truncate(text: string, max: number): string {
   const normalized = text.replace(/\s+/g, " ").trim();
   return normalized.length <= max ? normalized : `${normalized.slice(0, max - 1)}…`;
+}
+
+function taskTitle(task: string | undefined, max = 64): string {
+  const normalized = (task || "working")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/[*_#>]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const [firstClause = normalized] = normalized.split(/\s*(?:[.;:]\s+|\s+-\s+|\s+—\s+|\s+and\s+|\s+y\s+|\s+para\s+|\s+to\s+|\s+include\b|\s+including\b|\s+incluye\b|\s+identificar\b|\s+identify\b|\s+con\s+|\s+with\s+)/i);
+  return truncate(firstClause || normalized || "working", max);
 }

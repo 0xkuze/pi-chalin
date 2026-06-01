@@ -3638,8 +3638,8 @@ test("chalin result widget counts checkpointed steps as progressed work", () => 
   const preview = formatChalinRunWidget(run);
 
   assert.match(preview, /1\/2/);
-  assert.match(preview, /✓ scout/);
-  assert.match(preview, /Project mapped enough to continue/);
+  assert.match(preview, /✓ scout — Map project/);
+  assert.doesNotMatch(preview, /Project mapped enough to continue/);
   assert.match(preview, /budget limit reached/);
 });
 
@@ -4427,15 +4427,17 @@ test("chalin_route renders a compact agent tree widget instead of a plain tool l
     task: "revisa este proyecto en profundidad",
     topology: "chain",
     steps: [
-      { agent: "scout", task: "Map project structure and high-signal files." },
-      { agent: "context-builder", task: "Synthesize findings for the user." },
+      { agent: "scout", task: "Map project structure and high-signal files. Include package entrypoints and test commands." },
+      { agent: "context-builder", task: "**Synthesize findings for the user:** include risks, modules, and validation." },
     ],
   });
 
   assert.match(planned, /pi-chalin · chain/);
-  assert.match(planned, /├ ○ scout/);
-  assert.match(planned, /└ ○ context-builder/);
+  assert.match(planned, /├ ○ scout — Map project structure/);
+  assert.match(planned, /└ ○ context-builder — Synthesize findings for the user/);
   assert.doesNotMatch(planned, /^chalin_route$/m);
+  assert.doesNotMatch(planned, /\*\*/);
+  assert.doesNotMatch(planned, /Include package entrypoints/);
 
   const running = formatChalinRunWidget({
     id: "chalin-test",
@@ -4444,14 +4446,17 @@ test("chalin_route renders a compact agent tree widget instead of a plain tool l
     startedAt: new Date().toISOString(),
     warnings: [],
     steps: [
-      { id: "step-1", agent: "scout", task: "Map project.", status: "complete", output: { agent: "scout", text: "mapped", handoff: "src/index.ts is the entrypoint", memoryCandidates: [], raw: "mapped", warnings: [] } },
-      { id: "step-2", agent: "context-builder", task: "Synthesize.", status: "running" },
+      { id: "step-1", agent: "scout", task: "Map project structure and high-signal files. Include package entrypoints.", status: "complete", output: { agent: "scout", text: "mapped", handoff: "src/index.ts is the entrypoint", memoryCandidates: [], raw: "mapped", warnings: [] } },
+      { id: "step-2", agent: "context-builder", task: "Synthesize findings for the user. Include risks and validation.", status: "running" },
     ],
   });
 
   assert.match(running, /pi-chalin · understand · running · 1\/2/);
-  assert.match(running, /├ ✓ scout/);
-  assert.match(running, /└ ◆ context-builder/);
+  assert.match(running, /current: context-builder — Synthesize findings for the user/);
+  assert.match(running, /├ ✓ scout — Map project structure/);
+  assert.match(running, /└ ◆ context-builder — Synthesize findings for the user/);
+  assert.doesNotMatch(running, /src\/index\.ts is the entrypoint/);
+  assert.doesNotMatch(running, /Include risks/);
   assert.match(running, /tools: 0 · guards: checking/);
 });
 
@@ -4476,9 +4481,9 @@ test("chalin_route marks budget checkpoint handoff steps as checkpointed, not pe
   });
 
   assert.match(running, /running · 1\/2/);
-  assert.match(running, /├ ✓ scout — README and docs mapped/);
+  assert.match(running, /├ ✓ scout — Map project/);
   assert.match(running, /budget limit reached/);
-  assert.match(running, /└ ◆ context-builder/);
+  assert.match(running, /└ ◆ context-builder — Analyze backend/);
   assert.doesNotMatch(running, /├ ○ scout/);
 });
 
