@@ -310,10 +310,17 @@ export interface WorkflowAgentStepHistory {
   status?: string;
   model?: string;
   thinkingLevel?: string;
+  metrics?: WorkflowAgentStepVerificationMetrics;
   handoffChars: number;
   errorChars: number;
   handoffSnippet?: string;
   errorSnippet?: string;
+}
+
+export interface WorkflowAgentStepVerificationMetrics {
+  shellCommands?: string[];
+  postMutationShellCommands?: number;
+  successfulPostMutationShellCommands?: number;
 }
 
 export interface WorkflowBlindJudgeStability {
@@ -2615,7 +2622,7 @@ function detectRoutedWorkflowVerification(stdout: string): { passed: boolean; ca
   for (const run of history.runs) {
     const looksLikeChalinRoute = run.toolName === "chalin_route"
       || (run.runId ? /^chalin-/.test(run.runId) : false)
-      || /\b(?:multi-agent|single-agent|memory-only)\b/i.test(run.routeKind ?? "");
+      || /\bmulti-agent\b/i.test(run.routeKind ?? "");
     if (!looksLikeChalinRoute) continue;
     const key = run.runId ?? JSON.stringify({ routeKind: run.routeKind, agents: run.agents, steps: run.steps.map((step) => step.agent) });
     const existing = byRun.get(key);
@@ -2627,7 +2634,7 @@ function detectRoutedWorkflowVerification(stdout: string): { passed: boolean; ca
   for (const run of byRun.values()) {
     for (const step of run.steps) {
       const text = `${step.handoffSnippet ?? ""}\n${step.errorSnippet ?? ""}`;
-      if (!routedVerificationTextLooksExecuted(text)) continue;
+      if (!routedVerificationStepLooksExecuted(step) && !routedVerificationTextLooksExecuted(text)) continue;
       calls += 1;
       passed = true;
     }
@@ -2636,9 +2643,19 @@ function detectRoutedWorkflowVerification(stdout: string): { passed: boolean; ca
   return { passed, calls };
 }
 
+function routedVerificationStepLooksExecuted(step: WorkflowAgentStepHistory): boolean {
+  const metrics = step.metrics;
+  if (!metrics) return false;
+  const verificationCommands = (metrics.shellCommands ?? []).filter(isVerificationCommand);
+  if (verificationCommands.length === 0) return false;
+  const postMutationShellCommands = metrics.postMutationShellCommands ?? 0;
+  const successfulPostMutationShellCommands = metrics.successfulPostMutationShellCommands ?? 0;
+  return postMutationShellCommands > 0 && successfulPostMutationShellCommands >= postMutationShellCommands;
+}
+
 function routedVerificationTextLooksExecuted(text: string): boolean {
   if (!isVerificationCommand(text)) return false;
-  return /\b(?:\d+\s+passed|0\s+failed|all\s+(?:tests?|assertions?)\s+(?:pass|passed|passing)|(?:all\s+\d+|\d+\s*\/\s*\d+)\s+assertions?\s+(?:pass|passed|passing)|tests?\s+(?:pass|passed|passing|verdes)|verification:\s*`?[^`\n]*(?:test|typecheck|tsc|eslint)[^`\n]*`?\s*[—:-]\s*(?:pass|passed|\d+\s+passed|ok)|(?:exits?|exit(?:ed)?)\s+0|exit:\s*0|passed,\s*0\s+failed)\b/i.test(text);
+  return /\b(?:\d+\s+passed|0\s+failed|all\s+(?:tests?|assertions?)\s+(?:pass|passed|passing)|(?:all\s+\d+|\d+\s*\/\s*\d+)\s+assertions?\s+(?:pass|passed|passing)|tests?\s+(?:pass|passed|passing|verdes)|verification:\s*`?[^`\n]*(?:test|typecheck|tsc|eslint|make\s+test|cargo\s+test|pytest|vitest|jest)[^`\n]*`?\s*(?:[—:-]\s*)?(?:pass|passed|\d+\s+passed|ok|success(?:ful(?:ly)?)?|succeeded|pas[oó]|ejecutad[oa]\s+correctamente)|(?:verification\s+command\s+run|ran|executed|ejecut[oó]|corr[ií])\s*:?\s*`?[^`\n]*(?:test|typecheck|tsc|eslint|make\s+test|cargo\s+test|pytest|vitest|jest)[^`\n]*`?[\s\S]{0,180}\b(?:verdict:\s*)?(?:pass|passed|success(?:ful(?:ly)?)?|succeeded|pas[oó]|correctamente)|(?:exits?|exit(?:ed)?)\s+0|exit:\s*0|passed,\s*0\s+failed)(?=$|[\s.;,)\]\n])/i.test(text);
 }
 
 function syntheticPassingSummary(evalCase: WorkflowEvalCase): string {
@@ -2741,7 +2758,7 @@ export function workflowChalinRouteAgentMetrics(stdout: string): { runs: number;
   for (const run of history.runs) {
     const looksLikeChalinRoute = run.toolName === "chalin_route"
       || (run.runId ? /^chalin-/.test(run.runId) : false)
-      || /\b(?:multi-agent|single-agent|memory-only)\b/i.test(run.routeKind ?? "");
+      || /\bmulti-agent\b/i.test(run.routeKind ?? "");
     if (!looksLikeChalinRoute) continue;
     const key = run.runId ?? JSON.stringify({ routeKind: run.routeKind, agents: run.agents, steps: run.steps.map((step) => step.agent) });
     const existing = byRun.get(key);
@@ -2836,12 +2853,14 @@ function normalizeWorkflowAgentRun(
       ?? stringValue(output?.text)
       ?? stringValue(output?.raw);
     const error = stringValue(step.error);
+    const metrics = workflowAgentStepVerificationMetrics(step.metrics);
     return {
       index: stepIndex,
       agent: stringValue(step.agent),
       status: stringValue(step.status),
       model: stringValue(step.model),
       thinkingLevel: stringValue(step.thinkingLevel),
+      ...(metrics ? { metrics } : {}),
       handoffChars: handoff?.length ?? 0,
       errorChars: error?.length ?? 0,
       handoffSnippet: handoff ? snippet(handoff, maxTextChars) : undefined,
@@ -2863,6 +2882,19 @@ function normalizeWorkflowAgentRun(
     omittedSteps: Math.max(0, stepRecords.length - steps.length),
     steps,
   };
+}
+
+function workflowAgentStepVerificationMetrics(value: unknown): WorkflowAgentStepVerificationMetrics | undefined {
+  if (!isRecord(value)) return undefined;
+  const shellCommands = stringArrayValue(value.shellCommands).slice(0, 30);
+  const postMutationShellCommands = positiveIntegerValue(value.postMutationShellCommands);
+  const successfulPostMutationShellCommands = positiveIntegerValue(value.successfulPostMutationShellCommands);
+  const metrics: WorkflowAgentStepVerificationMetrics = {
+    ...(shellCommands.length ? { shellCommands } : {}),
+    ...(postMutationShellCommands > 0 ? { postMutationShellCommands } : {}),
+    ...(successfulPostMutationShellCommands > 0 ? { successfulPostMutationShellCommands } : {}),
+  };
+  return Object.keys(metrics).length > 0 ? metrics : undefined;
 }
 
 function workflowAgentRunParts(source: Record<string, unknown>): {
@@ -3502,6 +3534,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function numberValue(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function positiveIntegerValue(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }
 
 function stringValue(value: unknown): string | undefined {

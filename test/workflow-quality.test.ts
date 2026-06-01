@@ -3270,7 +3270,7 @@ test("workflow agent history records structured chalin run steps with bounded sn
       toolCallId: "call-1",
       result: {
         details: {
-          route: { kind: "multi-agent-chain", agents: ["scout", "reviewer"] },
+          route: { kind: "multi-agent-sequential", agents: ["scout", "reviewer"] },
           approval: { action: "allow" },
           run: {
             id: "run-1",
@@ -3278,7 +3278,18 @@ test("workflow agent history records structured chalin run steps with bounded sn
             logsPath: "/tmp/chalin-run.log",
             metrics: { usage: { totalTokens: 123 } },
             steps: [
-              { agent: "scout", status: "complete", model: "m1", thinkingLevel: "minimal", output: { handoff: "Scout ".repeat(20) } },
+              {
+                agent: "scout",
+                status: "complete",
+                model: "m1",
+                thinkingLevel: "minimal",
+                metrics: {
+                  shellCommands: ["cargo test -p cache-key"],
+                  postMutationShellCommands: 1,
+                  successfulPostMutationShellCommands: 1,
+                },
+                output: { handoff: "Scout ".repeat(20) },
+              },
               { agent: "reviewer", status: "failed", model: "m2", error: "review failed because invariant was missing" },
             ],
           },
@@ -3308,13 +3319,18 @@ test("workflow agent history records structured chalin run steps with bounded sn
   assert.equal(history.runs[0]?.toolName, "chalin_route");
   assert.equal(history.runs[0]?.toolCallId, "call-1");
   assert.equal(history.runs[0]?.runId, "run-1");
-  assert.equal(history.runs[0]?.routeKind, "multi-agent-chain");
+  assert.equal(history.runs[0]?.routeKind, "multi-agent-sequential");
   assert.deepEqual(history.runs[0]?.agents, ["scout", "reviewer"]);
   assert.equal(history.runs[0]?.approvalAction, "allow");
   assert.equal(history.runs[0]?.logsPath, "/tmp/chalin-run.log");
   assert.deepEqual(history.runs[0]?.metrics, { usage: { totalTokens: 123 } });
   assert.equal(history.runs[0]?.totalSteps, 2);
   assert.equal(history.runs[0]?.steps[0]?.agent, "scout");
+  assert.deepEqual(history.runs[0]?.steps[0]?.metrics, {
+    shellCommands: ["cargo test -p cache-key"],
+    postMutationShellCommands: 1,
+    successfulPostMutationShellCommands: 1,
+  });
   assert.equal(history.runs[0]?.steps[0]?.handoffChars, "Scout ".repeat(20).length);
   assert.equal(history.runs[0]?.steps[0]?.handoffSnippet?.length, 24);
   assert.equal(history.runs[0]?.steps[1]?.errorSnippet, "review failed because i…");
@@ -3711,7 +3727,7 @@ test("workflow runner only treats terminal assistant events as final answers", (
 test("workflow eval uses executable chalin_route material as effective final answer", () => {
   const routeMaterial = "Final answer material:\nChanged: docs/plan.md\nVerification: docs read\nNotes: source evidence covered.";
   const stdout = [
-    JSON.stringify({ type: "tool_execution_start", toolName: "chalin_route", args: { topology: "chain" } }),
+    JSON.stringify({ type: "tool_execution_start", toolName: "chalin_route", args: { topology: "sequential" } }),
     JSON.stringify({ type: "tool_execution_end", toolName: "chalin_route", isError: false, result: { content: [{ type: "text", text: routeMaterial }] } }),
   ].join("\n");
 
@@ -3723,7 +3739,7 @@ test("workflow eval uses executable chalin_route material as effective final ans
 
 test("workflow diagnostics count tool execution updates as progress, not duplicate calls", () => {
   const chalinRouteDetails = {
-    route: { kind: "multi-agent-chain", agents: ["scout", "planner", "worker"] },
+    route: { kind: "multi-agent-sequential", agents: ["scout", "planner", "worker"] },
     run: {
       id: "chalin-test-run",
       status: "complete",
@@ -3735,9 +3751,9 @@ test("workflow diagnostics count tool execution updates as progress, not duplica
     },
   };
   const stdout = [
-    JSON.stringify({ type: "tool_execution_start", toolName: "chalin_route", args: { topology: "chain", task: "docs" } }),
-    JSON.stringify({ type: "tool_execution_update", toolName: "chalin_route", args: { topology: "chain", task: "docs" } }),
-    JSON.stringify({ type: "tool_execution_update", toolName: "chalin_route", args: { topology: "chain", task: "docs" } }),
+    JSON.stringify({ type: "tool_execution_start", toolName: "chalin_route", args: { topology: "sequential", task: "docs" } }),
+    JSON.stringify({ type: "tool_execution_update", toolName: "chalin_route", args: { topology: "sequential", task: "docs" } }),
+    JSON.stringify({ type: "tool_execution_update", toolName: "chalin_route", args: { topology: "sequential", task: "docs" } }),
     JSON.stringify({ type: "tool_execution_end", toolName: "chalin_route", isError: false, result: { content: [{ type: "text", text: "Final answer material: done" }], details: chalinRouteDetails } }),
     JSON.stringify({ type: "tool_execution_start", toolName: "subagent", args: { description: "analyze docs" } }),
     JSON.stringify({ type: "tool_execution_end", toolName: "subagent", isError: false, result: { content: [{ type: "text", text: "done" }] } }),
@@ -3754,7 +3770,7 @@ test("workflow diagnostics count tool execution updates as progress, not duplica
 
 test("workflow diagnostics count routed subagent verification as passing verification", () => {
   const chalinRouteDetails = {
-    route: { kind: "multi-agent-chain", agents: ["scout", "planner", "worker", "reviewer"] },
+    route: { kind: "multi-agent-sequential", agents: ["scout", "planner", "worker", "reviewer"] },
     run: {
       id: "chalin-verify-run",
       status: "complete",
@@ -3767,7 +3783,7 @@ test("workflow diagnostics count routed subagent verification as passing verific
     },
   };
   const stdout = [
-    JSON.stringify({ type: "tool_execution_start", toolName: "chalin_route", args: { topology: "chain" } }),
+    JSON.stringify({ type: "tool_execution_start", toolName: "chalin_route", args: { topology: "sequential" } }),
     JSON.stringify({ type: "tool_execution_end", toolName: "chalin_route", isError: false, result: { content: [{ type: "text", text: "Final answer material: done" }], details: chalinRouteDetails } }),
   ].join("\n");
 
@@ -3777,7 +3793,7 @@ test("workflow diagnostics count routed subagent verification as passing verific
   assert.equal(diagnostics.verificationToolCalls, 1);
 
   const makeDetails = {
-    route: { kind: "multi-agent-chain", agents: ["scout", "worker", "reviewer"] },
+    route: { kind: "multi-agent-sequential", agents: ["scout", "worker", "reviewer"] },
     run: {
       id: "chalin-make-verify-run",
       status: "complete",
@@ -3787,7 +3803,7 @@ test("workflow diagnostics count routed subagent verification as passing verific
     },
   };
   const makeStdout = [
-    JSON.stringify({ type: "tool_execution_start", toolName: "chalin_route", args: { topology: "chain" } }),
+    JSON.stringify({ type: "tool_execution_start", toolName: "chalin_route", args: { topology: "sequential" } }),
     JSON.stringify({ type: "tool_execution_end", toolName: "chalin_route", isError: false, result: { content: [{ type: "text", text: "Final answer material: done" }], details: makeDetails } }),
   ].join("\n");
   const makeDiagnostics = workflowDiagnostics(getWorkflowEvalCase("complex-sqlite-c-tokenizer-bugfix"), makeStdout, "", undefined, undefined, undefined, false);
@@ -3795,7 +3811,7 @@ test("workflow diagnostics count routed subagent verification as passing verific
   assert.equal(makeDiagnostics.verificationToolCalls, 1);
 
   const exitDetails = {
-    route: { kind: "multi-agent-chain", agents: ["scout", "worker", "reviewer"] },
+    route: { kind: "multi-agent-sequential", agents: ["scout", "worker", "reviewer"] },
     run: {
       id: "chalin-exit-verify-run",
       status: "complete",
@@ -3806,16 +3822,107 @@ test("workflow diagnostics count routed subagent verification as passing verific
     },
   };
   const exitStdout = [
-    JSON.stringify({ type: "tool_execution_start", toolName: "chalin_route", args: { topology: "chain" } }),
+    JSON.stringify({ type: "tool_execution_start", toolName: "chalin_route", args: { topology: "sequential" } }),
     JSON.stringify({ type: "tool_execution_end", toolName: "chalin_route", isError: false, result: { content: [{ type: "text", text: "Final answer material: done" }], details: exitDetails } }),
   ].join("\n");
   const exitDiagnostics = workflowDiagnostics(getWorkflowEvalCase("complex-sqlite-c-tokenizer-bugfix"), exitStdout, "", undefined, undefined, undefined, false);
   assert.equal(exitDiagnostics.verificationPassed, true);
   assert.equal(exitDiagnostics.verificationToolCalls, 2);
+
+  const metricsDetails = {
+    route: { kind: "multi-agent-sequential", agents: ["scout", "worker", "reviewer"] },
+    run: {
+      id: "chalin-metrics-verify-run",
+      status: "complete",
+      steps: [
+        {
+          agent: "worker",
+          status: "complete",
+          metrics: {
+            shellCommands: ["cargo test -p cache-key"],
+            postMutationShellCommands: 1,
+            successfulPostMutationShellCommands: 1,
+          },
+          output: { text: "Changed crates/cache-key/src/lib.rs. See command transcript." },
+        },
+      ],
+    },
+  };
+  const metricsStdout = [
+    JSON.stringify({ type: "tool_execution_start", toolName: "chalin_route", args: { topology: "sequential" } }),
+    JSON.stringify({ type: "tool_execution_end", toolName: "chalin_route", isError: false, result: { content: [{ type: "text", text: "Final answer material: done" }], details: metricsDetails } }),
+  ].join("\n");
+  const metricsDiagnostics = workflowDiagnostics(getWorkflowEvalCase("complex-rust-workspace-cache-feature"), metricsStdout, "", undefined, undefined, undefined, false);
+  assert.equal(metricsDiagnostics.verificationPassed, true);
+  assert.equal(metricsDiagnostics.verificationToolCalls, 1);
+
+  const legacyTextDetails = {
+    route: { kind: "multi-agent-sequential", agents: ["worker", "reviewer"] },
+    run: {
+      id: "chalin-legacy-text-verify-run",
+      status: "complete",
+      steps: [
+        { agent: "worker", status: "complete", output: { text: "Verification: `cargo fmt && cargo test -p cache-key` pasó; 12 tests unitarios ok." } },
+        { agent: "reviewer", status: "complete", output: { text: "Reviewed `crates/cache-key/src/lib.rs`. Verification command run: `cargo test -p cache-key`. Verdict: PASS against the goal." } },
+      ],
+    },
+  };
+  const legacyTextStdout = [
+    JSON.stringify({ type: "tool_execution_start", toolName: "chalin_route", args: { topology: "sequential" } }),
+    JSON.stringify({ type: "tool_execution_end", toolName: "chalin_route", isError: false, result: { content: [{ type: "text", text: "Final answer material: done" }], details: legacyTextDetails } }),
+  ].join("\n");
+  const legacyTextDiagnostics = workflowDiagnostics(getWorkflowEvalCase("complex-rust-workspace-cache-feature"), legacyTextStdout, "", undefined, undefined, undefined, false);
+  assert.equal(legacyTextDiagnostics.verificationPassed, true);
+  assert.equal(legacyTextDiagnostics.verificationToolCalls, 2);
+
+  const spanishLegacyDetails = {
+    route: { kind: "multi-agent-sequential", agents: ["worker", "reviewer"] },
+    run: {
+      id: "chalin-spanish-legacy-verify-run",
+      status: "complete",
+      steps: [
+        { agent: "worker", status: "complete", output: { text: "Verification: `make test` ejecutado correctamente." } },
+      ],
+    },
+  };
+  const spanishLegacyStdout = [
+    JSON.stringify({ type: "tool_execution_start", toolName: "chalin_route", args: { topology: "sequential" } }),
+    JSON.stringify({ type: "tool_execution_end", toolName: "chalin_route", isError: false, result: { content: [{ type: "text", text: "Final answer material: done" }], details: spanishLegacyDetails } }),
+  ].join("\n");
+  const spanishLegacyDiagnostics = workflowDiagnostics(getWorkflowEvalCase("complex-redis-c-expire-feature"), spanishLegacyStdout, "", undefined, undefined, undefined, false);
+  assert.equal(spanishLegacyDiagnostics.verificationPassed, true);
+  assert.equal(spanishLegacyDiagnostics.verificationToolCalls, 1);
+
+  const failedMetricsDetails = {
+    route: { kind: "multi-agent-sequential", agents: ["scout", "worker", "reviewer"] },
+    run: {
+      id: "chalin-failed-metrics-verify-run",
+      status: "complete",
+      steps: [
+        {
+          agent: "worker",
+          status: "complete",
+          metrics: {
+            shellCommands: ["cargo test -p cache-key"],
+            postMutationShellCommands: 1,
+            successfulPostMutationShellCommands: 0,
+          },
+          output: { text: "Changed crates/cache-key/src/lib.rs. Verification still needs attention." },
+        },
+      ],
+    },
+  };
+  const failedMetricsStdout = [
+    JSON.stringify({ type: "tool_execution_start", toolName: "chalin_route", args: { topology: "sequential" } }),
+    JSON.stringify({ type: "tool_execution_end", toolName: "chalin_route", isError: false, result: { content: [{ type: "text", text: "Final answer material: done" }], details: failedMetricsDetails } }),
+  ].join("\n");
+  const failedMetricsDiagnostics = workflowDiagnostics(getWorkflowEvalCase("complex-rust-workspace-cache-feature"), failedMetricsStdout, "", undefined, undefined, undefined, false);
+  assert.equal(failedMetricsDiagnostics.verificationPassed, false);
+  assert.equal(failedMetricsDiagnostics.verificationToolCalls, 0);
 });
 
 test("workflow chalin route agent metrics deduplicate progress and completion events", () => {
-  const route = { kind: "multi-agent-chain", agents: ["scout", "planner", "worker"] };
+  const route = { kind: "multi-agent-sequential", agents: ["scout", "planner", "worker"] };
   const partialRun = {
     id: "chalin-dedup-run",
     status: "running",
