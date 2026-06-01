@@ -196,7 +196,7 @@ function formatCommandBudgetSummary(metrics: RunState["metrics"] | undefined): s
   const stops = metrics?.budgetStopCount ?? 0;
   const soft = hits.filter((hit) => hit.severity === "soft").length;
   const hard = hits.filter((hit) => hit.severity === "hard").length || stops;
-  return `${soft} budget warnings · ${hard} budget stops`;
+  return `${soft} budget warnings · ${hard} legacy budget stops`;
 }
 
 async function handleSkillsCommand(ctx: ExtensionContext, catalog: SkillCatalog, args: string[]): Promise<void> {

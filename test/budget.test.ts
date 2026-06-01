@@ -64,7 +64,7 @@ test("estimateBudgetPreflight classifies long autonomous work as resumable DAG/a
   assert.match(preflight.recommendation, /checkpoint/i);
 });
 
-test("evaluateBudgetUsage turns exhausted budget into checkpointed continuation state", () => {
+test("evaluateBudgetUsage reports exhausted budgets as soft telemetry without stopping subagents", () => {
   const reviewer = agent("reviewer", "review");
   const policy = policyForStep(reviewer, { agent: "reviewer", task: "Review project", budget: "tight" }, "multi-agent-chain");
   const health = evaluateBudgetUsage(policy, {
@@ -78,9 +78,11 @@ test("evaluateBudgetUsage turns exhausted budget into checkpointed continuation 
     retriesByTool: {},
   });
 
-  assert.equal(health.status, "checkpointed");
+  assert.equal(health.status, "warn");
   assert.ok(health.caps.some((cap) => cap.name === "max_seconds"));
-  assert.equal(health.next, "checkpoint-and-continue");
+  assert.equal(health.caps.every((cap) => cap.severity === "soft"), true);
+  assert.equal(health.next, "continue");
+  assert.equal(health.checkpointStatus, undefined);
 });
 
 test("budget-disabled harness mode suppresses continuation gates for ablation evals", () => {
@@ -109,7 +111,7 @@ test("budget-disabled harness mode suppresses continuation gates for ablation ev
   }
 });
 
-test("tool-call budget alone is a soft cap that can checkpoint without failing the stage", () => {
+test("tool-call budget alone remains a soft cap and never checkpoints the stage", () => {
   const scout = agent("scout", "recon");
   const policy = policyForStep(scout, { agent: "scout", task: "Map project", budget: "normal" }, "multi-agent-chain");
   const health = evaluateBudgetUsage(policy, {
@@ -186,7 +188,7 @@ test("scoreProgress turns utility signals into continuation gates", () => {
   assert.ok(lowSignal.score < 0);
 });
 
-test("evaluateBudgetUsage keeps soft caps as explicit progress gates", () => {
+test("evaluateBudgetUsage records low-signal progress without checkpointing budget caps", () => {
   const scout = agent("scout", "recon");
   const policy = policyForStep(scout, { agent: "scout", task: "Map project", budget: "normal" }, "multi-agent-chain");
   const health = evaluateBudgetUsage(policy, {
@@ -207,9 +209,9 @@ test("evaluateBudgetUsage keeps soft caps as explicit progress gates", () => {
   });
 
   assert.equal(health.status, "warn");
-  assert.equal(health.next, "checkpoint-low-signal");
-  assert.equal(health.checkpointStatus, "checkpointed-low-signal");
-  assert.ok(health.warnings.some((warning) => warning.includes("progress gate checkpoint-low-signal")));
+  assert.equal(health.next, "continue");
+  assert.equal(health.checkpointStatus, undefined);
+  assert.ok(health.warnings.some((warning) => warning.includes("progress signal checkpoint-low-signal")));
 });
 
 test("recordBudgetCheckpoint persists partial handoff when a step is checkpointed", async () => {

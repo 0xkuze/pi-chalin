@@ -189,21 +189,14 @@ export function evaluateBudgetUsage(policy: BudgetPolicy, usage: BudgetUsage, pr
   compare(caps, "max_retries_per_tool", maxRetries, policy.caps.maxRetriesPerTool);
 
   if (caps.length === 0) return { status: "ok", caps, warnings: [], next: "continue" };
-  const hard = caps.some((cap) => cap.severity === "hard");
-  const status: BudgetHealthStatus = hard ? "checkpointed" : "warn";
-  const progressGate = progress && progress.gate !== "continue" ? progress.gate : undefined;
-  const checkpointStatus = progressGate ? checkpointStatusForGate(progressGate) : undefined;
   return {
-    status,
+    status: "warn",
     caps,
     warnings: [
       ...caps.map((cap) => `${cap.name} used ${formatNumber(cap.used)} over limit ${formatNumber(cap.limit)}`),
-      ...(progressGate ? [`progress gate ${progressGate} from score ${formatNumber(progress?.score ?? 0)}`] : []),
+      ...(progress && progress.gate !== "continue" ? [`progress signal ${progress.gate} from score ${formatNumber(progress.score)}`] : []),
     ],
-    ...(checkpointStatus ? { checkpointStatus } : {}),
-    next: progressGate ?? (status === "checkpointed"
-      ? policy.resumeStrategy === "stage-checkpoint-validate-memory-next" ? "split" : "checkpoint-and-continue"
-      : "continue"),
+    next: "continue",
   };
 }
 
@@ -303,12 +296,10 @@ function compare(caps: BudgetCapHit[], name: BudgetCapName, used: number, limit:
     name,
     used,
     limit,
-    severity: hardBudgetCapNames.has(name) ? "hard" : "soft",
+    severity: "soft",
     phase: "post-step",
   });
 }
-
-const hardBudgetCapNames = new Set<BudgetCapName>(["max_seconds", "max_usd", "max_turns"]);
 
 function baseCapsForTask(taskKind: BudgetTaskKind, agentName: string): BudgetCaps {
   const baseToolCalls = baseToolCallsFor(taskKind, agentName);

@@ -10,6 +10,7 @@ import {
   type ChalinExpectedTopology,
   type ChalinOrchestrationEvalCase,
 } from "./orchestration-cases.ts";
+import { activeTokenTotal } from "./token-metrics.ts";
 
 interface UsageTotals {
   input: number;
@@ -77,7 +78,7 @@ const thresholds = {
   maxDurationMs: positiveInt(process.env.PI_CHALIN_EVAL_MAX_DURATION_MS, timeoutMs),
   maxCombinedCost: positiveFloat(process.env.PI_CHALIN_EVAL_MAX_COMBINED_COST, sdkRunner ? 0.25 : Number.POSITIVE_INFINITY),
   maxChildToolCalls: positiveInt(process.env.PI_CHALIN_EVAL_MAX_CHILD_TOOL_CALLS, sdkRunner ? 30 : Number.POSITIVE_INFINITY),
-  maxChildTokens: positiveInt(process.env.PI_CHALIN_EVAL_MAX_CHILD_TOKENS, sdkRunner ? 20_000 : Number.POSITIVE_INFINITY),
+  maxChildActiveTokens: positiveInt(process.env.PI_CHALIN_EVAL_MAX_CHILD_TOKENS, sdkRunner ? 20_000 : Number.POSITIVE_INFINITY),
   maxPolicyViolations: positiveInt(process.env.PI_CHALIN_EVAL_MAX_POLICY_VIOLATIONS, 0),
   maxDuplicateReads: positiveInt(process.env.PI_CHALIN_EVAL_MAX_DUPLICATE_READS, 0),
   maxBuiltInsBeforeChalin: positiveInt(process.env.PI_CHALIN_EVAL_MAX_BUILTINS_BEFORE_CHALIN, 0),
@@ -325,7 +326,8 @@ function evaluateThresholds(testCase: ChalinOrchestrationEvalCase, metrics: Eval
   if (durationMs > thresholds.maxDurationMs) failures.push(`duration ${durationMs}ms > ${thresholds.maxDurationMs}ms`);
   if (metrics.combinedUsage.cost.total > thresholds.maxCombinedCost) failures.push(`combined cost $${metrics.combinedUsage.cost.total.toFixed(4)} > $${thresholds.maxCombinedCost}`);
   if (metrics.childTools.totalCalls > thresholds.maxChildToolCalls) failures.push(`child tool calls ${metrics.childTools.totalCalls} > ${thresholds.maxChildToolCalls}`);
-  if (metrics.childUsage.totalTokens > thresholds.maxChildTokens) failures.push(`child tokens ${metrics.childUsage.totalTokens} > ${thresholds.maxChildTokens}`);
+  const activeChildTokens = activeTokenTotal(metrics.childUsage);
+  if (activeChildTokens > thresholds.maxChildActiveTokens) failures.push(`child active tokens ${activeChildTokens} > ${thresholds.maxChildActiveTokens}`);
   if (metrics.policy.violations > thresholds.maxPolicyViolations) failures.push(`policy violations ${metrics.policy.violations} > ${thresholds.maxPolicyViolations}`);
   if (metrics.policy.duplicateReadCount > thresholds.maxDuplicateReads) failures.push(`duplicate reads ${metrics.policy.duplicateReadCount} > ${thresholds.maxDuplicateReads}`);
   if (testCase.expectedDecision === "chalin" && metrics.tools.builtInCallsBeforeChalin > thresholds.maxBuiltInsBeforeChalin) failures.push(`built-ins before chalin ${metrics.tools.builtInCallsBeforeChalin} > ${thresholds.maxBuiltInsBeforeChalin}`);

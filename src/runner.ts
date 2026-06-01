@@ -1574,7 +1574,7 @@ function sessionActivitySignature(messages: unknown[], policy: ChildToolPolicy):
   return `${messages.length}:${lastText.length}:${metrics.toolCalls}:${metrics.outputChars}:${metrics.readBytes}`;
 }
 
-export const DEFAULT_SDK_STEP_IDLE_STALL_MS = 90_000;
+export const DEFAULT_SDK_STEP_IDLE_STALL_MS = 120_000;
 
 export function sdkStepIdleStallMs(): number {
   const parsed = Number(process.env.PI_CHALIN_SDK_STEP_IDLE_STALL_MS);
@@ -1843,7 +1843,7 @@ function mergePolicyMetrics(metrics: RunStepMetrics, policy: ChildToolPolicy): R
   const filesRead = [...new Set([...(metrics.filesRead ?? []), ...policyMetrics.filesRead])];
   const duplicateReadCount = Math.max(metrics.duplicateReadCount ?? 0, policyMetrics.duplicateReadCount);
   const budgetCapHits = mergeBudgetCapHits(metrics.budgetCapHits, policyMetrics.budgetCapHits);
-  const budgetStopCount = Math.max(metrics.budgetStopCount ?? 0, policyMetrics.budgetStopCount, countHardBudgetHits(budgetCapHits));
+  const budgetStopCount = Math.max(metrics.budgetStopCount ?? 0, policyMetrics.budgetStopCount);
   const shellCommands = [...(metrics.shellCommands ?? []), ...policyMetrics.shellCommands].slice(0, 50);
   const postMutationShellCommands = Math.max(metrics.postMutationShellCommands ?? 0, policyMetrics.postMutationShellCommands);
   const successfulPostMutationShellCommands = Math.max(metrics.successfulPostMutationShellCommands ?? 0, policyMetrics.successfulPostMutationShellCommands);
@@ -1922,7 +1922,7 @@ function finalizeStepMetrics(metrics: RunStepMetrics, step: RunStepState, budget
   const prior = new Set(priorFilesRead);
   const crossStepDuplicateReads = [...new Set((metrics.filesRead ?? []).filter((file) => prior.has(file)))];
   const budgetCapHits = mergeBudgetCapHits(metrics.budgetCapHits, health.caps);
-  const budgetStopCount = Math.max(metrics.budgetStopCount ?? 0, countHardBudgetHits(budgetCapHits));
+  const budgetStopCount = metrics.budgetStopCount ?? 0;
   if (budgetStopCount > 0 || health.checkpointStatus) {
     const kind = budgetStopCount > 0
       ? "budget-cap"
@@ -2106,10 +2106,6 @@ function mergeBudgetCapHits(...groups: Array<BudgetCapHit[] | undefined>): Budge
     }
   }
   return merged.slice(0, 50);
-}
-
-function countHardBudgetHits(hits: BudgetCapHit[] | undefined): number {
-  return (hits ?? []).filter((hit) => hit.severity === "hard").length;
 }
 
 function summarizeRunMetrics(run: RunState): RunState["metrics"] {

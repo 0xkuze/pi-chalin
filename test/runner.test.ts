@@ -707,10 +707,11 @@ test("SDK child idle guard rejects when no tool or message activity occurs", asy
   );
 });
 
-test("SDK child idle stall window defaults to 90s and uses only the idle-stall env knob", () => {
+test("SDK child idle stall window defaults to 120s and uses only the idle-stall env knob", () => {
   const previousStall = process.env.PI_CHALIN_SDK_STEP_IDLE_STALL_MS;
   try {
     delete process.env.PI_CHALIN_SDK_STEP_IDLE_STALL_MS;
+    assert.equal(DEFAULT_SDK_STEP_IDLE_STALL_MS, 120_000);
     assert.equal(sdkStepIdleStallMs(), DEFAULT_SDK_STEP_IDLE_STALL_MS);
 
     process.env.PI_CHALIN_SDK_STEP_IDLE_STALL_MS = "45000";

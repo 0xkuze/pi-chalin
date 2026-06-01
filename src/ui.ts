@@ -1533,7 +1533,7 @@ export function summarizeRuntimeGuards(run: RunState | undefined): string[] {
 function summarizeBudgetHealth(hits: BudgetCapHit[] | undefined, stops: number): string {
   const hard = (hits ?? []).filter((hit) => hit.severity === "hard");
   const soft = (hits ?? []).filter((hit) => hit.severity === "soft");
-  if (hard.length > 0 || stops > 0) return `stopped ${formatBudgetHit(hard[0] ?? soft[0])}${stops > 0 ? ` (${stops} stops)` : ""}`;
+  if (hard.length > 0 || stops > 0) return `limit reached ${formatBudgetHit(hard[0] ?? soft[0])}${stops > 0 ? ` (${stops} legacy stops)` : ""}`;
   if (soft.length > 0) return `warning ${formatBudgetHit(soft[0])}`;
   return "ok";
 }

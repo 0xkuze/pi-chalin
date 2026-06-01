@@ -229,6 +229,7 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
   const shellCommands: string[] = [];
   const pendingShellCommands: Array<{ command?: string; afterMutation: boolean }> = [];
   const retriesByTool: Record<string, number> = {};
+  const readCallsByPath: Record<string, number> = {};
   const allowedTools = new Set(options.allowedTools ?? []);
   const priorFilesRead = new Set((options.priorFilesRead ?? []).map((item) => normalizeMetricPath(item, options.cwd)));
   const maxCrossStepDuplicateReads = options.maxCrossStepDuplicateReads ?? Number.POSITIVE_INFINITY;
@@ -284,13 +285,6 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
     });
   }
 
-  function budgetBlock(toolName: string, name: BudgetCapName, used: number, limit: number, reason?: string): { allowed: false; reason: string } {
-    budgetStopCount += 1;
-    recordBudgetCapHit({ name, used, limit, severity: "hard", phase: "pre-tool", toolName, reason });
-    activity(toolName, "blocked");
-    return { allowed: false, reason: `budget_exceeded:${toolName}:${name}=${limit}` };
-  }
-
   function budgetWarn(toolName: string, name: BudgetCapName, used: number, limit: number, phase: BudgetCapHit["phase"] = "pre-tool", reason?: string): void {
     recordBudgetCapHit({ name, used, limit, severity: "soft", phase, toolName, reason });
   }
@@ -329,26 +323,14 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
         activity(toolName, "blocked");
         return violation(`tool_not_allowed:${toolName}`);
       }
-      if (Date.now() - startedAt >= caps.maxSeconds * 1000) {
-        return budgetBlock(toolName, "max_seconds", Math.ceil((Date.now() - startedAt) / 1000), caps.maxSeconds);
-      }
-      if (toolCalls >= adaptiveHardLimit(caps.maxToolCalls, "tool-calls")) {
-        return budgetBlock(toolName, "max_tool_calls", toolCalls, caps.maxToolCalls, "adaptive hard ceiling after soft tool-call budget");
-      }
       if (toolCalls >= caps.maxToolCalls) {
-        budgetWarn(toolName, "max_tool_calls", toolCalls, caps.maxToolCalls, "pre-tool", "soft tool-call budget reached; continuing under adaptive grace");
-      }
-      if (isInspectionTool(toolName) && readBytes >= adaptiveHardLimit(caps.maxReadBytes, "read-bytes")) {
-        return budgetBlock(toolName, "max_read_bytes", readBytes, caps.maxReadBytes, "adaptive hard ceiling after soft read budget");
+        budgetWarn(toolName, "max_tool_calls", toolCalls, caps.maxToolCalls, "pre-tool", "soft tool-call budget reached; continuing");
       }
       if (isInspectionTool(toolName) && readBytes >= caps.maxReadBytes) {
-        budgetWarn(toolName, "max_read_bytes", readBytes, caps.maxReadBytes, "pre-tool", "soft read budget reached; continuing under adaptive grace");
-      }
-      if ((toolName === "edit" || toolName === "write") && filesTouched.length >= adaptiveHardLimit(caps.maxFilesTouched, "files-touched")) {
-        return budgetBlock(toolName, "max_files_touched", filesTouched.length, caps.maxFilesTouched, "adaptive hard ceiling after soft touched-files budget");
+        budgetWarn(toolName, "max_read_bytes", readBytes, caps.maxReadBytes, "pre-tool", "soft read budget reached; continuing");
       }
       if (filesTouched.length >= caps.maxFilesTouched && (toolName === "edit" || toolName === "write")) {
-        budgetWarn(toolName, "max_files_touched", filesTouched.length, caps.maxFilesTouched, "pre-tool", "soft touched-files budget reached; continuing under adaptive grace");
+        budgetWarn(toolName, "max_files_touched", filesTouched.length, caps.maxFilesTouched, "pre-tool", "soft touched-files budget reached; continuing");
       }
 
       if (toolName === "write") {
@@ -366,12 +348,20 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
           const nextDuplicateCount = crossStepDuplicateReadCount + 1;
           const hardDuplicateLimit = adaptiveHardLimit(maxCrossStepDuplicateReads, "duplicate-reads");
           if (nextDuplicateCount > hardDuplicateLimit) {
-            return budgetBlock("read", "max_cross_step_duplicate_reads", nextDuplicateCount, maxCrossStepDuplicateReads, normalizedReadPath);
+            activity("read", "blocked");
+            return violation(`read_loop:${normalizedReadPath}`);
           }
           if (nextDuplicateCount > maxCrossStepDuplicateReads) {
             budgetWarn("read", "max_cross_step_duplicate_reads", nextDuplicateCount, maxCrossStepDuplicateReads, "pre-tool", normalizedReadPath);
           }
           crossStepDuplicateReadCount = nextDuplicateCount;
+        }
+        if (normalizedReadPath) {
+          const nextReadCount = (readCallsByPath[normalizedReadPath] ?? 0) + 1;
+          if (nextReadCount > sameStepReadLoopLimit()) {
+            activity("read", "blocked");
+            return violation(`read_loop:${normalizedReadPath}`);
+          }
         }
       }
 
@@ -389,6 +379,11 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
       }
 
       const recorded = record(toolName, params);
+      if (toolName === "read") {
+        const readPath = getPathParam(params);
+        const normalizedReadPath = readPath ? normalizeMetricPath(readPath, options.cwd) : undefined;
+        if (normalizedReadPath) readCallsByPath[normalizedReadPath] = (readCallsByPath[normalizedReadPath] ?? 0) + 1;
+      }
       activity(toolName, "start");
       return recorded;
     },
@@ -874,6 +869,10 @@ function adaptiveHardLimit(limit: number, kind: "tool-calls" | "read-bytes" | "f
   if (kind === "read-bytes") return Math.max(limit + 120_000, Math.ceil(limit * 2));
   if (kind === "files-touched") return Math.max(limit + 2, Math.ceil(limit * 1.5));
   return Math.max(limit + 2, Math.ceil(limit * 1.5));
+}
+
+function sameStepReadLoopLimit(): number {
+  return 4;
 }
 
 function isInspectionTool(toolName: string): boolean {

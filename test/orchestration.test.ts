@@ -5,6 +5,7 @@ import {
   ORCHESTRATION_EVAL_CASES,
   summarizeOrchestrationEvalCases,
 } from "../evals/orchestration-cases.ts";
+import { activeTokenTotal } from "../evals/token-metrics.ts";
 import { buildChalinOrchestratorSystemPrompt, selectLikelyAgentsForPrompt } from "../src/orchestration.ts";
 import { routeFromPlan } from "../src/kernel.ts";
 import { collapseReadOnlyScoutContextRoute, ensureMutationRouteHasWorkerAndReviewer, inferRouteRequiresWorkspaceMutation, normalizeRouteForExecution } from "../src/route-guards.ts";
@@ -39,6 +40,12 @@ test("orchestration eval cases cover chalin and direct decisions", () => {
     if (testCase.expectedDecision === "direct") assert.equal(testCase.expectedTopology, "none");
     if (testCase.expectedDecision === "chalin") assert.notEqual(testCase.expectedTopology, "none");
   }
+});
+
+test("orchestration eval token threshold ignores cached reads as active token work", () => {
+  const usage = { input: 7123, output: 2227, cacheRead: 48896, cacheWrite: 0, totalTokens: 58246 };
+
+  assert.equal(activeTokenTotal(usage), 9350);
 });
 
 test("orchestrator prompt teaches LLM-first routing without prompt keyword classifiers", () => {

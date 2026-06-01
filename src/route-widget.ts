@@ -198,7 +198,7 @@ function formatWidgetGuards(metrics: RunState["metrics"] | undefined): string {
   const budgetStops = metrics.budgetStopCount ?? 0;
   const budgetHits = metrics.budgetCapHits ?? [];
   if (policyViolations > 0) return `tools: ${metrics.toolCalls} · guards: attention · ${policyViolations} policy`;
-  if (budgetStops > 0) return `tools: ${metrics.toolCalls} · guards: ok · budget: stopped ${formatBudgetHit(budgetHits.find((hit) => hit.severity === "hard") ?? budgetHits[0])} (${budgetStops} stops)`;
+  if (budgetStops > 0) return `tools: ${metrics.toolCalls} · guards: attention · budget: limit reached ${formatBudgetHit(budgetHits.find((hit) => hit.severity === "hard") ?? budgetHits[0])} (${budgetStops} legacy stops)`;
   if (budgetHits.some((hit) => hit.severity === "soft")) return `tools: ${metrics.toolCalls} · guards: ok · budget: warning ${formatBudgetHit(budgetHits.find((hit) => hit.severity === "soft"))}`;
   return `tools: ${metrics.toolCalls} · guards: ok`;
 }

@@ -4350,7 +4350,7 @@ test("summarizeRuntimeGuards surfaces policy, budget, worktree, and model fallba
 
   assert.match(lines.join("\n"), /guards: attention/);
   assert.match(lines.join("\n"), /policy violations: 1/);
-  assert.match(lines.join("\n"), /budget: stopped max_tool_calls 3\/2 via read \(1 stops\)/);
+  assert.match(lines.join("\n"), /budget: limit reached max_tool_calls 3\/2 via read \(1 legacy stops\)/);
   assert.match(lines.join("\n"), /worktrees: isolated writers/);
   assert.match(lines.join("\n"), /model fallback: 1/);
 });
