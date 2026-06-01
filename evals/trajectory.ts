@@ -87,10 +87,11 @@ export function analyzeTrajectory(run: RunState): TrajectoryReport {
     const utility = metrics.utility;
     const hardBudgetStops = (metrics.budgetCapHits ?? []).some((hit) => hit.severity === "hard") || (metrics.budgetStopCount ?? 0) > 0;
     const softBudgetLowSignal = (metrics.budgetCapHits ?? []).some((hit) => hit.severity === "soft") && utility !== undefined && utility.findingsPerTool < 0.08 && metrics.toolCalls >= 10;
-    return hardBudgetStops || softBudgetLowSignal || (utility && utility.findingsPerTool < 0.08 && metrics.toolCalls >= 10);
+    const lateFirstSignal = utility !== undefined && metrics.toolCalls >= 8 && utility.toolCallsBeforeFirstSignal > 6;
+    return hardBudgetStops || softBudgetLowSignal || lateFirstSignal || (utility && utility.findingsPerTool < 0.08 && metrics.toolCalls >= 10);
   });
   if (wasteEvidence.length > 0) {
-    findings.budgetWaste = finding("budget_waste", false, "warning", "Budget was consumed with low signal or hit a cap without a useful checkpoint.", wasteEvidence.map((step) => describeMetric(step.metrics!)).slice(0, 4));
+    findings.budgetWaste = finding("budget_waste", false, "warning", "Budget was consumed with low signal or hit a cap without a useful checkpoint.", wasteEvidence.map((step) => `${step.agent}:${step.id} ${describeMetric(step.metrics!)}`).slice(0, 4));
   }
 
   if (run.status === "complete" && steps.some((step) => step.status === "failed" || step.status === "paused")) {

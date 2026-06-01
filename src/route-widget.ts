@@ -186,7 +186,7 @@ export function colorizeChalinWidget(text: string, theme: { fg(scope: string, va
     if (/current:/.test(line)) return theme.fg("muted", line);
     if (/✓/.test(line)) return theme.fg("success", line);
     if (/×|failed|attention/.test(line)) return theme.fg("error", line);
-    if (/budget: (warning|stopped|limit reached)/.test(line)) return theme.fg("warning", line);
+    if (/budget: (warning|stopped|limit reached)|inefficient/.test(line)) return theme.fg("warning", line);
     if (/◆/.test(line)) return theme.fg("accent", line);
     return theme.fg("dim", line);
   }).join("\n");
@@ -197,8 +197,10 @@ function formatWidgetGuards(metrics: RunState["metrics"] | undefined): string {
   const policyViolations = metrics.policyViolations?.length ?? 0;
   const budgetStops = metrics.budgetStopCount ?? 0;
   const budgetHits = metrics.budgetCapHits ?? [];
+  const crossStepDuplicates = metrics.crossStepDuplicateReadCount ?? 0;
   if (policyViolations > 0) return `tools: ${metrics.toolCalls} · guards: attention · ${policyViolations} policy`;
   if (budgetStops > 0) return `tools: ${metrics.toolCalls} · guards: attention · budget: limit reached ${formatBudgetHit(budgetHits.find((hit) => hit.severity === "hard") ?? budgetHits[0])} (${budgetStops} legacy stops)`;
+  if (crossStepDuplicates > 0) return `tools: ${metrics.toolCalls} · guards: inefficient · cross-step duplicate reads: ${crossStepDuplicates}`;
   if (budgetHits.some((hit) => hit.severity === "soft")) return `tools: ${metrics.toolCalls} · guards: ok · budget: warning ${formatBudgetHit(budgetHits.find((hit) => hit.severity === "soft"))}`;
   return `tools: ${metrics.toolCalls} · guards: ok`;
 }

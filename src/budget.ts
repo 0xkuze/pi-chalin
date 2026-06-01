@@ -229,6 +229,7 @@ export function scoreProgress(input: ToolUtilityInput): ProgressScore {
   if (utility.verificationDone) positiveSignals.push("verification_done");
   if (utility.memoryCandidatesQuality >= 0.45) positiveSignals.push("memory_quality");
   if (utility.duplicateReads > 0) negativeSignals.push("duplicate_reads");
+  if (input.toolCalls >= 8 && utility.toolCallsBeforeFirstSignal > 6) negativeSignals.push("late_first_signal");
   if (input.toolCalls >= 10 && utility.findingsPerTool < 0.08) negativeSignals.push("low_signal_tools");
   if (input.findings.filter((item) => item.trim()).length === 0) negativeSignals.push("no_findings");
 
@@ -238,6 +239,7 @@ export function scoreProgress(input: ToolUtilityInput): ProgressScore {
     + Math.min(0.2, utility.memoryCandidatesQuality * 0.25)
     + (positiveSignals.includes("early_signal") ? 0.12 : 0)
     - utility.duplicateReads * 0.18
+    - (negativeSignals.includes("late_first_signal") ? 0.25 : 0)
     - (negativeSignals.includes("low_signal_tools") ? 0.32 : 0)
     - (negativeSignals.includes("no_findings") ? 0.18 : 0),
   );

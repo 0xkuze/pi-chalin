@@ -1513,6 +1513,8 @@ export function summarizeRuntimeGuards(run: RunState | undefined): string[] {
   const budgetStops = run.metrics?.budgetStopCount ?? sumStepMetric(run, (step) => step.metrics?.budgetStopCount ?? 0);
   const budgetHits = run.metrics?.budgetCapHits ?? run.steps.flatMap((step) => step.metrics?.budgetCapHits ?? []);
   const duplicateReads = run.metrics?.duplicateReadCount ?? sumStepMetric(run, (step) => step.metrics?.duplicateReadCount ?? 0);
+  const crossStepDuplicateReads = run.metrics?.crossStepDuplicateReadCount ?? sumStepMetric(run, (step) => step.metrics?.crossStepDuplicateReadCount ?? 0);
+  const lateFirstSignal = maxStepMetric(run, (step) => step.metrics?.utility?.toolCallsBeforeFirstSignal);
   const toolCalls = run.metrics?.toolCalls ?? sumStepMetric(run, (step) => step.metrics?.toolCalls ?? 0);
   const modelFallbacks = run.steps.reduce((count, step) => count + (step.modelResolution?.attempts.some((attempt) => ["invalid", "unavailable", "unauthenticated", "fallback", "runtime-error"].includes(attempt.status)) ? 1 : 0), 0);
   const worktreeState = summarizeWorktreeGuard(run);
@@ -1524,10 +1526,11 @@ export function summarizeRuntimeGuards(run: RunState | undefined): string[] {
     `guards: ${guardHealth}`,
     `budget: ${budgetHealth}`,
     `approval: risk ${run.route.risk}`,
-    `tools: ${toolCalls} calls · policy violations: ${policyViolations} · duplicate reads: ${duplicateReads}`,
+    `tools: ${toolCalls} calls · policy violations: ${policyViolations} · duplicate reads: ${duplicateReads} · cross-step duplicates: ${crossStepDuplicateReads}`,
+    lateFirstSignal > 6 ? `late signal: ${lateFirstSignal} calls before first evidence` : undefined,
     `worktrees: ${worktreeState}`,
     `model fallback: ${modelFallbacks}`,
-  ];
+  ].filter((line): line is string => Boolean(line));
 }
 
 function summarizeBudgetHealth(hits: BudgetCapHit[] | undefined, stops: number): string {
@@ -1995,6 +1998,10 @@ function summarizeGuardHealth(run: RunState | undefined): string {
 
 function sumStepMetric(run: RunState, pick: (step: RunState["steps"][number]) => number): number {
   return run.steps.reduce((total, step) => total + pick(step), 0);
+}
+
+function maxStepMetric(run: RunState, pick: (step: RunState["steps"][number]) => number | undefined): number {
+  return run.steps.reduce((max, step) => Math.max(max, pick(step) ?? 0), 0);
 }
 
 function summarizeWorktreeGuard(run: RunState): string {

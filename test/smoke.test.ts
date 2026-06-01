@@ -3192,6 +3192,61 @@ test("finalAnswerMaterial preserves multi-agent analysis evidence instead of onl
   assert.doesNotMatch(material ?? "", /truncated reviewer/);
 });
 
+test("finalAnswerMaterial prefers final synthesis and keeps prior evidence compact", () => {
+  const run = createRunState({
+    kind: "multi-agent-dag",
+    agents: ["scout", "researcher", "planner"],
+    risk: "low",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: false,
+    reason: "Deep analysis.",
+    plan: {
+      kind: "dag",
+      stages: [
+        { id: "evidence", tasks: [{ agent: "scout", task: "Map repo." }, { agent: "researcher", task: "Check docs." }] },
+        { id: "synthesis", tasks: [{ agent: "planner", task: "Synthesize." }] },
+      ],
+    },
+  }, tempDir("pi-chalin-final-material-synthesis-"));
+  run.status = "complete";
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.output = {
+    agent: "scout",
+    text: `Coverage Matrix: runtime covered in src/index.ts.\n${"raw scout crawl ".repeat(500)}\nEvidence Table: src/runner.ts owns execution.`,
+    handoff: "scout handoff",
+    raw: "",
+    memoryCandidates: [],
+    warnings: [],
+  };
+  run.steps[1]!.status = "complete";
+  run.steps[1]!.output = {
+    agent: "researcher",
+    text: "Effect evidence: Layer and Schedule are applicable.",
+    handoff: "research handoff",
+    raw: "",
+    memoryCandidates: [],
+    warnings: [],
+  };
+  run.steps[2]!.status = "complete";
+  run.steps[2]!.output = {
+    agent: "planner",
+    text: "Final synthesis: prioritize runner and memory boundaries.",
+    handoff: "planner handoff",
+    raw: "",
+    memoryCandidates: [],
+    warnings: [],
+  };
+
+  const material = finalAnswerMaterial(run) ?? "";
+
+  assert.ok(material.startsWith("Final synthesis"));
+  assert.match(material, /Supporting evidence/);
+  assert.match(material, /Coverage Matrix/);
+  assert.match(material, /Effect evidence/);
+  assert.doesNotMatch(material, /raw scout crawl raw scout crawl raw scout crawl raw scout crawl raw scout crawl/);
+});
+
 test("finalAnswerMaterial preserves single scout analysis instead of compact handoff", () => {
   const run = createRunState({
     kind: "single-agent",
@@ -4537,4 +4592,49 @@ test("summarizeRuntimeGuards labels budget-only caps without scary attention", (
   assert.match(lines.join("\n"), /guards: ok/);
   assert.match(lines.join("\n"), /budget: warning max_tool_calls 43\/40 via read/);
   assert.doesNotMatch(lines.join("\n"), /guards: attention/);
+});
+
+test("runtime and route widgets surface inefficient late-signal evidence loops", () => {
+  const run: RunState = {
+    id: "chalin-inefficient",
+    route: { kind: "multi-agent-dag", agents: ["scout"], risk: "low", ambiguity: "low", needsMemory: false, needsArtifacts: true, reason: "test" },
+    status: "complete",
+    startedAt: new Date().toISOString(),
+    warnings: [],
+    steps: [{
+      id: "step-1",
+      agent: "scout",
+      task: "Map project.",
+      status: "complete",
+      output: { agent: "scout", text: "mapped", handoff: "mapped", memoryCandidates: [], raw: "mapped", warnings: [] },
+      metrics: {
+        durationMs: 100,
+        usage: emptyTestUsage(),
+        toolCalls: 12,
+        toolCallsByName: { read: 10, grep: 2 },
+        crossStepDuplicateReadCount: 2,
+        utility: {
+          findingsPerTool: 0.167,
+          filesReadPerFinding: 2,
+          duplicateReads: 0,
+          toolCallsBeforeFirstSignal: 10,
+          verificationDone: false,
+          memoryCandidatesQuality: 0,
+        },
+      },
+    }],
+    metrics: {
+      durationMs: 100,
+      usage: emptyTestUsage(),
+      toolCalls: 12,
+      toolCallsByName: { read: 10, grep: 2 },
+      crossStepDuplicateReadCount: 2,
+      crossStepDuplicateReads: ["src/index.ts", "src/tools.ts"],
+    },
+  };
+
+  assert.match(summarizeRuntimeGuards(run).join("\n"), /late signal: 10 calls/);
+  assert.match(summarizeRuntimeGuards(run).join("\n"), /cross-step duplicates: 2/);
+  assert.match(formatChalinRunWidget(run), /guards: inefficient/);
+  assert.match(formatChalinRunWidget(run), /cross-step duplicate reads: 2/);
 });

@@ -81,6 +81,35 @@ test("parseAgentOutput ignores non-bullet memory blocks and None", () => {
   assert.equal(noneOutput.memoryCandidates.length, 0);
 });
 
+test("parseAgentOutput drops transient verification status memory candidates", () => {
+  const output = parseAgentOutput("scout", [
+    "## Findings",
+    "- `bun test --dry-run` printed test inventory.",
+    "## Memory Candidates",
+    "- testing: 538 tests from dry-run, 138 currently failing in smoke integration.",
+    "- tooling: Project tests use Bun's test runner and permanent regression tests should use bun:test APIs.",
+  ].join("\n"));
+
+  assert.deepEqual(output.memoryCandidates.map((candidate) => candidate.category), ["tooling"]);
+  assert.doesNotMatch(output.memoryCandidates.map((candidate) => candidate.content).join("\n"), /currently failing|dry-run/i);
+  assert.match(output.warnings.join("\n"), /transient verification status/i);
+});
+
+test("buildSdkPrompt requires evidence-grade handling for transient and negative claims", () => {
+  const scout = readOnlyAgent("scout", "recon");
+  const planner = readOnlyAgent("planner", "planning");
+  const scoutPrompt = buildSdkPrompt(scout, "Analyze project tests and Effect usage.", tempDir("pi-chalin-prompt-evidence-"), undefined, 12, "deep");
+  const plannerPrompt = buildSdkPrompt(planner, "Synthesize prior handoff.", tempDir("pi-chalin-prompt-synthesis-"), "scout: claims no Schedule is used.", 12, "deep", {
+    priorFilesRead: ["src/webfetch.ts"],
+  });
+
+  assert.match(scoutPrompt, /Dry-runs, inventory commands, grep counts, and partial logs are not live verification/i);
+  assert.match(scoutPrompt, /Do not write memory candidates for transient pass\/fail/i);
+  assert.match(scoutPrompt, /Before saying a feature, API, file, route, command, dependency, or pattern is absent/i);
+  assert.match(plannerPrompt, /reconcile contradictions/i);
+  assert.match(plannerPrompt, /do not concatenate raw upstream output/i);
+});
+
 test("reviewerHandoffNeedsRepair detects blocking implementation review gaps", () => {
   const failing = parseAgentOutput("reviewer", "## Handoff\nVerdict: FAIL — implementation does not meet the adjacent-token requirement; add missing regression tests.");
   const passing = parseAgentOutput("reviewer", "## Handoff\nPASS — checked changed files, tests, and verification. No gaps remain.");
@@ -1140,6 +1169,27 @@ test("childToolNames removes inspection tools for handoff-only synthesis steps",
 
   assert.deepEqual(childToolNames(agent, "Synthesize scout findings into final answer material.", true, true), []);
   assert.ok(childToolNames(agent, "Save a checkpoint for this long-running feature.", true, true, { budgetProfile: "extended" }).includes("chalin_artifact_write"));
+});
+
+test("childToolNames keeps inspection tools for critical handoff claim checks", () => {
+  const agent: AgentDefinition = {
+    name: "context-builder",
+    scope: "built-in",
+    concern: "context-building",
+    capabilities: ["inspect-files", "search-files", "memory-read", "memory-write"],
+    description: "Synthesize context.",
+    model: "inherit",
+    tools: [],
+    memory: { read: true, write: "candidate", categories: [] },
+    systemPrompt: "",
+    diagnostics: [],
+  };
+
+  const tools = childToolNames(agent, "Reconcile contradiction: scout says no web fetch exists but researcher found src/webfetch.ts.", true, true);
+
+  assert.ok(tools.includes("read"));
+  assert.ok(tools.includes("grep"));
+  assert.ok(tools.includes("find"));
 });
 
 test("childToolNames keeps inspection tools for deep synthesis with possible coverage gaps", () => {

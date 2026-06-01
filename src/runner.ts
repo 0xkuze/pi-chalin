@@ -3,6 +3,7 @@ import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { Context, Effect, Layer } from "effect";
 import type { AgentDefinition, AgentThinkingLevel } from "./schemas.ts";
 import { evaluateBudgetUsage, policyForStep, recordBudgetCheckpoint, scoreProgress, summarizeToolUtility } from "./budget.ts";
+import { isTransientVerificationStateClaim } from "./evidence-claims.ts";
 import type { ChalinPathsOptions } from "./paths.ts";
 import { createMemoryCandidate } from "./memory.ts";
 import { createConfiguredMemoryStore } from "./memory-provider.ts";
@@ -1236,6 +1237,10 @@ export function parseAgentOutput(agent: string, raw: string): AgentOutput {
     for (const line of memoryBlock.split("\n")) {
       const parsed = parseMemoryCandidateLine(line);
       if (!parsed) continue;
+      if (isTransientVerificationStateClaim(parsed.content)) {
+        warnings.push("Dropped memory candidate with transient verification status; require real non-dry-run command evidence instead.");
+        continue;
+      }
       candidates.push(createMemoryCandidate({ category: parsed.category, content: parsed.content, sourceAgent: agent, confidence: parsed.confidence, scope: "project" }));
     }
   }

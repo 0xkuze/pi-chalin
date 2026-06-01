@@ -90,6 +90,7 @@ export function buildSdkPrompt(
       ? "- Implementation scouting: map source+test evidence per requested behavior. Do not call tests sufficient/as-is unless each criterion has a direct runner-discoverable assertion; hand off missing regressions."
       : undefined,
     "- Prefer concise evidence; stop after high-value actionable issues.",
+    evidenceClaimDiscipline(),
     "- Preserve failure triggers/counterexamples before adjacent findings.",
     mutationRelevant ? "- Impl/test: derive the contract from prompt+repo evidence. Tests are contract oracles: preserve starter assertions unless disproven; add focused criteria plus one boundary/counterexample; cover changed and preservation/no-op/composition paths. Preserve public compatibility unless evidence requires. Narrow token/flag/path/format means local change plus adjacent preservation. Invalid/reject requirements are contract." : undefined,
     mutationRelevant && timeContractRelevant ? "- Time/window/retry/cache/rate/budget behavior prefers internal test seams or runner-native fake time without expanding public APIs; use Bun `setSystemTime`, Vitest fake timers, or the smallest scoped Date.now restore instead of ad hoc sleeps." : undefined,
@@ -172,7 +173,7 @@ function implementationReviewText(text: string): boolean {
 
 export function childToolNames(agent: AgentDefinition | undefined, task = "", needsArtifacts = false, hasPrevious = false, options: ChildToolOptions = {}): string[] {
   const deepHandoff = options.budgetProfile === "deep" || options.budgetProfile === "extended" || options.routeKind === "multi-agent-dag";
-  if (hasPrevious && shouldUseHandoffOnlyMode(agent, deepHandoff)) return [];
+  if (hasPrevious && shouldUseHandoffOnlyMode(agent, deepHandoff, task)) return [];
   if (!agent?.capabilities.length) {
     const fallback = new Set(agent?.tools.length ? agent.tools : ["read", "grep", "find", "ls"]);
     fallback.add("chalin_project_discovery");
@@ -283,8 +284,18 @@ function memoryPolicyForAgent(agent: AgentDefinition | undefined): string | unde
       ? "- Use `chalin_memory_write` for compact durable knowledge and `chalin_memory_revise` when evidence proves memory stale/wrong. WriteGuard decides active/pending/rejected."
       : undefined,
     "- Keep memory token spend low: short queries, evidence only for review/contradiction, never logs/output/code dumps/trivial notes.",
+    "- No memory candidates for transient pass/fail/current-status claims from tests, builds, evals, CI, dry-runs, partial logs, previews, or unexecuted commands. Record stable commands/conventions instead.",
     "- Memory is guidance, not proof; current repo evidence and explicit user instructions win.",
   ].filter(Boolean).join("\n");
+}
+
+function evidenceClaimDiscipline(): string {
+  return [
+    "- Evidence-grade claims: Dry-runs, inventory commands, grep counts, and partial logs are not live verification; report them as inventory or partial evidence, never as current pass/fail status.",
+    "- Before saying a feature, API, file, route, command, dependency, or pattern is absent, perform a targeted local search/read or label it unknown/gap. Negative claims require evidence just like positive claims.",
+    "- Reconcile contradictions between handoffs before synthesis. If evidence conflicts, say what is unresolved and what check would settle it; do not concatenate raw upstream output as if all claims were simultaneously true.",
+    "- Do not write memory candidates for transient pass/fail/current-status claims. Durable memory may describe stable commands, conventions, or workflow rules.",
+  ].join("\n");
 }
 
 function extractAgentSection(text: string, start: string, end: string): string {
@@ -292,9 +303,14 @@ function extractAgentSection(text: string, start: string, end: string): string {
   return pattern.exec(text)?.[1]?.trim() ?? "";
 }
 
-function shouldUseHandoffOnlyMode(agent: AgentDefinition | undefined, deepHandoff: boolean): boolean {
+function shouldUseHandoffOnlyMode(agent: AgentDefinition | undefined, deepHandoff: boolean, task = ""): boolean {
   if (!agent || deepHandoff) return false;
+  if (taskNeedsCriticalHandoffAudit(task)) return false;
   return agent.concern === "context-building";
+}
+
+function taskNeedsCriticalHandoffAudit(task: string): boolean {
+  return /\b(contradict|contradicci[oó]n|conflict|conflicto|critical claim|claim check|fact[- ]?check|reconcile|reconciliar|no existe|not present|absent|missing evidence|unknown|gap|unresolved)\b/i.test(task);
 }
 
 function taskNeedsExternalContext(agent: AgentDefinition): boolean {
@@ -421,7 +437,7 @@ function handoffGapReadContract(options: SdkPromptOptions, agent: AgentDefinitio
     "- If a read is blocked by the cross-step duplicate-read policy, do not retry variants of the same evidence path; use the handoff evidence and mark the claim as sampled/not rechecked.",
     "- Prefer citing evidence already present in the handoff. Use new reads only to close explicit gaps, then stop.",
     "- If coverage is incomplete, say exactly what remains unknown instead of expanding into a broad crawl.",
-    "- Return final answer material plus a compact handoff; do not emit a second raw exploration log.",
+    "- Reconcile contradictions before final handoff and do not concatenate raw upstream output; produce final answer material plus a compact handoff, not a second exploration log.",
   ].filter((line): line is string => Boolean(line)).join("\n");
 }
 

@@ -188,6 +188,20 @@ test("scoreProgress turns utility signals into continuation gates", () => {
   assert.ok(lowSignal.score < 0);
 });
 
+test("scoreProgress flags late first signal even when later findings exist", () => {
+  const lateSignal = scoreProgress({
+    findings: ["src/index.ts defines the extension entrypoint.", "src/tools.ts registers the route tool."],
+    toolCalls: 12,
+    filesRead: ["package.json", "README.md", "src/index.ts", "src/tools.ts"],
+    firstSignalToolCall: 10,
+    verificationDone: false,
+    memoryCandidates: [],
+  });
+
+  assert.ok(lateSignal.negativeSignals.includes("late_first_signal"));
+  assert.ok(lateSignal.score < 0.2);
+});
+
 test("evaluateBudgetUsage records low-signal progress without checkpointing budget caps", () => {
   const scout = agent("scout", "recon");
   const policy = policyForStep(scout, { agent: "scout", task: "Map project", budget: "normal" }, "multi-agent-chain");

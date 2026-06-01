@@ -1,4 +1,5 @@
 import type { ChalinHandleResult } from "./kernel.ts";
+import { sanitizeTransientVerificationClaims } from "./evidence-claims.ts";
 import type { ChalinRouteOutcome } from "./runtime-state.ts";
 import type { RouteDecision, RunState } from "./schemas.ts";
 import { isUsableStepStatus } from "./status.ts";
@@ -50,13 +51,13 @@ export function finalAnswerMaterial(run: RunState | undefined): string | undefin
   const completeSteps = run.steps.filter((step) => isUsableStepStatus(step.status));
   const budget = finalAnswerMaterialBudget(run);
   if (shouldAggregateFinalMaterial(run, completeSteps)) {
-    const material = completeSteps
-      .map((step) => {
-        const output = stepFullOutput(step);
-        return output ? `## ${step.agent}\n${output}` : undefined;
-      })
-      .filter((item): item is string => Boolean(item))
-      .join("\n\n");
+    const primary = completeSteps.at(-1);
+    const primaryOutput = primary ? stepFullOutput(primary) : undefined;
+    const supporting = supportingEvidenceMaterial(completeSteps.slice(0, -1));
+    const material = [
+      primaryOutput,
+      supporting ? `Supporting evidence:\n${supporting}` : undefined,
+    ].filter((item): item is string => Boolean(item)).join("\n\n");
     return material ? finalMaterialWithEvidence(run, material, budget) : undefined;
   }
   const primary = completeSteps.at(-1) ?? run.steps.at(-1);
@@ -65,12 +66,13 @@ export function finalAnswerMaterial(run: RunState | undefined): string | undefin
 }
 
 function finalMaterialWithEvidence(run: RunState, material: string, max: number): string {
+  const sanitized = sanitizeTransientVerificationClaims(material).text;
   const footer = implementationEvidenceFooter(run, material);
-  if (!footer) return truncate(material, max);
-  const separator = material.trim() ? "\n\n" : "";
+  if (!footer) return truncate(sanitized, max);
+  const separator = sanitized.trim() ? "\n\n" : "";
   const availableForMaterial = max - footer.length - separator.length;
-  if (availableForMaterial < 240) return truncate(`${material}${separator}${footer}`, max);
-  return `${truncate(material, availableForMaterial)}${separator}${footer}`;
+  if (availableForMaterial < 240) return truncate(`${sanitized}${separator}${footer}`, max);
+  return `${truncate(sanitized, availableForMaterial)}${separator}${footer}`;
 }
 
 function implementationEvidenceFooter(run: RunState, material: string): string | undefined {
@@ -112,6 +114,37 @@ function shouldAggregateFinalMaterial(run: RunState, completeSteps: RunState["st
   const hasEvidenceBuilder = agents.has("scout") || agents.has("context-builder");
   const hasSynthesis = agents.has("reviewer") || agents.has("context-builder");
   return !hasWriter && hasEvidenceBuilder && hasSynthesis;
+}
+
+function supportingEvidenceMaterial(steps: RunState["steps"]): string | undefined {
+  const items = steps
+    .map((step) => {
+      const output = stepFullOutput(step);
+      if (!output) return undefined;
+      const excerpt = curatedEvidenceExcerpt(output);
+      return excerpt ? `- ${step.agent}: ${excerpt}` : undefined;
+    })
+    .filter((item): item is string => Boolean(item));
+  return items.length ? items.join("\n") : undefined;
+}
+
+function curatedEvidenceExcerpt(text: string): string | undefined {
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .filter((line) => /\b(Coverage Matrix|Evidence Table|Unknowns?|Gaps?|Findings?|Verdict|Changed|Verification|Effect evidence|Risk|Riesgo|Hallazgos?|Evidencia)\b/i.test(line))
+    .slice(0, 4)
+    .map((line) => truncate(collapseRepeatedText(line), 320));
+  if (lines.length > 0) return lines.join(" ");
+  return truncate(collapseRepeatedText(text), 320);
+}
+
+function collapseRepeatedText(text: string): string {
+  return text
+    .replace(/\b((?:[a-z][\w/-]*\s+){2,5})(?:\1){2,}/gi, "$1… ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function finalAnswerMaterialBudget(run: RunState): number {
