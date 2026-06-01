@@ -48,6 +48,7 @@
     "eval:workflow:complex": "bun evals/workflow-quality.eval.ts --preset=complex",
     "eval:workflow:routed": "bun evals/workflow-quality.eval.ts --preset=routed",
     "eval:workflow:community": "bun evals/workflow-quality.eval.ts --preset=community",
+    "eval:skills:llm-ab": "bun evals/workflow-quality.eval.ts --preset=skills-ab",
     "eval:workflow:improvement": "bun evals/workflow-improvement.eval.ts",
     "eval:long": "bun evals/long-running.eval.ts"
   },
