@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import initSqlJs from "sql.js-fts5/dist/sql-asm.js";
 import { Context, Effect, Layer } from "effect";
+import { isTransientVerificationStateClaim } from "./evidence-claims.ts";
 import { resolveChalinPaths, type ChalinPathsOptions } from "./paths.ts";
 import type { AgentConcern, MemoryAuditEvent, MemoryAuditEventType, MemoryCandidate, MemoryRecord } from "./schemas.ts";
 
@@ -739,6 +740,7 @@ function isUsefulMemoryContent(content: string): boolean {
   if (containsAnyInsensitive(normalized, ["subprocess", "os.environ", "PI_OFFLINE", "stdout", "stderr", "returncode", "TimeoutExpired", "sys.exit", "traceback", "stack trace"])) return false;
   if (containsAnyInsensitive(normalized, ["mock handoff", "previous handoff", "task:"])) return false;
   if (containsCompletedStepNoise(normalized)) return false;
+  if (isTransientVerificationStateClaim(normalized)) return false;
   const codePunctuation = countChars(normalized, new Set(["=", ";", "{", "}", "(", ")", "[", "]"]));
   if (codePunctuation >= 4) return false;
   return true;

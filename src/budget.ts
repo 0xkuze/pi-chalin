@@ -5,7 +5,7 @@ import type { AgentDefinition, BudgetCapHit, BudgetCapName, RouteKind, RouteRisk
 export type { BudgetCapHit } from "./schemas.ts";
 
 export type BudgetTaskKind = "recon" | "review" | "implementation" | "migration" | "long-autonomous" | "research" | "planning" | "synthesis";
-export type BudgetHealthStatus = "ok" | "warn" | "budget-capped";
+export type BudgetHealthStatus = "ok" | "warn" | "checkpointed";
 export type BudgetResumeStrategy = "none" | "handoff-only" | "checkpoint-and-continue" | "split-and-continue" | "stage-checkpoint-validate-memory-next";
 
 export interface BudgetCaps {
@@ -176,6 +176,7 @@ export function estimateBudgetPreflight(input: BudgetPreflightInput): BudgetPref
 }
 
 export function evaluateBudgetUsage(policy: BudgetPolicy, usage: BudgetUsage, progress?: ProgressScore): BudgetHealth {
+  if (budgetGatesDisabled()) return { status: "ok", caps: [], warnings: [], next: "continue" };
   const caps: BudgetCapHit[] = [];
   compare(caps, "max_tool_calls", usage.toolCalls, policy.caps.maxToolCalls);
   compare(caps, "max_seconds", Math.ceil(usage.elapsedMs / 1000), policy.caps.maxSeconds);
@@ -188,22 +189,19 @@ export function evaluateBudgetUsage(policy: BudgetPolicy, usage: BudgetUsage, pr
   compare(caps, "max_retries_per_tool", maxRetries, policy.caps.maxRetriesPerTool);
 
   if (caps.length === 0) return { status: "ok", caps, warnings: [], next: "continue" };
-  const hard = caps.some((cap) => cap.severity === "hard");
-  const status: BudgetHealthStatus = hard ? "budget-capped" : "warn";
-  const progressGate = progress && progress.gate !== "continue" ? progress.gate : undefined;
-  const checkpointStatus = progressGate ? checkpointStatusForGate(progressGate) : undefined;
   return {
-    status,
+    status: "warn",
     caps,
     warnings: [
       ...caps.map((cap) => `${cap.name} used ${formatNumber(cap.used)} over limit ${formatNumber(cap.limit)}`),
-      ...(progressGate ? [`progress gate ${progressGate} from score ${formatNumber(progress?.score ?? 0)}`] : []),
+      ...(progress && progress.gate !== "continue" ? [`progress signal ${progress.gate} from score ${formatNumber(progress.score)}`] : []),
     ],
-    ...(checkpointStatus ? { checkpointStatus } : {}),
-    next: progressGate ?? (status === "budget-capped"
-      ? policy.resumeStrategy === "stage-checkpoint-validate-memory-next" ? "split" : "checkpoint-and-continue"
-      : "continue"),
+    next: "continue",
   };
+}
+
+function budgetGatesDisabled(): boolean {
+  return process.env.PI_CHALIN_DISABLE_BUDGET_GATES === "1";
 }
 
 export function summarizeToolUtility(input: ToolUtilityInput): ToolUtilityMetrics {
@@ -231,6 +229,7 @@ export function scoreProgress(input: ToolUtilityInput): ProgressScore {
   if (utility.verificationDone) positiveSignals.push("verification_done");
   if (utility.memoryCandidatesQuality >= 0.45) positiveSignals.push("memory_quality");
   if (utility.duplicateReads > 0) negativeSignals.push("duplicate_reads");
+  if (input.toolCalls >= 8 && utility.toolCallsBeforeFirstSignal > 6) negativeSignals.push("late_first_signal");
   if (input.toolCalls >= 10 && utility.findingsPerTool < 0.08) negativeSignals.push("low_signal_tools");
   if (input.findings.filter((item) => item.trim()).length === 0) negativeSignals.push("no_findings");
 
@@ -240,6 +239,7 @@ export function scoreProgress(input: ToolUtilityInput): ProgressScore {
     + Math.min(0.2, utility.memoryCandidatesQuality * 0.25)
     + (positiveSignals.includes("early_signal") ? 0.12 : 0)
     - utility.duplicateReads * 0.18
+    - (negativeSignals.includes("late_first_signal") ? 0.25 : 0)
     - (negativeSignals.includes("low_signal_tools") ? 0.32 : 0)
     - (negativeSignals.includes("no_findings") ? 0.18 : 0),
   );
@@ -271,13 +271,13 @@ function recordBudgetCheckpointEffect(store: ArtifactStore, featureId: string, s
   return Effect.gen(function* () {
     yield* Effect.tryPromise(() => store.initFeature({
       featureId,
-      goal: `Continue budget-capped pi-chalin step ${step.agent}`,
+      goal: `Continue budget checkpoint for pi-chalin step ${step.agent}`,
       chain: [step.agent],
       currentStep: step.task,
     }));
     return yield* Effect.tryPromise(() => store.appendCheckpoint(featureId, {
       agent: step.agent,
-      title: `${step.agent} budget-capped`,
+      title: `${step.agent} budget checkpoint`,
       summary: compact([step.output?.handoff, step.output?.text, reason].filter(Boolean).join(" "), 900),
       status: "paused",
       stage: step.id,
@@ -298,12 +298,10 @@ function compare(caps: BudgetCapHit[], name: BudgetCapName, used: number, limit:
     name,
     used,
     limit,
-    severity: hardBudgetCapNames.has(name) ? "hard" : "soft",
+    severity: "soft",
     phase: "post-step",
   });
 }
-
-const hardBudgetCapNames = new Set<BudgetCapName>(["max_seconds", "max_usd", "max_turns"]);
 
 function baseCapsForTask(taskKind: BudgetTaskKind, agentName: string): BudgetCaps {
   const baseToolCalls = baseToolCallsFor(taskKind, agentName);

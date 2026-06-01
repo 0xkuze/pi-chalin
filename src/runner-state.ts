@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { estimateBudgetPreflight } from "./budget.ts";
 import { resolveChalinPaths, type ChalinPathsOptions } from "./paths.ts";
 import type { AgentStep, RouteDecision, RoutePlan, RunState, RunStepState } from "./schemas.ts";
+import { isUsableStepStatus, normalizeLegacyBudgetCappedRun } from "./status.ts";
 
 export function createRunState(route: RouteDecision, cwd: string, rootTask?: string, metadata: { parentRunId?: string; parentStepId?: string; delegationDepth?: number } = {}): RunState {
   const id = `chalin-${Date.now().toString(36)}`;
@@ -11,6 +12,7 @@ export function createRunState(route: RouteDecision, cwd: string, rootTask?: str
     route,
     ...(rootTask?.trim() ? { rootTask: rootTask.trim() } : {}),
     status: "running",
+    schemaVersion: 2,
     startedAt: new Date().toISOString(),
     steps: route.plan ? planSteps(route.plan) : [],
     logsPath: path.join(resolveChalinPaths({ cwd }).projectRoot, ".pi-chalin", "runs", `${id}.json`),
@@ -36,6 +38,7 @@ export function prepareRunForResume(run: RunState): RunState {
     if (isUsableStepHandoff(step) || step.status === "failed") continue;
     step.status = "pending";
     step.error = undefined;
+    step.pauseReason = undefined;
     step.currentTool = undefined;
     step.endedAt = undefined;
   }
@@ -52,7 +55,7 @@ export function loadResumableRunState(options: ChalinPathsOptions & { runId?: st
     .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
   for (const file of files) {
     try {
-      const parsed = JSON.parse(fs.readFileSync(file, "utf-8")) as RunState;
+      const parsed = normalizeLegacyBudgetCappedRun(JSON.parse(fs.readFileSync(file, "utf-8")) as RunState);
       if (options.runId && parsed.id !== options.runId) continue;
       if (isResumableRun(parsed)) {
         parsed.logsPath ??= file;
@@ -77,7 +80,7 @@ export function persistRun(run: RunState): void {
 }
 
 export function isUsableStepHandoff(step: Pick<RunStepState, "status">): boolean {
-  return step.status === "complete" || step.status === "budget-capped";
+  return isUsableStepStatus(step.status);
 }
 
 function isResumableRun(run: RunState): boolean {

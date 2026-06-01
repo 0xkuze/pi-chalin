@@ -72,6 +72,31 @@ test("MemoryStore rejects logs code snippets and task completion noise", async (
   assert.equal((await store.list()).length, 0, "invalid legacy-style memories should be hidden from review lists");
 });
 
+test("MemoryStore rejects transient verification status as durable memory", async () => {
+  const cwd = tempDir("pi-chalin-memory-");
+  const store = new MemoryStore({ cwd });
+  const records = await store.submitCandidates([
+    createMemoryCandidate({
+      category: "testing",
+      content: "The test suite dry-run currently reports 538 tests with 138 failing cases in smoke integration.",
+      sourceAgent: "scout",
+      confidence: 0.94,
+      scope: "project",
+    }),
+    createMemoryCandidate({
+      category: "tooling",
+      content: "Project regression tests run through Bun, so new TypeScript tests should use the bun:test API and isolated temporary roots.",
+      sourceAgent: "reviewer",
+      confidence: 0.94,
+      scope: "project",
+    }),
+  ]);
+
+  assert.equal(records[0]?.status, "rejected");
+  assert.equal(records[1]?.status, "active");
+  assert.deepEqual((await store.list("active")).map((record) => record.category), ["tooling"]);
+});
+
 test("MemoryStore deduplicates normalized candidates before writing", async () => {
   const cwd = tempDir("pi-chalin-memory-");
   const store = new MemoryStore({ cwd });

@@ -5,7 +5,7 @@ import { loadEffectiveConfig, type ChalinConfig } from "./config.ts";
 import { createConfiguredMemoryStore } from "./memory-provider.ts";
 import { buildCompactChalinOrchestratorSystemPrompt, buildChalinOrchestratorSystemPrompt } from "./orchestration.ts";
 import { isUsableStepHandoff, loadResumableRunState } from "./runner-state.ts";
-import { beginChalinTurn, getDirectChangedPaths, getDirectCriticalGuardContextMessage, getSkillOverridesForTurn, isDirectLeanBoundedTurn, isDirectStatefulTimeTurn, isDirectTestOnlyTurn, recordDirectToolCompletion } from "./runtime-state.ts";
+import { beginChalinTurn, getDirectChangedPaths, getDirectCriticalGuardContextMessage, getSkillOverridesForTurn, recordDirectToolCompletion, recordDirectToolStart } from "./runtime-state.ts";
 import type { RunState } from "./schemas.ts";
 import { SkillCatalog, formatActiveSkillsForPrompt } from "./skills.ts";
 import { setChalinStatus } from "./ui-status.ts";
@@ -17,25 +17,8 @@ type PendingToolArgs = {
 };
 
 const pendingToolStarts = new WeakMap<object, Map<string, PendingToolArgs[]>>();
-const scopedToolSetRestore = new WeakMap<object, string[]>();
-type ToolScopeRestoreMode = "decision" | "turn";
-const scopedToolSetRestoreMode = new WeakMap<object, ToolScopeRestoreMode>();
 type PiThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
 const orchestratorThinkingRestore = new WeakMap<object, PiThinkingLevel>();
-const DIRECT_CHALIN_TOOL_NAMES = [
-  "chalin_interview",
-  "chalin_project_discovery",
-  "chalin_project_snapshot",
-  "chalin_route",
-  "chalin_resume",
-  "chalin_web_search",
-  "chalin_memory_search",
-  "chalin_memory_write",
-  "chalin_memory_revise",
-];
-const BOUNDED_DIRECT_HIDDEN_TOOLS = new Set([...DIRECT_CHALIN_TOOL_NAMES, "grep", "find", "ls"]);
-const GREENFIELD_DIRECT_HIDDEN_TOOLS = new Set([...DIRECT_CHALIN_TOOL_NAMES, "read", "grep", "find", "ls"]);
-const ROUTE_ONLY_TOOLS = new Set(["chalin_route"]);
 
 function runHookEffect<A>(span: string, run: () => A | Promise<A>): Promise<A> {
   return Effect.runPromise(Effect.tryPromise({ try: async () => run(), catch: (error) => error }).pipe(Effect.withSpan(span)));
@@ -45,67 +28,47 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
   pi.on("input", (event) => Effect.runPromise(inputGuardEffect(event)));
 
   pi.on("before_agent_start", (event, ctx) => runHookEffect("autoroute.beforeAgentStart", async () => {
-    restoreScopedToolSet(pi);
     beginChalinTurn({ prompt: typeof event.prompt === "string" ? event.prompt : undefined, cwd: ctx.cwd });
     const loaded = loadEffectiveConfig({ cwd: ctx.cwd });
     if (!loaded.config.enabled) return;
     forceOrchestratorThinkingHigh(pi);
     const promptText = typeof event.prompt === "string" ? event.prompt : "";
-    const resumableRun = loadResumableRunState({ cwd: ctx.cwd, recoverStale: false });
+    const resumableRun = promptLooksResumeIntent(promptText)
+      ? loadResumableRunState({ cwd: ctx.cwd, recoverStale: false })
+      : undefined;
     const resumeContext = resumableRun ? compactResumeCandidateMessage(resumableRun) : undefined;
-    const forceRouteFirst = shouldForceRouteFirst(promptText, Boolean(resumeContext));
-    const useModeGate = shouldUseOrchestrationModeGate(promptText, Boolean(resumeContext), forceRouteFirst);
-    const hiddenDirectTools = forceRouteFirst ? undefined : hiddenDirectToolsForPrompt(promptText, Boolean(resumeContext));
-    if (forceRouteFirst) {
-      applyToolAllowlist(pi, ROUTE_ONLY_TOOLS);
-    } else if (useModeGate) {
-      applyDecisionToolAllowlist(pi, ROUTE_ONLY_TOOLS);
-    } else if (hiddenDirectTools) {
-      applyDirectToolScope(pi, hiddenDirectTools);
-    }
-    const skipCompactPrompt = shouldSkipCompactPathPrompt(promptText, Boolean(resumeContext));
-    if (skipCompactPrompt) {
-      return {
-        systemPrompt: event.systemPrompt,
-        message: {
-          customType: "pi-chalin-lean-package-local-path",
-          content: leanPackageLocalPathSteeringMessage(promptText),
-          display: false,
-        },
-      };
-    }
     const useCompactPathPrompt = shouldUseCompactDirectOrchestrationPrompt(promptText);
-    const useCompactBoundedReviewPrompt = !ctx.hasUI && !useCompactPathPrompt && promptLooksBoundedReadOnlyReview(promptText);
-    const useCompactPrompt = useCompactPathPrompt || useCompactBoundedReviewPrompt;
+    const useCompactPrompt = useCompactPathPrompt;
     const useCompactGeneralPrompt = !ctx.hasUI && !useCompactPrompt;
     const catalog = useCompactPrompt || useCompactGeneralPrompt ? undefined : AgentCatalog.load({ cwd: ctx.cwd });
     const orchestrationPrompt = useCompactGeneralPrompt
       ? buildCompactChalinOrchestratorSystemPrompt()
       : useCompactPrompt
       ? ""
-      : buildChalinOrchestratorSystemPrompt(catalog?.list() ?? []);
+      : buildChalinOrchestratorSystemPrompt(catalog?.list() ?? [], promptText);
     const memoryContext = useCompactPrompt ? undefined : await globalMemoryContextForPrompt(ctx.cwd, promptText);
     const skillSignal = buildSkillSteeringMessage(ctx.cwd, loaded.config, promptText);
     const systemPrompt = [event.systemPrompt, orchestrationPrompt, memoryContext].filter((item) => item?.trim()).join("\n\n");
     return {
       systemPrompt,
       message: {
-        customType: useCompactBoundedReviewPrompt ? "pi-chalin-review-compact-orchestration" : useCompactPathPrompt ? "pi-chalin-path-compact-orchestration" : useCompactGeneralPrompt ? "pi-chalin-compact-orchestration" : "pi-chalin-orchestration",
-        content: useCompactBoundedReviewPrompt ? [resumeContext, skillSignal, compactBoundedReadOnlyReviewSteeringMessage(promptText, ctx.hasUI)].filter(Boolean).join("\n\n") : useCompactPathPrompt ? [resumeContext, skillSignal, compactPathSteeringMessage(promptText, ctx.hasUI)].filter(Boolean).join("\n\n") : useCompactGeneralPrompt ? [resumeContext, skillSignal, compactGeneralSteeringMessage(promptText)].filter(Boolean).join("\n\n") : [
+        customType: useCompactPathPrompt ? "pi-chalin-path-compact-orchestration" : useCompactGeneralPrompt ? "pi-chalin-compact-orchestration" : "pi-chalin-orchestration",
+        content: useCompactPathPrompt ? [resumeContext, skillSignal, compactPathSteeringMessage(promptText, ctx.hasUI)].filter(Boolean).join("\n\n") : useCompactGeneralPrompt ? [resumeContext, skillSignal, compactGeneralSteeringMessage(promptText)].filter(Boolean).join("\n\n") : [
           resumeContext,
           skillSignal,
           "If the current user intent is to continue an interrupted pi-chalin run, call chalin_resume before answering from partial findings.",
-          "pi-chalin preflight: if this is branch/project analysis, current diff/PR/branch analysis, project/service structure with entrypoints or testing map, architecture/planning, broad/project-wide review, project-wide refactor strategy, complex/risky multi-file implementation, auth/security/token/session behavior with tests and no explicit source path, stateful parser/scanner/tokenizer work with broad grammar/ownership uncertainty, or independent option comparison, call chalin_route as the first tool unless the user explicitly asks for direct/native/no-subagent work. For explicit memory recall/remembrance or memory inventory/counts, including Spanish prompts like recuerda/recordar/memoria/decidimos, call chalin_memory_search as the first tool; use mode=list for inventory/count questions. Bounded docs-only artifacts, bounded read-only mini-project reviews, bounded scaffolding, named-file bugfixes, named-file refactors, and simple implementation with explicit acceptance criteria should stay direct unless evidence shows state/risk beyond native work.",
-          "Direct exception: bounded read-only mini-project reviews that explicitly forbid file changes stay native even when they mention risk/security/auth boundaries. Gather bounded evidence and cite concrete paths; route only if the prompt also asks for deep/project-wide/exhaustive analysis or evidence proves the review is not actually bounded.",
-          "Bounded read-only auth/security review: stay native when the prompt asks to review/analyze and not edit. Read package/manifest plus obvious auth/session/server/route files once; avoid repeated ls/find after source hits. Final findings-first and concise: code-proven core risks plus direct secondary risks only, severity, exact path/function evidence, exploit or bypass, impact, and remediation. No code changes, no tests, no broad project scan, no tutorial.",
-          "Docs/no-code with one explicit docs artifact starts native only when the requested artifact is bounded/local. Deep architecture, migration, cross-language/runtime, dependency-map, ownership/responsibility, staged-plan, or project-wide refactor docs are routed work even when the mutation target is one docs file: call chalin_route first and have the routed workflow update only that artifact. For routed docs artifact mutations, choose the smallest agent set that can gather evidence, update only the artifact, and review artifact contract/evidence/gaps/readback. Evidence lock: docs may only claim concepts shown by prompt/source/test evidence; mark missing surfaces as searched/not-found instead of inventing fields or states. Completed docs must not contain literal TODO/TBD/WIP/placeholder tokens, even when describing the previous artifact state; omit that history or say previous stub without placeholder words. Architecture/refactor docs need a current→target responsibility/ownership map and evidence-derived validation, not a generic code-edit checklist. Deep architecture docs also need a problem taxonomy with evidence, data-flow/coupling map, target ownership/layers, staged migration with exit criteria, risk register with severity and mitigation, rollback strategy, phase checklist, and out-of-scope boundaries; future abstractions are useful only when clearly marked future or out-of-scope. Operational runbooks need evidenced current command/source state, concrete steps, test/typecheck commands only when evidenced, failure-mode diagnosis, isolated reproduction or smoke check, rollback options with VCS caveats, and unresolved gaps separated from bugs. Final Verification is the updated docs readback; searches/grep are Notes.",
+          "pi-chalin preflight: the LM decides whether to answer directly, interview, use web search, use memory, or call chalin_route. The runtime must not classify the user's prompt into a route; use the full intent, available context, risk, ambiguity, and expected verification cost. chalin_route is useful when specialist context isolation materially improves quality, cost, risk control, or context pressure. Native tools are useful when the work is bounded, local, and verifiable without specialist isolation.",
+          "Decision guidance, not a code classifier: broad branch/project analysis, current diff/PR/branch analysis, project/service structure with entrypoints or testing map, architecture/planning, broad/project-wide review, project-wide refactor strategy, complex/risky multi-file implementation, auth/security/token/session behavior with tests and no explicit source path, stateful parser/scanner/tokenizer work with broad grammar/ownership uncertainty, or independent option comparison often benefit from chalin_route. Simple chat, definitions, one obvious command, bounded operational release/git chores, bounded docs-only artifacts, bounded read-only mini-project reviews, bounded scaffolding, named-file bugfixes/refactors, and simple implementation with explicit acceptance criteria often fit native work. The LM may choose otherwise when evidence warrants it.",
+          "For explicit memory recall/remembrance or memory inventory/counts, including Spanish prompts like recuerda/recordar/memoria/decidimos, prefer chalin_memory_search; use mode=list for inventory/count questions.",
+          "Bounded read-only auth/security review guidance: when the LM chooses native review, read package/manifest plus obvious auth/session/server/route files once; avoid repeated ls/find after source hits. Final findings-first and concise: code-proven core risks plus direct secondary risks only, severity, exact path/function evidence, exploit or bypass, impact, and remediation. No code changes, no tests, no broad project scan, no tutorial unless the user asks.",
+          "Docs/no-code guidance: a bounded/local docs artifact can use native work; substantial architecture, migration, cross-language/runtime, dependency-map, ownership/responsibility, staged-plan, or project-wide refactor docs often benefit from routing even when the mutation target is one docs file. If routing, the routed workflow still updates only that artifact and should review artifact contract/evidence/gaps/readback. Evidence lock: docs may only claim concepts shown by prompt/source/test evidence; mark missing surfaces as searched/not-found instead of inventing fields or states. Completed docs must not contain literal TODO/TBD/WIP/placeholder tokens, even when describing the previous artifact state; omit that history or say previous stub without placeholder words. Architecture/refactor docs need a current→target responsibility/ownership map and evidence-derived validation, not a generic code-edit checklist. Deep architecture docs also need a problem taxonomy with evidence, data-flow/coupling map, target ownership/layers, staged migration with exit criteria, risk register with severity and mitigation, rollback strategy, phase checklist, and out-of-scope boundaries; future abstractions are useful only when clearly marked future or out-of-scope. Operational runbooks need evidenced current command/source state, concrete steps, test/typecheck commands only when evidenced, failure-mode diagnosis, isolated reproduction or smoke check, rollback options with VCS caveats, and unresolved gaps separated from bugs. Final Verification is the updated docs readback; searches/grep are Notes.",
           "For explicit small bugfix/test requests with named files, inspect the target files once, edit promptly, and verify. Do not route or dry-run unless the change is broad, destructive, a security-sensitive mutation, or ambiguous.",
           "Also call chalin_route for risky surgical/long-file edits or stateful grammar/scanner changes only after a cheap target read shows broad grammar coupling, ambiguous transition ownership, unsafe surgery, or repeated local verification failure; choose agents from the evidence and require worker execution plus final reviewer verification for any routed mutation.",
           "If the user asks to compare independent approaches/options, choose chalin_route with parallel planners/reviewers and synthesize the recommendation afterward.",
           "When routing, choose topology deliberately from the user prompt, available agents, and evidence. Use the smallest workflow that can prove the answer; add discovery, planning, parallelism, or synthesis only when it materially improves coverage or risk control. Do not route plain memory recall/inventory; use chalin_memory_search. Routed implementation/file mutation must include worker execution plus a later reviewer; if reviewer reports FAIL/GAP, continue with focused repair instead of finalizing.",
           "Choose topology/agents yourself. Use one chalin_route call only, then synthesize from its handoff; do not inspect files directly unless a concrete gap remains.",
           ctx.hasUI ? undefined : "Non-interactive mode: avoid dry-run for safe bounded edits; either edit directly or run a real chalin_route. Use dryRun only for destructive/high-risk/ambiguous work that genuinely needs user review.",
-          "Simple chat, definitions, one obvious command, tiny isolated edits, bounded read-only mini-project reviews, named-file bugfixes/refactors, or bounded scaffolding/simple implementation with explicit files stay direct. Quality-equivalent bounded direct work should prefer lower cost/time/tool count over orchestration. Direct mode must satisfy every explicit criterion: requested helpers/tests/docs/README, requested language/toolchain, package runner coherence, no unrequested deps, behavior preservation, existing conventions, exact requested files/APIs, executable metadata, runner-discoverable tests, and fixed verification failures.",
+          "When the LM chooses direct mode, satisfy every explicit criterion: requested helpers/tests/docs/README, requested language/toolchain, package runner coherence, no unrequested deps, behavior preservation, existing conventions, exact requested files/APIs, executable metadata, runner-discoverable tests, and fixed verification failures. Quality-equivalent bounded direct work should prefer lower cost/time/tool count over orchestration, but the LM owns that judgment.",
           "For behavior changes, derive the contract from prompt+repo evidence before coding. Tests are contract oracles: preserve starter assertions unless disproven, add focused independent assertions plus one representative boundary/counterexample when tests are requested or existing coverage is insufficient, cover changed behavior and preservation/no-op paths, and change implementation before changing expectations unless evidence proves the expectation wrong. Canonical surface discipline: existing source stubs, starter test imports, exact prompt paths, and runner-discovered test files define the delivered surface; do not create parallel modules/tests with near-identical names just because a function name suggests another filename. Broken-test triage is not a coverage expansion task: if the existing failing test already captures the user-visible bug and the user did not ask for new tests, run/observe that failure if needed, fix the implementation, rerun the same nearest test, and final with source+test evidence; add tests only when the failing test is absent/inadequate or the prompt asks for coverage. Refactors improve internal structure without shrinking the typed/public contract: capture current behavior with approval-style API tests, triangulate with different inputs/outputs, prefer pure helpers where feasible, and keep type safety anchored in source-of-truth types rather than broad casts, duplicate type definitions, or object-bag typing. Typed refactors with object-shaped public returns should preserve an explicit source-of-truth return type/signature when local style allows it. Newly public/exported helpers should own their boundary semantics such as optional/default inputs when that makes the helper independently testable, get a short responsibility comment when expanding public surface and local style allows it, and be triangulated with zero/one/many or equivalent distinct cases plus one composed public-API case. If an extracted helper covers an optional/default public input, the helper owns that default so its unit tests can call the boundary directly. For formula, aggregation, or ratio refactors, derive equivalence classes from the existing operations: neutral/default value, meaningful extreme/ceiling/floor value, empty/one/many collection sizes when collections exist, rounding/formatting branch when present, and one composed public-API proof that helpers preserve the orchestration result. Each extracted formula helper with rounding/formatting/threshold logic needs its own non-integer or threshold case; the composed API proof should expose order-sensitive intermediates when operation order is part of the contract. Prefer standard-library parsers/serializers for known wire formats before hand-written split/regex logic, then layer prompt-specific normalization on top. Preserve public compatibility by default: do not add stricter throws/panics, normalization, mutation, or API-shape changes unless prompt, existing tests, docs, or domain evidence require them. If the prompt names a narrow token, flag, path segment, format, or subdomain, change only that subdomain and add one adjacent non-target preservation assertion. When changing one component inside a structured value, split it from adjacent metadata before comparing, normalize only that component, then recombine unchanged metadata. If a delimiter/quoted/protected segment must be a separate token/entity even when adjacent, tests must prove it separates from both previous and next unprotected text instead of merging with either side. Specific equivalence examples do not imply a whole-family rewrite; preservation means keep existing unrelated suffixes/delimiters, not invent them globally. Text/query filters: test trim/blank, no-match, and order when relevant.",
           "For path-bounded code+test work, keep the loop tight: small evidence set, one combined implementation/test edit when possible, one nearest verification, one focused corrective edit per failed verification, then final. Before writing tests/imports, infer the package runner from package.json/config/existing tests and keep assertion APIs compatible with the command that will run: node --test uses node:test/node:assert, bun test may use bun:test, Vitest uses vitest. Do not read back after passing verification just to build the final; use changed-file readback before verification only when the latest edit output is incomplete or a specific claim needs evidence. Final must cite exact implementation path plus test/evidence path; command-only verification evidence is incomplete after code changes. Existing large/partial files use targeted edits; tiny fully read stub files may be full-file replaced once when simpler than brittle patching. Prefer idiomatic ownership/resources; avoid leaks, globals, arbitrary fixed caps, unsafe casts, warning suppression, or resource escape hatches unless evidence requires them.",
         ].filter((line): line is string => Boolean(line)).join("\n"),
@@ -133,15 +96,22 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
 
   pi.on("agent_end", (_event, ctx) => {
     clearPendingToolStarts(pi);
-    restoreScopedToolSet(pi);
     restoreOrchestratorThinking(pi);
     setChalinStatus(ctx, { kind: "idle" });
   });
 
   pi.on("tool_execution_start", (event) => {
     restoreOrchestratorThinking(pi);
-    restoreDecisionToolSet(pi);
-    rememberToolStart(pi, event);
+    const startedArgs = rememberToolStart(pi, event);
+    const toolName = (event as { toolName?: unknown }).toolName;
+    if (typeof toolName === "string" && toolName) {
+      recordDirectToolStart({
+        toolName,
+        command: startedArgs?.command,
+        path: startedArgs?.path,
+        argsText: startedArgs?.argsText,
+      });
+    }
   });
 
   pi.on("tool_execution_end", (event, ctx) => {
@@ -167,27 +137,17 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
 
     const eventArgs = (event as { args?: { command?: unknown; path?: unknown } }).args;
     const fallbackArgs = takeToolStart(pi, event.toolName);
-    const { shouldProgressNudge, shouldReadyToVerifyNudge, shouldFailureNudge, shouldCompletionNudge, shouldTestCoverageNudge, shouldWeakTestCoverageNudge, shouldPackageMetadataNudge, shouldParallelSurfaceNudge, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldDocsPreWriteShellNudge, shouldPreMutationVerificationNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldDocsEvidenceLoopNudge, shouldScaffoldEvidenceLoopNudge, shouldLocatorLoopNudge, shouldStatefulTimeNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, verificationCommand, docsOnlyMutation } = recordDirectToolCompletion({
+    const { shouldProgressNudge, shouldReadyToVerifyNudge, shouldFailureNudge, shouldCompletionNudge, shouldTestCoverageNudge, shouldWeakTestCoverageNudge, shouldPackageMetadataNudge, shouldParallelSurfaceNudge, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldPreMutationVerificationNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldDocsEvidenceLoopNudge, shouldLocatorLoopNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, verificationCommand, docsOnlyMutation } = recordDirectToolCompletion({
       toolName: event.toolName,
       isError: event.isError,
       command: typeof eventArgs?.command === "string" ? eventArgs.command : fallbackArgs?.command,
       path: typeof eventArgs?.path === "string" ? eventArgs.path : fallbackArgs?.path,
       argsText: eventArgs ? JSON.stringify(eventArgs) : fallbackArgs?.argsText,
     });
-    const statefulTimeTurn = isDirectStatefulTimeTurn();
-    const testOnlyTurn = isDirectTestOnlyTurn();
-    const leanDirectTurn = isDirectLeanBoundedTurn();
     if (shouldWorkspaceBoundaryNudge) {
       pi.sendMessage({
         customType: "pi-chalin-direct-workspace-boundary-nudge",
         content: "Hard stop: direct project work escaped the current workspace root. Do not write or verify in a home/sibling/tmp directory unless the user explicitly provided that absolute target. Recreate the required files under the current cwd using relative paths such as `package.json`, `src/...`, `test/...`, and `README.md`, then run verification from the current cwd. A final answer is invalid until the current workspace contains the delivered source, tests, docs, and manifest.",
-        display: false,
-      }, { triggerTurn: false, deliverAs: "steer" });
-    }
-    if (shouldDocsPreWriteShellNudge) {
-      pi.sendMessage({
-        customType: "pi-chalin-docs-prewrite-shell-nudge",
-        content: "Docs runbook compact mode. Shell is allowed only because the user explicitly asked to validate/execute a command. Run at most one pre-write shell total: package test/diagnostic when available, or `git status` if VCS rollback evidence matters more. After that command evidence, write the docs artifact next: no find/grep/test discovery, second diagnostic, or second pre-write shell just to improve confidence. Cite the manifest/source paths that prove commands and behavior. Evidence lock: only claim prompt/source/test facts; do not invent timestamps, versions, labels, or state. Artifact shape: `Estado actual`/`Current state`, `Pasos`/`Steps`, rollback, quick reference, one inline smoke command with expected output, a 3-row symptom/cause/next-check table, compact cases/invariants only when they apply, and typecheck command only when `tsconfig` or script evidence exists. Test-file examples must use the evidenced test root such as `test/`. Rollback must be factual: if `git status` was not run or says not-a-git-repo, say VCS was not verified and do not present `git restore`/`git stash`/`git revert` as runnable current-repo steps; git belongs only in an optional initialize-git/checkpoint flow. One write, one readback, at most one corrective edit+readback for missing required facts; do not iterate on polish. End with one complete prose sentence; no shell after docs mutation.",
         display: false,
       }, { triggerTurn: false, deliverAs: "steer" });
     }
@@ -205,25 +165,7 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
         display: false,
       }, { triggerTurn: false, deliverAs: "steer" });
     }
-    if (shouldScaffoldEvidenceLoopNudge) {
-      pi.sendMessage({
-        customType: "pi-chalin-scaffold-evidence-loop-nudge",
-        content: "You have enough scaffold/greenfield evidence before writing. Stop discovery now: create the requested product files in one compact pass, including package/bin/export metadata, README/API/usage docs when implied, and runner-discoverable tests. After the first verification, edit the exact root cause before any second bash.",
-        display: false,
-      }, { triggerTurn: false, deliverAs: "steer" });
-    }
-    if (shouldStatefulTimeNudge) {
-      pi.sendMessage({
-        customType: "pi-chalin-direct-stateful-time-nudge",
-        content: [
-          "Stateful/time-sensitive task drift: stop discovery once source and nearest tests are known.",
-          "Batch source plus focused tests before the first verification. Cover the happy path, before/at/after the state transition when meaningful, and one state update or preservation path when the contract mutates stored state; overwrites should prove value plus deadline/window renewal when time matters. Derive boundary times from variables such as `expiresAt := setTime.Add(ttl)` and then use before/exact/past values from that variable; do not rely on mental timestamp arithmetic. Include independent entries/keys when public behavior can diverge per entry, and stagger their set times/windows when expecting one valid and one expired.",
-          "Use fake/injected time or local deterministic state; no sleeps, broad matrices, or invented policy. Then run the nearest verification once and final from evidence.",
-        ].join("\n"),
-        display: false,
-      }, { triggerTurn: false, deliverAs: "steer" });
-    }
-    if (shouldLocatorLoopNudge && !shouldStatefulTimeNudge) {
+    if (shouldLocatorLoopNudge) {
       pi.sendMessage({
         customType: "pi-chalin-direct-locator-loop-nudge",
         content: "You already have target read/search evidence before changing files. If the prompt names an exact path, after reading it, ls/find/grep variants are usually waste: edit the named file plus one direct test/config path, or report the exact blocker. Stop trying locator variants: pick the highest-confidence source/test candidates from current output, read only a missing candidate if needed, then edit or report the exact blocker. Run another search only if the candidate read proves the symbol/API is absent.",
@@ -247,10 +189,7 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
     if (shouldSourceAndTestReadyNudge) {
       pi.sendMessage({
         customType: "pi-chalin-direct-source-test-ready-nudge",
-        content: statefulTimeTurn ? [
-          "Stateful/time source+test changed. Run one nearest verification now.",
-          "Before running it, self-check: happy path, boundary at/around transition derived from variables, state update/preservation, deterministic fake/injected time or state, independent entries staggered when asserting divergent expiry, and no invented policy. If verification fails, patch one concrete root cause, rerun once, then final.",
-        ].join("\n") : [
+        content: [
           "Source and tests changed. Stop expanding scope and run the nearest package verification now.",
           "Self-check before bash: changed behavior, one boundary/counterexample, one preservation/no-op path, runner-compatible imports/assertions, requested test path/glob/extension, and requested package/API/docs/README metadata when relevant. For scaffolds, docs/README are part of the pre-verification batch; do not add them after a passing test.",
           "If the changed test file only has an empty/smoke/no-op case while the prompt names several criteria, edit tests now instead of running bash; assertions must visibly cover the named criteria.",
@@ -302,11 +241,7 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
     if (shouldProgressNudge) {
       pi.sendMessage({
         customType: "pi-chalin-direct-progress-nudge",
-        content: statefulTimeTurn
-          ? "Stateful/time files changed. If nearest tests have not changed in this turn, the next tool must edit that test file now; do not final or run bash from source-only work. Keep tests compact for happy path, boundary, and state update/preservation, then run one nearest verification and final in 3 short bullets."
-          : testOnlyTurn
-          ? "Test-only edit done. Run the nearest test now, preferably the direct changed test file. No readback, package/config/search, or second edit unless that verification fails. After pass, final in exactly 3 bullets: Changed, Verification, Notes."
-          : docsOnlyMutation
+        content: docsOnlyMutation
           ? "Docs changed. The next tool must be `read` on the updated docs artifact; do not run find/grep/bash after the write or continue polishing. Name unresolved surfaces as searched/not-found only after readback. If readback is complete, final in exactly three one-line bullets: Changed, Verification, Notes."
           : [
             "Files changed. Keep the loop proportional: complete the nearest source/test contract, run one focused verification, then patch only concrete failures.",
@@ -321,11 +256,7 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
     if (shouldReadyToVerifyNudge) {
       pi.sendMessage({
         customType: "pi-chalin-direct-ready-to-verify-nudge",
-        content: statefulTimeTurn
-          ? "Stateful/time edit is ready only after source and nearest tests changed. If tests are still unchanged, edit them now; otherwise run one nearest verification now. No extra reads/search; after pass, final in 3 short bullets."
-          : testOnlyTurn
-          ? "Test-only edit is ready. Run the direct test file once now. If it passes, final immediately in 3 bullets; do not inspect files again just to summarize."
-          : docsOnlyMutation
+        content: docsOnlyMutation
           ? "Docs-only edit ready. No bash. Read updated docs: the next tool must be read on the updated docs artifact; revise only for unresolved named surfaces, otherwise final."
           : [
             "Implementation changed and verification is pending. Stop broad exploration. Escalate to chalin_route only if the latest evidence proves real breadth, ambiguity, repeated failure, or context pressure.",
@@ -400,32 +331,7 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
     const changedPathText = changedPaths.length > 0
       ? changedPaths.map((item) => `\`${item}\``).join(", ")
       : "the changed files";
-    const completionContent = statefulTimeTurn
-      ? [
-        `Stateful/time changed files and ${commandText} passed.`,
-        "Final now: exactly 3 bullets.",
-        "Use the user's language; translate bullet labels when appropriate.",
-        "- Changed: source and nearest tests",
-        `- Verification: ${commandText} passed`,
-        "- Notes: happy path, boundary, and state update/preservation covered without wall-clock sleeps or invented policy.",
-      ].join("\n")
-      : testOnlyTurn
-      ? [
-        `Test-only change verified with ${commandText}.`,
-        "Final now. Do not read back, rerun tests, or explain a plan.",
-        "Use the user's language; translate bullet labels when appropriate.",
-        "- Changed: test path only, unless source actually changed",
-        `- Verification: ${commandText} passed`,
-        "- Notes: source behavior preserved when unchanged; name the requested behavior and boundary covered.",
-      ].join("\n")
-      : leanDirectTurn
-      ? [
-        `${commandText} passed after the requested package-local source/test edit.`,
-        "Final now in exactly 3 bullets: Changed, Verification, Notes.",
-        "Use the user's language; translate bullet labels when appropriate.",
-        "No readback, rerun, broad discovery, or test-matrix recap unless a concrete failure appears.",
-      ].join("\n")
-      : docsOnlyMutation
+    const completionContent = docsOnlyMutation
       ? [
         `Docs readback complete with ${commandText}.`,
         "Final now. Do not call tools, do not keep thinking, and do not write a plan.",
@@ -455,7 +361,6 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", () => {
-    restoreScopedToolSet(pi);
     restoreOrchestratorThinking(pi);
     // No background auto-routing workers are owned by this module anymore.
     // Subagent execution is driven through the chalin_route tool and Pi's native
@@ -506,19 +411,21 @@ export function resetAutorouteToolStateForTests(): void {
   // a marker hook for symmetry with runtime-state resets.
 }
 
-function rememberToolStart(pi: ExtensionAPI, event: unknown): void {
+function rememberToolStart(pi: ExtensionAPI, event: unknown): PendingToolArgs | undefined {
   const toolName = (event as { toolName?: unknown }).toolName;
-  if (typeof toolName !== "string" || !toolName) return;
+  if (typeof toolName !== "string" || !toolName) return undefined;
   const args = (event as { args?: unknown }).args;
-  if (!args || typeof args !== "object") return;
+  if (!args || typeof args !== "object") return undefined;
   const pending = pendingArgsFor(pi);
   const queue = pending.get(toolName) ?? [];
-  queue.push({
+  const captured = {
     command: stringArg(args, "command"),
     path: stringArg(args, "path") ?? stringArg(args, "filePath") ?? stringArg(args, "file"),
     argsText: JSON.stringify(args),
-  });
+  };
+  queue.push(captured);
   pending.set(toolName, queue);
+  return captured;
 }
 
 function takeToolStart(pi: ExtensionAPI, toolName: string): PendingToolArgs | undefined {
@@ -540,59 +447,6 @@ function pendingArgsFor(pi: ExtensionAPI): Map<string, PendingToolArgs[]> {
   const created = new Map<string, PendingToolArgs[]>();
   pendingToolStarts.set(key, created);
   return created;
-}
-
-function applyDirectToolScope(pi: ExtensionAPI, hiddenTools: ReadonlySet<string>): void {
-  const toolApi = pi as unknown as { getActiveTools?: () => string[]; setActiveTools?: (toolNames: string[]) => void };
-  if (typeof toolApi.getActiveTools !== "function" || typeof toolApi.setActiveTools !== "function") return;
-  const activeTools = toolApi.getActiveTools();
-  if (activeTools.length === 0) return;
-  const filtered = activeTools.filter((name) => !hiddenTools.has(name));
-  if (filtered.length === activeTools.length) return;
-  rememberScopedToolSet(pi, activeTools, "turn");
-  toolApi.setActiveTools(filtered);
-}
-
-function applyToolAllowlist(pi: ExtensionAPI, allowedTools: ReadonlySet<string>): void {
-  applyScopedToolAllowlist(pi, allowedTools, "turn");
-}
-
-function applyDecisionToolAllowlist(pi: ExtensionAPI, allowedTools: ReadonlySet<string>): void {
-  applyScopedToolAllowlist(pi, allowedTools, "decision");
-}
-
-function applyScopedToolAllowlist(pi: ExtensionAPI, allowedTools: ReadonlySet<string>, mode: ToolScopeRestoreMode): void {
-  const toolApi = pi as unknown as { getActiveTools?: () => string[]; setActiveTools?: (toolNames: string[]) => void };
-  if (typeof toolApi.getActiveTools !== "function" || typeof toolApi.setActiveTools !== "function") return;
-  const activeTools = toolApi.getActiveTools();
-  if (activeTools.length === 0) return;
-  const filtered = activeTools.filter((name) => allowedTools.has(name));
-  if (filtered.length === activeTools.length) return;
-  rememberScopedToolSet(pi, activeTools, mode);
-  toolApi.setActiveTools(filtered);
-}
-
-function rememberScopedToolSet(pi: ExtensionAPI, activeTools: string[], mode: ToolScopeRestoreMode): void {
-  const key = pi as unknown as object;
-  if (scopedToolSetRestore.has(key)) return;
-  scopedToolSetRestore.set(key, activeTools);
-  scopedToolSetRestoreMode.set(key, mode);
-}
-
-function restoreDecisionToolSet(pi: ExtensionAPI): void {
-  const key = pi as unknown as object;
-  if (scopedToolSetRestoreMode.get(key) !== "decision") return;
-  restoreScopedToolSet(pi);
-}
-
-function restoreScopedToolSet(pi: ExtensionAPI): void {
-  const key = pi as unknown as object;
-  const previous = scopedToolSetRestore.get(key);
-  if (!previous) return;
-  scopedToolSetRestore.delete(key);
-  scopedToolSetRestoreMode.delete(key);
-  const toolApi = pi as unknown as { setActiveTools?: (toolNames: string[]) => void };
-  if (typeof toolApi.setActiveTools === "function") toolApi.setActiveTools(previous);
 }
 
 function stringArg(args: object, key: string): string | undefined {
@@ -649,90 +503,8 @@ export function shouldUseCompactDirectOrchestrationPrompt(prompt: string): boole
   return pathMentions.length > 0 && pathMentions.length <= 6;
 }
 
-function shouldSkipCompactPathPrompt(prompt: string, hasResumeContext: boolean): boolean {
-  if (hasResumeContext) return false;
-  const paths = promptPathMentions(prompt);
-  if (paths.length !== 1) return false;
-  const promptAndPath = `${prompt} ${paths[0] ?? ""}`;
-  return /(?:^|\/)packages\/[^/]+\/src\/[^/]+\.(?:ts|js|mjs|cjs)$/i.test(paths[0] ?? "")
-    && /\b(test|tests|package-local|paquete|monorepo|root|bun\s+test)\b/i.test(promptAndPath)
-    && /\b(clamp|bounds?|range|min|max|m[ií]n(?:imo)?|m[aá]x(?:imo)?)\b/i.test(promptAndPath)
-    && !/\b(reversed|invertid|invalid|rangeerror|nan|infinity|decimal|float|security|auth|parser|scanner|tokenizer|deep|profund)\b/i.test(promptAndPath);
-}
-
-function hiddenDirectToolsForPrompt(prompt: string, hasResumeContext: boolean): Set<string> | undefined {
-  if (hasResumeContext) return undefined;
-  const paths = promptPathMentions(prompt);
-  if (paths.some(isDocsMarkdownPath) || /\b(no-code|sin c[oó]digo|no cambies c[oó]digo|no implementes c[oó]digo|solo docs|docs-only)\b/i.test(prompt)) return undefined;
-  if (shouldSkipCompactPathPrompt(prompt, hasResumeContext) || shouldUseLeanDirectToolScope(prompt, hasResumeContext) || looksLikeTestOnlyPathContract(prompt, paths)) {
-    return BOUNDED_DIRECT_HIDDEN_TOOLS;
-  }
-  if (promptLooksScaffoldPathContract(prompt)) {
-    return GREENFIELD_DIRECT_HIDDEN_TOOLS;
-  }
-  return undefined;
-}
-
-function shouldForceRouteFirst(prompt: string, hasResumeContext: boolean): boolean {
-  if (hasResumeContext) return false;
-  if (/\b(direct|native|sin subagentes|sin subagents|no-subagent|no subagent|sin route|no route)\b/i.test(prompt)) return false;
-  if (promptLooksBoundedReadOnlyReview(prompt)) return false;
-  const paths = promptPathMentions(prompt);
-  if (looksLikeTestOnlyPathContract(prompt, paths)) return false;
-  if (shouldSkipCompactPathPrompt(prompt, hasResumeContext) || shouldUseLeanDirectToolScope(prompt, hasResumeContext)) return false;
-  if (paths.some(isDocsMarkdownPath) && promptLooksArchitectureDocsArtifact(prompt)) return true;
-  if (promptLooksBroadOrchestrationWork(prompt)) return true;
-  return promptLooksRiskyImplementationRoute(prompt, paths);
-}
-
-function shouldUseOrchestrationModeGate(prompt: string, hasResumeContext: boolean, forceRouteFirst: boolean): boolean {
-  if (hasResumeContext || forceRouteFirst || !prompt.trim()) return false;
-  if (promptLooksBoundedReadOnlyReview(prompt)) return false;
-  if (hasExplicitVerificationRunner(prompt)) return false;
-  if (shouldSkipCompactPathPrompt(prompt, hasResumeContext)) return false;
-  if (shouldUseCompactDirectOrchestrationPrompt(prompt)) return false;
-  return promptPathMentions(prompt).length === 0;
-}
-
-function promptLooksBroadOrchestrationWork(prompt: string): boolean {
-  if (/\b(simple|tiny|pequeñ[ao]|puntual|small|bounded|acotad[ao]|mini)\b/i.test(prompt)
-    && !/\b(deep|profund|project[- ]wide|proyecto completo|arquitectura|architecture|migration|migraci[oó]n|audit|auditor[ií]a)\b/i.test(prompt)) {
-    return false;
-  }
-  return /\b(deep|profund|exhaustiv|project[- ]wide|proyecto completo|whole project|current branch|current diff|pull request|pr\b|arquitectura|architecture|migration|migraci[oó]n|dependency map|mapa de dependencias|ownership|responsibility|responsabilidad|service structure|project structure|entrypoints?|testing map|audit|auditor[ií]a|compar(?:a|e) opciones|compare options|independent approaches|opciones independientes|multi[- ]?surface|cross[- ]?language|multi[- ]?language|cross[- ]?runtime|multi[- ]?runtime|ffi|abi)\b/i.test(prompt);
-}
-
-function promptLooksRiskyImplementationRoute(prompt: string, paths: string[]): boolean {
-  const text = `${prompt} ${paths.join(" ")}`;
-  if (!/\b(implement|implementa|corrige|fix|arregla|refactor|refactoriza|actualiza|update|change|cambia|añade|agrega)\b/i.test(text)) return false;
-  if (promptLooksScaffoldPathContract(prompt)) return false;
-  if (paths.length > 0 && paths.length <= 2 && !/\b(workspace|monorepo|multi[- ]?crate|multi[- ]?package|cross[- ]?language|cross[- ]?runtime|ffi|abi|runtime|parser|scanner|tokenizer|state machine|tabla ttl|ttl table|expire table|unicode regression|compiler|database|low[- ]?level|c\b|rust|cargo test|make test)\b/i.test(text)) {
-    return false;
-  }
-  return /\b(workspace|monorepo|multi[- ]?crate|multi[- ]?package|cross[- ]?language|multi[- ]?language|cross[- ]?runtime|multi[- ]?runtime|ffi|abi|runtime|permissions?|parser|scanner|tokenizer|state machine|lexer|compiler|database|sql|sqlite|redis|tabla ttl|ttl table|expire table|unicode|low[- ]?level|crates\/|cargo\s+test|make\s+test|go\s+test\s+\.\/\.\.\.)\b/i.test(text);
-}
-
-function shouldUseLeanDirectToolScope(prompt: string, hasResumeContext: boolean): boolean {
-  if (hasResumeContext || prompt.length > 700) return false;
-  const paths = promptPathMentions(prompt).filter(looksLikeSourceOrTestPath);
-  if (paths.length !== 1) return false;
-  const promptAndPath = `${prompt} ${paths[0] ?? ""}`;
-  return /(?:^|\/)packages\/[^/]+\/src\/[^/]+\.(?:ts|tsx|js|jsx|mjs|cjs)$/i.test(paths[0] ?? "")
-    && /\b(test|tests|package-local|paquete|root|bun\s+test|node --test|npm\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|yarn\s+(?:run\s+)?test)\b/i.test(promptAndPath)
-    && /\b(implement|implementa|fix|corrige|arregla|update|actualiza|change|cambia|test|tests)\b/i.test(promptAndPath)
-    && !/\b(project-wide|deep|profund|exhaustiv|architecture|arquitectura|migration|migraci[oó]n|security|seguridad|auth|authorization|parser|scanner|tokenizer|state machine|cross[- ]?language|multi[- ]?language)\b/i.test(promptAndPath);
-}
-
-function leanPackageLocalPathSteeringMessage(prompt: string): string {
-  const sourcePath = promptPathMentions(prompt).find(looksLikeSourceOrTestPath) ?? "";
-  const testPath = packageLocalTestCandidateForPath(sourcePath);
-  const testHint = testPath ? `read \`${testPath}\`` : "read the package-local test candidate";
-  return [
-    "pi-chalin lean package-local path: exact source/test work; broad discovery/search tools are out of scope.",
-    `First read \`package.json\`, \`${sourcePath}\`, and ${testHint}. No ls/find/grep or pre-test shell unless a direct read fails.`,
-    "Edit source plus the existing test once. For numeric bounds, cover inside (include one decimal when the API accepts general numbers), below, above, exact min/max, min==max, and one signed/range case. Do not invent RangeError, NaN, Infinity, or reversed-bound policy without evidence.",
-    "Run the package/root test command once, then final in exactly 3 bullets: Changed, Verification, Notes. No readback or matrix recap after pass.",
-  ].join("\n");
+function promptLooksResumeIntent(prompt: string): boolean {
+  return /\b(contin[uú]a|continuar|continue|resume|resumir|reanuda|reanudar|retoma|retomar|sigue|seguir|procede con (?:eso|lo anterior)|donde qued[oó]|where (?:we )?left off|interrupted|interrumpid[ao]|paused|pausad[ao]|stale run|run anterior|ejecuci[oó]n anterior)\b/i.test(prompt);
 }
 
 function compactResumeCandidateMessage(run: RunState): string {
@@ -750,15 +522,15 @@ function compactResumeCandidateMessage(run: RunState): string {
 function compactGeneralSteeringMessage(prompt = ""): string {
   return [
     "pi-chalin compact orchestration: use LLM judgment; the code does not classify prompts for you.",
-    "Mode gate: First decide route, then tools. `chalin_route` is orchestrated mode and must be the first tool when chosen; native tools mean lean direct mode. Do not spend read/bash/grep/find/ls calls deciding what the route tool is for.",
-    "Direct exception: bounded read-only mini-project reviews that explicitly forbid file changes stay native even when they mention risk/security/auth boundaries. Gather bounded evidence and cite concrete paths; route only if the prompt also asks for deep/project-wide/exhaustive analysis or evidence proves the review is not actually bounded.",
-    "Bounded read-only auth/security review: stay native when the prompt asks to review/analyze and not edit. Read package/manifest plus obvious auth/session/server/route files once; avoid repeated ls/find after source hits. Final findings-first and concise: code-proven core risks plus direct secondary risks only, severity, exact path/function evidence, one concrete exploit/request path or bypass chain when supported, impact, and remediation. No code changes, no tests, no broad project scan, no tutorial.",
-    "Call `chalin_route` as the first tool for current branch/diff/PR summaries, project understanding, project/service structure with entrypoints or testing map, deep project analysis, architecture/migration, broad review/audit, project-wide test/tooling/command/policy audit, risky multi-file implementation, auth/security/token/session behavior with tests and no explicit source path, risky surgical/long-file edits, parser/scanner/tokenizer changes with broad grammar/ownership uncertainty, independent option comparison, independent implementation slices, continuation/resume intent, or unresolved ambiguity unless the user explicitly asks for direct/native/no-subagent work. For explicit memory recall/remembrance or memory inventory/counts, including Spanish prompts like recuerda/recordar/memoria/decidimos, call `chalin_memory_search` first; use mode=list for inventory/count questions. If parent context compaction becomes likely, route or split work into subagents.",
+    "Mode gate: the LM decides route, then tools. `chalin_route` is orchestrated mode and should be the first tool only when the LM chooses orchestration; native tools mean lean direct mode. Do not spend read/bash/grep/find/ls calls deciding what the route tool is for.",
+    "Decision guidance, not runtime classification: bounded read-only mini-project reviews and bounded operational release/git chores often fit native work; deep/project-wide/exhaustive analysis, architecture strategy, audits, broad review, independent options, or high context pressure often benefit from chalin_route. The LM may choose otherwise from evidence.",
+    "Bounded read-only auth/security review guidance for native mode: read package/manifest plus obvious auth/session/server/route files once; avoid repeated ls/find after source hits. Final findings-first and concise: code-proven core risks plus direct secondary risks only, severity, exact path/function evidence, one concrete exploit/request path or bypass chain when supported, impact, and remediation. No code changes, no tests, no broad project scan, no tutorial unless requested.",
+    "chalin_route is useful for current branch/diff/PR summaries or analysis, project understanding, project/service structure with entrypoints or testing map, deep project analysis, architecture/migration, broad review/audit, project-wide test/tooling/command/policy audit, risky multi-file implementation, auth/security/token/session behavior with tests and no explicit source path, risky surgical/long-file edits, parser/scanner/tokenizer changes with broad grammar/ownership uncertainty, independent option comparison, independent implementation slices, continuation/resume intent, or unresolved ambiguity when specialist isolation materially improves quality/cost/risk. For explicit memory recall/remembrance or memory inventory/counts, including Spanish prompts like recuerda/recordar/memoria/decidimos, prefer `chalin_memory_search`; use mode=list for inventory/count questions. If parent context compaction becomes likely, route or split work into subagents.",
     "When routing, choose topology deliberately from the prompt, agent roster, and evidence. Use the smallest workflow that can prove the result; add discovery, planning, parallelism, or synthesis only when it materially improves coverage or risk control. Do not route plain memory recall/inventory; use chalin_memory_search. Routed implementation/file mutation must include worker execution plus a later reviewer; reviewer FAIL/GAP requires focused repair instead of finalization.",
     "Compact topology defaults unless evidence clearly says otherwise: branch/project/service understanding and high-level architecture-risk overview -> single scout; deep project analysis split by folders/modules -> DAG with scout/context-builder fan-out; architecture or migration across many components -> chain scout -> planner; local module-splitting/options comparison -> chain scout -> planner or single planner when evidence is already obvious; formal project-wide audit/test-command-policy review -> single reviewer; risky implementation with tests -> chain worker -> reviewer; risky long-file/surgical edit -> chain worker -> reviewer, adding planner only when target-region planning is nontrivial; independent writer slices -> DAG with parallel worker ownership and reviewer fan-in; explicit memory recall/inventory -> memory-only route if the memory tool is not available in this turn.",
     "Choose roles by responsibility, not by habit: scout gathers evidence for understanding and high-level risk overview; planner makes strategy/options; reviewer critiques formal audits/configuration; worker mutates files. Add extra roles only when the current role cannot responsibly cover the next responsibility.",
     "Use DAG only for independent slices that can run concurrently, such as folder fan-out or independent writers. Do not use DAG merely because the question is broad; use one planner/reviewer when one role can inspect evidence directly.",
-    "Stay native for simple chat, one obvious command, bounded read-only mini-reviews that explicitly forbid file modification, tiny isolated edits, named-file bugfixes/refactors, a specific function/symbol/API plus local verification, and one small package/module/class/function implementation with tests and no prompt paths. Quality-equivalent bounded direct work should prefer lower cost/time/tool count over orchestration.",
+    "Native work is usually appropriate for simple chat, one obvious command, bounded operational release/git chores, bounded read-only mini-reviews that explicitly forbid file modification, tiny isolated edits, named-file bugfixes/refactors, a specific function/symbol/API plus local verification, and one small package/module/class/function implementation with tests and no prompt paths. Quality-equivalent bounded direct work should prefer lower cost/time/tool count over orchestration, but the LM owns that judgment.",
     "For small bounded package/class/function work without prompt paths, do not guess directories from identifiers. Use evidence-backed direct candidates only: read a manifest/config or exact local convention when already evident; otherwise use one targeted find/rg by identifier, then read exact source+tests from the result. Existing module names and starter test imports win over function names: if a starter test imports `module_name`, edit `module_name.<ext>` and its matching runner-discovered test; creating a new `<function_name>.<ext>` module or test sibling is a parallel-module bug. If the repo is not explicitly empty/greenfield, a first mutation before source/test surface evidence is invalid: stop, read the starter import/stub/test surface, then patch that surface. Edit source+tests/docs together when requested or implied, then verify. Parser/scanner/tokenizer is not a routing keyword; route only after evidence proves broad grammar ownership, unsafe transition coupling, repeated local verification failure, or parent context pressure.",
     "Parser/scanner/tokenizer direct work: after source+test evidence, cover token boundaries, adjacency before/after protected spans, comments/markers inside protected text, escaped delimiters, and EOF termination. For SQL/SQLite-like single-quoted strings, doubled single quotes (`''`) are part of the string token, not the closing quote; `--` inside such strings is data, while `--` outside strings comments through newline or EOF.",
     "Bounded greenfield/scaffold efficiency: avoid deep repo discovery when the workspace is intentionally tiny or empty. Write all requested source/test/docs/manifest files inside the current workspace root using relative paths and preserve explicit requested file globs/extensions; if the prompt asks for `test/*.test.ts`, deliver a `.ts` test and choose a package script that runs it instead of silently switching to `.mjs`. Never create or verify a home/sibling/tmp project directory unless the user explicitly provided that absolute target. Write source, tests, docs/README, and manifest in one compact pass, then run the package test script once from the current cwd; verification must happen after the last requested mutation. Choose one coherent runner up front: prefer package-native tests or the runner named by the prompt, and avoid framework+loader chains, node_modules binary probing, or install/rewrite loops unless repo evidence requires them. For TS packages, test scripts must be reproducible package scripts: no `npx`, experimental host-only TS flags, or undeclared runner binaries; declare the runner in devDependencies or use a dependency-free runner the package script can execute. After a failed build/test/install, edit the exact root cause before any second bash; repeated bash without an intervening edit is invalid. After tests pass, do not edit metadata/docs/tests just to improve presentation.",
@@ -771,26 +543,6 @@ function compactGeneralSteeringMessage(prompt = ""): string {
     ...domainSpecificDirectContracts(prompt),
     "Final quality: answer in the user's language and keep it compact but evaluable. Name changed files, exact verification, and 2-4 evidence-backed design decisions or boundary tests that explain why the result is correct. More text is not the goal; useful contract evidence is.",
   ].join("\n");
-}
-
-function promptLooksBoundedReadOnlyReview(prompt: string): boolean {
-  if (!prompt.trim() || promptPathMentions(prompt).length > 0) return false;
-  if (!/\b(review|revisa|analiza|analizar|audit|audita|dime si hay|riesgo|risk)\b/i.test(prompt)) return false;
-  if (!/\b(auth|security|seguridad|boundary|frontera|riesgo|risk|authorization|autorizaci[oó]n)\b/i.test(prompt)) return false;
-  if (!/\b(no modifiques|no cambies|sin modificar|sin cambios|read-only|solo lectura|do not modify|don't modify|do not change|don't change)\b/i.test(prompt)) return false;
-  if (/\b(test|tests|implement|implementa|fix|corrige|cambia|modifica|añade|agrega|add|write|edita)\b/i.test(prompt)) return false;
-  if (/\b(deep|profund|exhaustiv|project-wide|proyecto completo|arquitectura|architecture|migration|migraci[oó]n)\b/i.test(prompt)) return false;
-  return true;
-}
-
-function compactBoundedReadOnlyReviewSteeringMessage(prompt: string, hasUI?: boolean): string {
-  return [
-    "pi-chalin compact bounded read-only review: native; route only if direct evidence proves deep/project-wide scope or implementation is requested.",
-    hasUI ? undefined : "First tools: use native read/ls only for the smallest manifest/source evidence needed, then direct auth/session/caller candidates from repo conventions. Do not start with chalin_project_discovery, chalin_project_snapshot, or chalin_route for bounded reviews; those are for broad/project-wide uncertainty. If direct reads fail, use one targeted find for auth, session, authorization, middleware, or caller surfaces. No repeated ls/find after source hits.",
-    "No mutation, no bash, no tests/docs. Evidence is source text plus paths.",
-    "Scope: code-proven risks only. Prioritize trust boundaries: identity source, authorization/permission checks before sensitive actions, identity/token input validation, and misleading guard APIs that return nullable/falsey values. No speculative session/replay/rate-limit gaps without code evidence.",
-    "Final: one verdict sentence using `riesgo de seguridad` or `security risk`, then 2-4 tight bullets, no tables, no project tree, no code fences. Each bullet: severity, path/function, inline evidence, one concrete exploit/request path or bypass chain when evidenced, impact, remediation. Include the boundary and caller paths when evidenced.",
-  ].filter((line): line is string => Boolean(line)).join("\n");
 }
 
 function compactPathSteeringMessage(prompt: string, hasUI?: boolean): string {
@@ -834,45 +586,27 @@ function compactPathSteeringMessage(prompt: string, hasUI?: boolean): string {
   if (looksLikeTestOnlyPathContract(prompt, promptPaths)) {
     return compactTestOnlyPathSteeringMessage(prompt, promptPaths, hasUI);
   }
-  if (shouldForceRouteFirst(prompt, false)) {
-    return compactRouteFirstPathSteeringMessage(prompt, pathContract, hasUI, extraBareSurfaceContract);
-  }
   if (shouldUseMinimalBoundedPathSteering(prompt, promptPaths)) {
     return minimalBoundedPathSteeringMessage(prompt, promptPaths, hasUI);
   }
   return [
     "pi-chalin compact path preflight: use LLM judgment; paths structural. Mode gate: `chalin_route` is orchestrated mode and should be first if chosen; native tools mean lean direct mode.",
     "First-action invariant for non-greenfield code: if the prompt names a source/test path or bare source surface, gather exact surface evidence before mutation. Exact prompt paths use `read`; bare filenames/symbols use one targeted find/rg, then read the hit. A first `write` before target/starter source+test evidence is invalid because it creates parallel surfaces.",
-    "Named source/test/config plus local verification start native: read exact files; route only if reads prove broad ownership, migration, generated/cross-runtime coupling, unsafe long-file or grammar risk.",
-    "Code+test direct preference: one behavior starts native; escalate to `chalin_route` only when evidence proves broader scope, repeated failure, context pressure, or parser/scanner/tokenizer transition risk that cannot be validated locally.",
+    "Named source/test/config plus local verification often fits native work, but the LM decides: use `chalin_route` when specialist context isolation would materially improve correctness, risk control, or context pressure.",
+    "Code+test decision: one behavior can use native work; route when evidence or the prompt indicates broader scope, repeated failure, context pressure, or parser/scanner/tokenizer transition risk that cannot be validated locally.",
     "If scope broadens, name the unresolved surface; do not broad-scan.",
     hasUI ? undefined : pathContract,
     hasUI ? undefined : extraBareSurfaceContract,
-    hasUI ? undefined : "Bounded native: first tool `read` listed files; no parent `ls`. Read nearest test/include; if unnamed, try `test/<stem>.test.*` before find. If target read shows inline tests/test module, update there; no find/ls for separate tests. With exact source/runner, skip grep/find/ls and manifest/config; after reading named source, do not grep the same symbol/file. Existing large/partial files use targeted edits; tiny fully read stubs may be replaced once. Tests requested: batch implementation+tests before first verification. No baseline verification before the first edit unless the user says existing tests are failing/triage. One focused verification, one root-cause rerun, then final. Readback only for concrete missing evidence.",
+    hasUI ? undefined : "Native-work efficiency contract when the LM chooses direct work: first read listed files; avoid parent `ls`. Read nearest test/include; if unnamed, try `test/<stem>.test.*` before find. If target read shows inline tests/test module, update there; no find/ls for separate tests. With exact source/runner, skip grep/find/ls and manifest/config; after reading named source, do not grep the same symbol/file. Existing large/partial files use targeted edits; tiny fully read stubs may be replaced once. Tests requested: batch implementation+tests before first verification. No baseline verification before the first edit unless the user says existing tests are failing/triage. One focused verification, one root-cause rerun, then final. Readback only for concrete missing evidence.",
     hasDocsPath ? "Docs/no-code compact: write requested docs only after one bounded evidence pass. Read package/test script plus one obvious source surface for each named operation. If prompt names bare filenames or public symbols without paths, do not invent path candidates; use one targeted find/rg by exact basename or symbol, then read the highest-confidence result. For architecture/refactor docs, include current->target responsibility/ownership maps and evidence-derived validation when requested; for deep architecture docs, add problem taxonomy, data-flow/coupling map, ownership/coupling-by-responsibility table, design decision matrix with options/recommendation, dependency delta, stage-0 golden-test capture, reverse-dependency check, staged migration, risks, rollback, phase checklist, and out-of-scope boundaries. Mark future abstractions as future/out-of-scope instead of slipping them into the immediate plan. For execution/diagnosis docs, use `Estado actual`/`Current state`, `Pasos`/`Steps`, rollback, quick reference; use read evidence by default and run at most one pre-write shell only when the user explicitly asks to validate/execute a command. Without VCS evidence, do not give `git restore`/`git stash`/`git revert` as runnable current-repo steps. After evidence, write the docs next: no find/grep/test discovery, diagnostic shell, or second pre-write shell. The artifact must cite the manifest/source paths that prove its commands and behavior, distinguish no-tests output from failed assertions, include one inline smoke command with expected output, a 3-row symptom/cause/next-check table, compact case/invariant table only from source facts, typecheck command only with `tsconfig`/script evidence, known gaps separated from bugs, and manual/application rollback only when evidenced. Evidence lock: for collection reconciliation operations, use duplicate/order examples; do not invent timestamps, versions, labels, state, npm/yarn commands in Bun-only repos, test paths outside the evidenced test root, code-change plans, or literal TODO/TBD/WIP/placeholder tokens even when describing the old artifact. One write, one readback, at most one corrective edit+readback; no post-write shell/build/test; final <=5 lines." : undefined,
     directWorkContract(prompt),
     "Final in the user's language: Changed, Verification, Notes. Cite implementation and test/evidence paths plus 2-4 compact design/boundary decisions that prove the contract: public API/response shape, domain primitive/stdlib choice, edge cases covered, and canonical surface/no duplicate helper files. Stop after pass/docs verification.",
   ].filter((line): line is string => Boolean(line)).join("\n");
 }
 
-function compactRouteFirstPathSteeringMessage(prompt: string, pathContract: string, hasUI?: boolean, bareSurfaceContract?: string): string {
-  const implementationRoute = promptLooksRiskyImplementationRoute(prompt, promptPathMentions(prompt));
-  return [
-    "pi-chalin route-required path preflight: this prompt is broad, risky, cross-surface, or stateful enough for orchestrated mode.",
-    hasUI ? undefined : pathContract,
-    hasUI ? undefined : bareSurfaceContract,
-    "First tool must be `chalin_route`. Do not inspect, edit, or run shell in the parent before routing; the routed workflow owns evidence gathering, implementation when requested, verification, and handoff.",
-    implementationRoute
-      ? "Implementation topology: choose the smallest agent set that can gather necessary evidence, implement, verify, and review. Worker execution and a later reviewer are mandatory for routed mutation; discovery/planning/parallelism are optional tools when they materially reduce risk."
-      : "Analysis/docs topology: choose agents for evidence, planning, artifact mutation, and review only when each role adds value; routed file mutations still need worker execution plus later reviewer.",
-    "Scope lock: keep explicit prompt paths and named surfaces as acceptance surfaces; subagents may search only to resolve exact ownership gaps. Do not broaden into unrelated refactors or rewrite plans.",
-    "Verification contract: implementation routes need the requested runner or nearest focused verification plus relevant boundary tests; docs/analysis routes need artifact readback and evidence-derived claims. Final answer synthesizes the route handoff in the user's language.",
-  ].filter((line): line is string => Boolean(line)).join("\n");
-}
-
 function compactScaffoldPathSteeringMessage(pathContract: string, hasUI?: boolean, bareSurfaceContract?: string): string {
   return [
-    "pi-chalin compact path preflight for scaffold: stay native; write the requested package inside the current workspace root.",
+    "pi-chalin compact path preflight for scaffold: if the LM chooses native work, write the requested package inside the current workspace root.",
     hasUI ? undefined : pathContract,
     hasUI ? undefined : bareSurfaceContract,
     "Scaffold/API: exact files/APIs use relative paths only; do not create a separate project in home, sibling, or tmp. No pre-edit shell/discovery or environment probes (`which bun`/`node`/`npx`) for tiny/new packages unless a direct requested path read fails. Write source, tests, docs/README, manifest/config in one compact pass; verify once from cwd after the last requested mutation; patch one concrete failure if needed, then final in the user's language with 2-4 design decisions.",
@@ -889,10 +623,10 @@ function compactScaffoldPathSteeringMessage(pathContract: string, hasUI?: boolea
 
 function compactArchitectureDocsSteeringMessage(pathContract: string, hasUI?: boolean, bareSurfaceContract?: string): string {
   return [
-    "pi-chalin compact docs-artifact preflight: route broad architecture docs; paths are structural.",
+    "pi-chalin compact docs-artifact preflight: architecture docs context; paths are structural and the LM decides direct versus chalin_route.",
     hasUI ? undefined : pathContract,
     hasUI ? undefined : bareSurfaceContract,
-    "Route-required architecture docs: if the prompt asks for deep/broad architecture, migration, cross-language/runtime, dependency-map, ownership/responsibility, staged-plan, or multi-surface refactor docs, call `chalin_route` as the first tool when route quality is needed. For docs artifact mutation, choose the smallest agent set that can gather evidence, update only the requested artifact, and review evidence/contract/gaps/readback. `chalin_project_discovery` and `chalin_project_snapshot` are not substitutes for route. The routed workflow still updates only the requested docs artifact. Do not start native just because the mutation target is one docs file.",
+    "Architecture docs decision: deep/broad architecture, migration, cross-language/runtime, dependency-map, ownership/responsibility, staged-plan, or multi-surface refactor docs often benefit from chalin_route when route quality is needed. For docs artifact mutation, choose the smallest agent set that can gather evidence, update only the requested artifact, and review evidence/contract/gaps/readback. `chalin_project_discovery` and `chalin_project_snapshot` are not substitutes for route. The routed workflow still updates only the requested docs artifact. If staying native, keep the evidence pass bounded and update only the artifact.",
     "Native docs mode is only for bounded/local docs artifacts. If staying native, write the requested docs artifact after one bounded evidence pass: first read the requested artifact, package/build/test script if present, and one concrete source surface per named responsibility. If prompt names bare filenames or public symbols without paths, do not invent path candidates; use a raw inventory or one targeted find/rg by exact basename or symbol, then read the highest-confidence result.",
     "Architecture/refactor docs must include current->target responsibility/ownership maps and evidence-derived validation when requested. For deep architecture docs, add problem taxonomy with evidence, data-flow/coupling map, ownership/coupling-by-responsibility table, design decision matrix with options/recommendation, dependency delta to add/remove includes/imports/modules, stage-0 golden-test capture before behavior changes, reverse-dependency check, target ownership/layers, staged migration with exit criteria, risk register with severity and mitigation, rollback strategy, phase checklist, and out-of-scope boundaries.",
     "Cross-language/runtime plans: do not pass raw language `bool` or layout-sensitive types across FFI without local ABI evidence. Prefer ABI-stable fixed-width integers or bitfields (`u8`, `c_uint`, `u32 flags`) at the boundary, convert inside safe wrappers, keep old exported symbols as compatibility wrappers when changing signatures, and name explicit ABI/build/link validation plus rollback.",
@@ -905,7 +639,7 @@ function compactArchitectureDocsSteeringMessage(pathContract: string, hasUI?: bo
 
 function compactOperationalDocsSteeringMessage(prompt: string, pathContract: string, hasUI?: boolean, bareSurfaceContract?: string): string {
   return [
-    "pi-chalin compact operational docs path: stay native; route only after concrete evidence proves broad ownership or parent-context pressure.",
+    "pi-chalin compact operational docs path: operational docs context; the LM decides direct versus chalin_route from scope, evidence needs, and context pressure.",
     hasUI ? undefined : pathContract,
     hasUI ? undefined : bareSurfaceContract,
     docsDirectSourceCandidateMessage(prompt),
@@ -935,7 +669,7 @@ function compactTestOnlyPathSteeringMessage(prompt: string, promptPaths: string[
     && /\b(divid|division|divisi[oó]n|ratio|quotient|denominator|denominador|divide)\b/i.test(promptAndPath)
     && /\b(zero|cero|0)\b/i.test(promptAndPath);
   return [
-    "pi-chalin compact test-only path: stay native; do not route.",
+    "pi-chalin compact test-only path: test-focused evidence contract; native work is usually enough, but the LM decides if routing is needed.",
     hasUI ? undefined : `Prompt path: \`${promptPath}\`.`,
     directTestCandidate ? `Read source once, then read or create nearest test \`${directTestCandidate}\`.` : "Read source once, then read or create the nearest runner-discoverable test.",
     "If source already has the requested behavior, do not refactor or edit source. Add only focused tests for the requested behavior; if an existing test already covers normal behavior, do not add another preservation case. Singular/unit-test request means one focused test change, not a refactor; split semantically distinct guard branches into separate named test blocks when it improves failure diagnosis. For compound guards/predicates, cover each condition branch and representative value class with compact assertions, but do not add alternate samples of the same class or unrelated preservation cases.",
@@ -1016,7 +750,7 @@ function minimalBoundedPathSteeringMessage(prompt: string, promptPaths: string[]
   if (includeBrokenTestTriage) {
     const directTestCandidate = sourceTestCandidateForPath(promptPaths[0] ?? "");
     return [
-      "pi-chalin compact broken-test triage path: stay native; route only after concrete repeated verification failure.",
+      "pi-chalin compact broken-test triage path: native triage is usually enough; route only if the LM finds concrete repeated verification failure or broader ownership risk.",
       hasUI ? undefined : pathContract,
       directTestCandidate ? `Direct test candidate: \`${directTestCandidate}\`.` : undefined,
       "The existing failing test is the contract. If the failing command/test path is unknown, run the user-named command once first; otherwise read source and the direct test candidate. No find/ls/manifest unless the direct source/test path fails.",
@@ -1025,7 +759,7 @@ function minimalBoundedPathSteeringMessage(prompt: string, promptPaths: string[]
     ].filter((line): line is string => Boolean(line)).join("\n");
   }
   return [
-    "pi-chalin minimal bounded path: stay native; route only after target read proves broad ownership, generated/cross-runtime, unsafe surgery, or repeated failure.",
+    "pi-chalin minimal bounded path: native work is usually enough; route only if the LM finds broad ownership, generated/cross-runtime, unsafe surgery, or repeated failure.",
     hasUI ? undefined : pathContract,
     /\b(paginate|pagination|page_size|total_pages|has_next|has_prev|1-based)\b/i.test(promptAndPath) || includePythonUnittest ? "First-action invariant: read target/test evidence before write; first `write` before evidence creates parallel surfaces." : undefined,
     (includeRateWindow || includeTextQuery || includeStableSort) && genericDirectTestCandidate ? `Direct test candidate: read \`${genericDirectTestCandidate}\` before search/find.` : undefined,

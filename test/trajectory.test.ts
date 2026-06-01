@@ -105,6 +105,36 @@ test("analyzeTrajectory detects tool misuse, skipped verification, loops, large 
   assert.ok(scoreTrajectory(report) < 0.8);
 });
 
+test("analyzeTrajectory treats late first evidence as budget waste", () => {
+  const report = analyzeTrajectory(run({
+    steps: [{
+      id: "step-1",
+      agent: "scout",
+      task: "analyze project",
+      status: "complete",
+      output: { agent: "scout", text: "## Findings\n- src/index.ts registers the extension.\n- src/tools.ts registers chalin_route.", handoff: "src/index.ts and src/tools.ts.", raw: "", warnings: [], memoryCandidates: [] },
+      metrics: {
+        durationMs: 20,
+        usage: emptyUsage(),
+        toolCalls: 12,
+        toolCallsByName: { read: 8, grep: 4 },
+        filesRead: ["package.json", "README.md", "src/index.ts", "src/tools.ts"],
+        utility: {
+          findingsPerTool: 0.167,
+          filesReadPerFinding: 2,
+          duplicateReads: 0,
+          toolCallsBeforeFirstSignal: 10,
+          verificationDone: false,
+          memoryCandidatesQuality: 0,
+        },
+      },
+    }],
+  }));
+
+  assert.equal(report.findings.budgetWaste.pass, false);
+  assert.match(report.findings.budgetWaste.evidence.join("\n"), /scout:step-1/);
+});
+
 function emptyUsage() {
   return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 }

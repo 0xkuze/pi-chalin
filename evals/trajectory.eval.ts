@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { analyzeTrajectory, scoreTrajectory, type TrajectoryReport } from "./trajectory.ts";
-import type { RunState, TokenUsageSummary } from "../src/schemas.ts";
+import type { RunState, RunStepStatus, TokenUsageSummary } from "../src/schemas.ts";
 
 interface TrajectoryEvalResult {
   id: string;
@@ -30,7 +30,7 @@ const cases = [
     run: badRun(),
   },
   {
-    id: "budget-capped-checkpoint-is-not-failure",
+    id: "checkpointed-handoff-is-not-failure",
     expectedPass: true,
     run: budgetCheckpointRun(),
   },
@@ -92,8 +92,8 @@ function badRun(): RunState {
 }
 
 function budgetCheckpointRun(): RunState {
-  return baseRun("budget-capped", [
-    step("context-builder", "budget-capped", { chalin_project_snapshot: 1, read: 8 }, {
+  return baseRun("paused", [
+    step("context-builder", "checkpointed", { chalin_project_snapshot: 1, read: 8 }, {
       text: "## Findings\n- src/kernel.ts owns route execution.\n## Handoff\nPartial but useful handoff. Continue with reviewer.",
       filesRead: ["src/kernel.ts", "src/runner.ts"],
       budgetStopCount: 1,
@@ -128,7 +128,7 @@ function baseRun(status: RunState["status"], steps: RunState["steps"]): RunState
   };
 }
 
-function step(agent: string, status: RunState["status"], callsByName: Record<string, number>, options: {
+function step(agent: string, status: RunStepStatus, callsByName: Record<string, number>, options: {
   text: string;
   filesRead?: string[];
   filesTouched?: string[];

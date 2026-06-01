@@ -9,7 +9,7 @@ import { chalinChildSessionDir, createChalinChildSessionManager, hideLegacyTopLe
 import { policyForStep } from "../src/budget.ts";
 import { resolveAgentModel, resolveAgentThinking, resolveInheritedModelFallback } from "../src/model-resolution.ts";
 import { buildSdkPrompt, childToolNames, resolveStepCompletionStatus, toolBudgetForStep } from "../src/runner-prompt.ts";
-import { DEFAULT_SDK_STEP_IDLE_STALL_MS, MockWorkerRunner, budgetPolicyForSdkStep, buildConflictResolverTask, extractAssistantRuntimeError, hasUnrecoverableFailedSteps, normalizeThinkingForBudget, parseAgentOutput, reviewerHandoffNeedsRepair, runWithIdleStallMonitor, sdkStepIdleStallMs, shouldStopAfterDagStage } from "../src/runner.ts";
+import { DEFAULT_SDK_STEP_IDLE_STALL_MS, MockWorkerRunner, budgetPolicyForSdkStep, buildConflictResolverTask, extractAssistantRuntimeError, hasUnrecoverableFailedSteps, normalizeThinkingForBudget, parseAgentOutput, promptTokenomicsPhaseForStep, recoverPausedReadOnlyDagStage, reviewerHandoffNeedsRepair, runWithIdleStallMonitor, sdkStepIdleStallMs, shouldStopAfterDagStage } from "../src/runner.ts";
 import { createRunState, loadResumableRunState, prepareRunForResume } from "../src/runner-state.ts";
 import type { AgentDefinition, RouteDecision, RunState, RunStepMetrics } from "../src/schemas.ts";
 
@@ -36,6 +36,17 @@ function assistantMessage(content: string): Parameters<SessionManager["appendMes
 function readOnlyAgent(name: string, concern: AgentDefinition["concern"] = "context-building"): AgentDefinition {
   return { name, scope: "built-in", concern, capabilities: ["inspect-files", "search-files"], description: name, model: "inherit", tools: [], memory: { read: false, write: "never", categories: [] }, systemPrompt: "", diagnostics: [] };
 }
+
+test("promptTokenomicsPhaseForStep does not treat normal repair tasks as review repair phases", () => {
+  const worker = agent("worker", ["edit-files"]);
+  const reviewer = { ...agent("reviewer", ["inspect-files"]), concern: "review" as const };
+
+  assert.equal(promptTokenomicsPhaseForStep({ id: "step-1", agent: "worker" }, worker), "childPrompt");
+  assert.equal(promptTokenomicsPhaseForStep({ id: "repair-parser-bug:step-1", agent: "worker" }, worker), "childPrompt");
+  assert.equal(promptTokenomicsPhaseForStep({ id: "step-2", agent: "reviewer" }, reviewer), "reviewer");
+  assert.equal(promptTokenomicsPhaseForStep({ id: "review-repair-1-worker", agent: "worker" }, worker), "repair");
+  assert.equal(promptTokenomicsPhaseForStep({ id: "review-repair-1-reviewer", agent: "reviewer" }, reviewer), "repair");
+});
 
 function stepMetrics(overrides: Partial<RunStepMetrics> = {}): RunStepMetrics {
   return {
@@ -68,6 +79,85 @@ test("parseAgentOutput ignores non-bullet memory blocks and None", () => {
   assert.equal(codeOutput.memoryCandidates.length, 0);
   assert.match(codeOutput.warnings.join("\n"), /no valid bullet candidates/);
   assert.equal(noneOutput.memoryCandidates.length, 0);
+});
+
+test("parseAgentOutput drops transient verification status memory candidates", () => {
+  const output = parseAgentOutput("scout", [
+    "## Findings",
+    "- `bun test --dry-run` printed test inventory.",
+    "## Memory Candidates",
+    "- testing: 538 tests from dry-run, 138 currently failing in smoke integration.",
+    "- tooling: Project tests use Bun's test runner and permanent regression tests should use bun:test APIs.",
+  ].join("\n"));
+
+  assert.deepEqual(output.memoryCandidates.map((candidate) => candidate.category), ["tooling"]);
+  assert.doesNotMatch(output.memoryCandidates.map((candidate) => candidate.content).join("\n"), /currently failing|dry-run/i);
+  assert.match(output.warnings.join("\n"), /transient verification status/i);
+});
+
+test("parseAgentOutput uses structured claim ledger before lexical transient detection", () => {
+  const output = parseAgentOutput("scout", [
+    "## Findings",
+    "- Observacion parcial de validacion en progreso.",
+    "## Claim Ledger",
+    "```json",
+    JSON.stringify([
+      {
+        kind: "transient-status",
+        subject: "regression suite",
+        summary: "La suite quedo roja durante una observacion parcial.",
+        evidence: ["partial SDK observation"],
+        confidence: 0.52,
+      },
+      {
+        kind: "stable-fact",
+        subject: "test runner",
+        summary: "Project verification uses Bun scripts from package.json.",
+        evidence: ["package.json"],
+        confidence: 0.91,
+      },
+    ]),
+    "```",
+    "## Memory Candidates",
+    "- testing: La suite quedo roja durante una observacion parcial.",
+    "- tooling: Project verification uses Bun scripts from package.json.",
+  ].join("\n"));
+
+  assert.deepEqual((output.claims ?? []).map((claim) => claim.kind), ["transient-status", "stable-fact"]);
+  assert.deepEqual(output.memoryCandidates.map((candidate) => candidate.category), ["tooling"]);
+  assert.match(output.warnings.join("\n"), /structured transient verification claim/i);
+});
+
+test("buildSdkPrompt requires evidence-grade handling for transient and negative claims", () => {
+  const scout = readOnlyAgent("scout", "recon");
+  const planner = readOnlyAgent("planner", "planning");
+  const scoutPrompt = buildSdkPrompt(scout, "Analyze project tests and Effect usage.", tempDir("pi-chalin-prompt-evidence-"), undefined, 12, "deep");
+  const plannerPrompt = buildSdkPrompt(planner, "Synthesize prior handoff.", tempDir("pi-chalin-prompt-synthesis-"), "scout: claims no Schedule is used.", 12, "deep", {
+    priorFilesRead: ["src/webfetch.ts"],
+  });
+
+  assert.match(scoutPrompt, /Dry-runs, inventory commands, grep counts, and partial logs are not live verification/i);
+  assert.match(scoutPrompt, /Do not write memory candidates for transient pass\/fail/i);
+  assert.match(scoutPrompt, /Before saying a feature, API, file, route, command, dependency, or pattern is absent/i);
+  assert.match(plannerPrompt, /reconcile contradictions/i);
+  assert.match(plannerPrompt, /do not concatenate raw upstream output/i);
+});
+
+test("buildSdkPrompt carries structured claim audit context without relying on wording", () => {
+  const planner = readOnlyAgent("planner", "planning");
+  const prompt = buildSdkPrompt(planner, "Synthesize final answer material.", tempDir("pi-chalin-prompt-claims-"), "Prior handoff text.", 12, "normal", {
+    previousClaims: [{
+      kind: "negative-claim",
+      subject: "browser automation capability",
+      summary: "Prior handoff says browser control is unavailable.",
+      evidence: [],
+      confidence: 0.44,
+    }],
+  } as never);
+
+  assert.match(prompt, /Structured claim audit/i);
+  assert.match(prompt, /browser automation capability/i);
+  assert.match(prompt, /negative-claim/i);
 });
 
 test("reviewerHandoffNeedsRepair detects blocking implementation review gaps", () => {
@@ -666,6 +756,67 @@ test("SDK DAG can continue synthesis after a partial read-only fan-out idle stal
   assert.equal(shouldStop, false);
 });
 
+test("SDK DAG converts recoverable read-only idle pauses into coverage gaps before synthesis", () => {
+  const agents = new Map([
+    ["researcher", readOnlyAgent("researcher", "research")],
+    ["reviewer", readOnlyAgent("reviewer", "review")],
+  ]);
+  const stageSteps: RunState["steps"] = [
+    {
+      id: "evidence:researcher",
+      agent: "researcher",
+      task: "Research external context.",
+      status: "paused",
+      pauseReason: "idle-stall",
+      error: "SDK runner idle stalled for researcher after 120000ms without activity",
+    },
+    {
+      id: "evidence:reviewer",
+      agent: "reviewer",
+      task: "Review local evidence.",
+      status: "complete",
+      output: { agent: "reviewer", text: "Local evidence reviewed.", handoff: "Local evidence reviewed.", memoryCandidates: [], raw: "", warnings: [] },
+    },
+  ];
+
+  const recovered = recoverPausedReadOnlyDagStage(stageSteps, agents);
+
+  assert.equal(recovered, 1);
+  assert.equal(stageSteps[0]?.status, "failed");
+  assert.equal(stageSteps[0]?.pauseReason, undefined);
+  assert.equal(shouldStopAfterDagStage(stageSteps, agents), false);
+});
+
+test("SDK DAG keeps writer idle pauses resumable instead of synthesizing unsafe partial work", () => {
+  const agents = new Map([
+    ["worker", agent("worker", ["inspect-files", "edit-files"])],
+    ["reviewer", readOnlyAgent("reviewer", "review")],
+  ]);
+  const stageSteps: RunState["steps"] = [
+    {
+      id: "implementation:worker",
+      agent: "worker",
+      task: "Edit files.",
+      status: "paused",
+      pauseReason: "idle-stall",
+      error: "SDK runner idle stalled for worker after 120000ms without activity",
+    },
+    {
+      id: "implementation:reviewer",
+      agent: "reviewer",
+      task: "Review design.",
+      status: "complete",
+      output: { agent: "reviewer", text: "Review partial.", handoff: "Review partial.", memoryCandidates: [], raw: "", warnings: [] },
+    },
+  ];
+
+  const recovered = recoverPausedReadOnlyDagStage(stageSteps, agents);
+
+  assert.equal(recovered, 0);
+  assert.equal(stageSteps[0]?.status, "paused");
+  assert.equal(shouldStopAfterDagStage(stageSteps, agents), true);
+});
+
 test("SDK child idle guard is based on idle time, not total wall-clock while a tool is active", async () => {
   let active = 1;
   const result = await runWithIdleStallMonitor(
@@ -696,10 +847,11 @@ test("SDK child idle guard rejects when no tool or message activity occurs", asy
   );
 });
 
-test("SDK child idle stall window defaults to 90s and uses only the idle-stall env knob", () => {
+test("SDK child idle stall window defaults to 120s and uses only the idle-stall env knob", () => {
   const previousStall = process.env.PI_CHALIN_SDK_STEP_IDLE_STALL_MS;
   try {
     delete process.env.PI_CHALIN_SDK_STEP_IDLE_STALL_MS;
+    assert.equal(DEFAULT_SDK_STEP_IDLE_STALL_MS, 120_000);
     assert.equal(sdkStepIdleStallMs(), DEFAULT_SDK_STEP_IDLE_STALL_MS);
 
     process.env.PI_CHALIN_SDK_STEP_IDLE_STALL_MS = "45000";
@@ -1130,6 +1282,48 @@ test("childToolNames removes inspection tools for handoff-only synthesis steps",
   assert.ok(childToolNames(agent, "Save a checkpoint for this long-running feature.", true, true, { budgetProfile: "extended" }).includes("chalin_artifact_write"));
 });
 
+test("childToolNames keeps inspection tools for critical handoff claim checks", () => {
+  const agent: AgentDefinition = {
+    name: "context-builder",
+    scope: "built-in",
+    concern: "context-building",
+    capabilities: ["inspect-files", "search-files", "memory-read", "memory-write"],
+    description: "Synthesize context.",
+    model: "inherit",
+    tools: [],
+    memory: { read: true, write: "candidate", categories: [] },
+    systemPrompt: "",
+    diagnostics: [],
+  };
+
+  const tools = childToolNames(agent, "Reconcile contradiction: scout says no web fetch exists but researcher found src/webfetch.ts.", true, true);
+
+  assert.ok(tools.includes("read"));
+  assert.ok(tools.includes("grep"));
+  assert.ok(tools.includes("find"));
+});
+
+test("childToolNames uses structured handoff audit signal before task wording", () => {
+  const agent: AgentDefinition = {
+    name: "context-builder",
+    scope: "built-in",
+    concern: "context-building",
+    capabilities: ["inspect-files", "search-files", "memory-read", "memory-write"],
+    description: "Synthesize context.",
+    model: "inherit",
+    tools: [],
+    memory: { read: true, write: "candidate", categories: [] },
+    systemPrompt: "",
+    diagnostics: [],
+  };
+
+  const tools = childToolNames(agent, "Synthesize final answer material.", true, true, { previousClaimsNeedAudit: true } as never);
+
+  assert.ok(tools.includes("read"));
+  assert.ok(tools.includes("grep"));
+  assert.ok(tools.includes("find"));
+});
+
 test("childToolNames keeps inspection tools for deep synthesis with possible coverage gaps", () => {
   const agent: AgentDefinition = {
     name: "context-builder",
@@ -1455,7 +1649,7 @@ test("buildSdkPrompt tells deep recon to cover surfaces without exhaustive crawl
   assert.match(prompt, /report them as runnable invocations/);
 });
 
-test("resolveStepCompletionStatus treats useful budget handoffs as complete", () => {
+test("resolveStepCompletionStatus turns budget-capped SDK stops into checkpointed handoffs", () => {
   const useful = resolveStepCompletionStatus({
     metrics: {
       durationMs: 100,
@@ -1486,7 +1680,53 @@ test("resolveStepCompletionStatus treats useful budget handoffs as complete", ()
   });
 
   assert.equal(useful, "complete");
-  assert.equal(empty, "budget-capped");
+  assert.equal(empty, "checkpointed");
+});
+
+test("loadResumableRunState normalizes legacy budget-capped steps at the storage edge", () => {
+  const cwd = tempDir("legacy-budget-run-");
+  const runId = "chalin-legacy-budget";
+  const runsDir = path.join(cwd, ".pi-chalin", "runs");
+  fs.mkdirSync(runsDir, { recursive: true });
+  fs.writeFileSync(path.join(runsDir, `${runId}.json`), JSON.stringify({
+    id: runId,
+    route: {
+      kind: "multi-agent-chain",
+      agents: ["scout", "worker"],
+      risk: "low",
+      ambiguity: "low",
+      needsMemory: false,
+      needsArtifacts: true,
+      reason: "legacy budget checkpoint",
+      plan: { kind: "chain", steps: [
+        { agent: "scout", task: "Map", budget: "tight" },
+        { agent: "worker", task: "Implement", budget: "normal" },
+      ] },
+    },
+    status: "paused",
+    startedAt: new Date().toISOString(),
+    warnings: [],
+    steps: [
+      {
+        id: "step-1",
+        agent: "scout",
+        task: "Map",
+        status: "budget-capped",
+        output: { agent: "scout", text: "partial", handoff: "Mapped enough to continue.", memoryCandidates: [], raw: "partial", warnings: [] },
+      },
+      { id: "step-2", agent: "worker", task: "Implement", status: "pending" },
+    ],
+  }, null, 2), "utf-8");
+
+  const loaded = loadResumableRunState({ cwd, runId });
+
+  assert.equal(loaded?.steps[0]?.status, "checkpointed");
+  assert.deepEqual(loaded?.steps[0]?.checkpoint, {
+    kind: "budget-cap",
+    reason: "legacy budget-capped step status",
+    continuation: "continue",
+    legacyStatus: "budget-capped",
+  });
 });
 
 test("resolveStepCompletionStatus fails errored child steps even without budget caps", () => {

@@ -8,13 +8,13 @@ import { loadEffectiveConfig } from "./config.ts";
 import { ChalinKernel, routeFromPlan } from "./kernel.ts";
 import { createMemoryCandidate } from "./memory.ts";
 import { createConfiguredMemoryStore } from "./memory-provider.ts";
-import { formatInterviewResult, runChalinInterview, type InterviewRequestInput } from "./interview.ts";
+import { formatInterviewResult, runChalinInterview, type InterviewRequestInput, type InterviewResult } from "./interview.ts";
 import { loadResumableRunState } from "./runner-state.ts";
 import { activateSkillForTurn, beginChalinRouteInvocation, disableSkillForTurn, finishChalinRouteInvocation, getSkillOverridesForTurn, setLatestRun } from "./runtime-state.ts";
 import { openSafetyApproval } from "./ui.ts";
 import { clearLegacyChalinControlWidget, setChalinStatus } from "./ui-status.ts";
 import { chalinRouteUpdateDetails, colorizeChalinWidget, footerStateForRun, formatChalinRoutePlanWidget, formatChalinRunWidget, formatChalinRunWidgetFromDetails, isUsableStepStatus, plannedWidgetRun, routeIntent, type ChalinRouteWidgetDetails } from "./route-widget.ts";
-import { fetchWebUrls, formatWebBundle, searchWeb } from "./webfetch.ts";
+import { fetchWebUrls, formatWebBundle, formatWebBundleProgressWidget, formatWebBundleWidget, searchWeb, type WebBundleProgressWidgetInput, type WebContextBundle } from "./webfetch.ts";
 import type { MemoryRecord, RouteDecision, RunState } from "./schemas.ts";
 import { collapseReadOnlyScoutContextRoute, inferRouteRequiresWorkspaceMutation, normalizeRouteForExecution } from "./route-guards.ts";
 import { compactRouteDetails, finalAnswerMaterial, formatRoute, outcomeForResult } from "./route-format.ts";
@@ -358,6 +358,31 @@ export function registerChalinTools(pi: ExtensionAPI): void {
       const result = await runChalinInterview(ctx, store, params);
       return textResult(formatInterviewResult(result), { interview: result });
     },
+    renderCall(args, theme) {
+      const count = Array.isArray(args.questions) ? args.questions.length : 0;
+      const label = args.featureId || args.task || "interview";
+      return new Text([
+        theme.fg("toolTitle", theme.bold("chalin_interview")),
+        theme.fg("muted", ` ${count} question${count === 1 ? "" : "s"}`),
+        theme.fg("dim", ` · ${truncateForTool(label, 56)}`),
+      ].join(""), 0, 0);
+    },
+    renderResult(result, _options, theme) {
+      const details = result.details as { interview?: InterviewResult } | undefined;
+      const interview = details?.interview;
+      if (!interview) return new Text(result.content.find((part) => part.type === "text")?.text ?? "", 0, 0);
+      const statusColor = interview.status === "answered" ? "success" : interview.status === "cancelled" ? "warning" : "muted";
+      const lines = [
+        `${theme.fg(statusColor, interview.status)} · ${interview.answers.length} answer${interview.answers.length === 1 ? "" : "s"}`,
+        theme.fg("muted", `artifact: ${truncateForTool(interview.featureId, 64)}`),
+        ...interview.answers.map((answer) => {
+          const suffix = answer.custom ? " (custom)" : answer.recommended ? " (recommended)" : "";
+          return `- ${theme.fg("accent", answer.questionId)}: ${truncateForTool(answer.answer, 120)}${theme.fg("muted", suffix)}`;
+        }),
+        interview.status === "answered" ? theme.fg("dim", "next: continue with these answers") : theme.fg("warning", "next: ask before routing"),
+      ];
+      return new Text(lines.join("\n"), 0, 0);
+    },
   });
 
   pi.registerTool({
@@ -689,12 +714,24 @@ export function registerChalinTools(pi: ExtensionAPI): void {
     parameters: ChalinWebSearchParams,
     async execute(_toolCallId, params: ChalinWebSearchToolParams, signal, onUpdate, ctx) {
       const urls = [...(params.urls ?? []), ...(params.url ? [params.url] : [])].filter(Boolean);
-      const label = urls.length > 0 ? `fetching ${urls.length} URL${urls.length === 1 ? "" : "s"}` : `searching ${params.query ?? "web"}`;
-      onUpdate?.({ content: [{ type: "text", text: `chalin web · ${label} via Exa MCP…` }], details: { status: "running", provider: "exa-mcp" } });
+      const progressDetails: WebBundleProgressWidgetInput & { status: "running"; provider: "exa-mcp" } = urls.length > 0
+        ? { status: "running", provider: "exa-mcp", mode: "fetch", label: urls.length === 1 ? urls[0] ?? "URL" : `${urls.length} URLs`, requested: urls, done: 0, total: urls.length }
+        : { status: "running", provider: "exa-mcp", mode: "search", label: params.query ?? "web", requested: params.query ? [params.query] : [], done: 0, total: 1 };
+      onUpdate?.({ content: [{ type: "text", text: formatWebBundleProgressWidget(progressDetails) }], details: progressDetails });
       const bundle = urls.length > 0
         ? await fetchWebUrls({ cwd: ctx.cwd, urls, freshness: params.freshness, signal })
         : await searchWeb({ cwd: ctx.cwd, query: params.query ?? "", maxSources: params.maxSources, depth: params.depth, freshness: params.freshness, signal });
       return textResult(formatWebBundle(bundle), bundle);
+    },
+    renderResult(result, _options, _theme) {
+      const details = result.details as (Partial<WebContextBundle> & Partial<WebBundleProgressWidgetInput> & { status?: string }) | undefined;
+      if (details?.status === "running" && (details.mode === "search" || details.mode === "fetch")) {
+        return new Text(formatWebBundleProgressWidget(details as WebBundleProgressWidgetInput), 0, 0);
+      }
+      const rendered = details?.provider === "exa-mcp" && Array.isArray(details.sources)
+        ? formatWebBundleWidget(details as WebContextBundle)
+        : result.content.find((part) => part.type === "text")?.text ?? "";
+      return new Text(rendered, 0, 0);
     },
   });
 }

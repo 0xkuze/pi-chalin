@@ -56,23 +56,23 @@ test("child bash policy allows arbitrary command text for bash-capable agents", 
   assert.deepEqual(policy.metrics().policyViolations, []);
 });
 
-test("child tool policy warns at soft budget and hard-stops only after adaptive grace", async () => {
+test("child tool policy warns at soft budget and never hard-stops on tool count", async () => {
   const dir = tempDir("pi-chalin-budget-");
   const policy = createChildToolPolicy({ cwd: dir, maxToolCalls: 1, agentName: "scout" });
   const tool = createProjectSnapshotTool(policy);
 
   const first = await tool.execute("call-1", {}, undefined, undefined, {} as never);
   let last = first;
-  for (let index = 2; index <= 14; index += 1) {
+  for (let index = 2; index <= 20; index += 1) {
     last = await tool.execute(`call-${index}`, {}, undefined, undefined, {} as never);
   }
 
   assert.match(first.content[0]?.type === "text" ? first.content[0].text : "", /Project discovery inventory/i);
-  assert.equal(policy.metrics().toolCalls, 13);
-  assert.match(last.content[0]?.type === "text" ? last.content[0].text : "", /budget_exceeded/);
-  assert.equal(policy.metrics().budgetStopCount, 1);
+  assert.match(last.content[0]?.type === "text" ? last.content[0].text : "", /Project discovery inventory/i);
+  assert.equal(policy.metrics().toolCalls, 20);
+  assert.equal(policy.metrics().budgetStopCount, 0);
   assert.ok(policy.metrics().budgetCapHits.some((hit) => hit.name === "max_tool_calls" && hit.severity === "soft"));
-  assert.ok(policy.metrics().budgetCapHits.some((hit) => hit.name === "max_tool_calls" && hit.severity === "hard"));
+  assert.equal(policy.metrics().budgetCapHits.some((hit) => hit.name === "max_tool_calls" && hit.severity === "hard"), false);
   assert.deepEqual(policy.metrics().policyViolations, []);
 });
 

@@ -1,4 +1,4 @@
-import type { AgentCapability, AgentDefinition, ResolvedSkill, RouteKind, ToolBudgetProfile } from "./schemas.ts";
+import type { AgentCapability, AgentDefinition, EvidenceClaim, ResolvedSkill, RouteKind, ToolBudgetProfile } from "./schemas.ts";
 import { policyForStep } from "./budget.ts";
 import { buildProjectDiscoveryIndex, formatProjectDiscoveryIndex } from "./discovery.ts";
 import type { RunStepState } from "./schemas.ts";
@@ -9,6 +9,7 @@ export interface SdkPromptOptions {
   priorFilesRead?: string[];
   synthesisGapReadLimit?: number;
   memoryContext?: string;
+  previousClaims?: EvidenceClaim[];
   activeSkills?: ResolvedSkill[];
   suggestedSkills?: ResolvedSkill[];
   rejectedSkills?: Array<{ skill: { qualifiedName: string }; reason: string }>;
@@ -20,6 +21,7 @@ export interface ChildToolOptions {
   memoryEnabled?: boolean;
   delegationDepth?: number;
   maxDelegationDepth?: number;
+  previousClaimsNeedAudit?: boolean;
 }
 
 export function buildSdkPrompt(
@@ -90,6 +92,7 @@ export function buildSdkPrompt(
       ? "- Implementation scouting: map source+test evidence per requested behavior. Do not call tests sufficient/as-is unless each criterion has a direct runner-discoverable assertion; hand off missing regressions."
       : undefined,
     "- Prefer concise evidence; stop after high-value actionable issues.",
+    evidenceClaimDiscipline(),
     "- Preserve failure triggers/counterexamples before adjacent findings.",
     mutationRelevant ? "- Impl/test: derive the contract from prompt+repo evidence. Tests are contract oracles: preserve starter assertions unless disproven; add focused criteria plus one boundary/counterexample; cover changed and preservation/no-op/composition paths. Preserve public compatibility unless evidence requires. Narrow token/flag/path/format means local change plus adjacent preservation. Invalid/reject requirements are contract." : undefined,
     mutationRelevant && timeContractRelevant ? "- Time/window/retry/cache/rate/budget behavior prefers internal test seams or runner-native fake time without expanding public APIs; use Bun `setSystemTime`, Vitest fake timers, or the smallest scoped Date.now restore instead of ad hoc sleeps." : undefined,
@@ -134,6 +137,8 @@ export function buildSdkPrompt(
     previous ? "## Previous Handoff" : undefined,
     previous || undefined,
     previous ? "" : undefined,
+    formatStructuredClaimAudit(options.previousClaims ?? []),
+    options.previousClaims?.length ? "" : undefined,
     options.rootTask?.trim() ? "## Original User Goal" : undefined,
     options.rootTask?.trim() || undefined,
     options.rootTask?.trim() ? "" : undefined,
@@ -163,6 +168,7 @@ export function buildSdkPrompt(
     "- Prefer categories like `project-fact:`, `pattern:`, `tooling:`, `testing:`, `workflow:`, `bugfix:`, `decision:`, or `preference:`.",
     "- Avoid commands, logs, code snippets, raw stdout/stderr, stack traces, task completion notes, or obvious facts.",
     "- Write `- None.` when there is nothing worth remembering.",
+    claimLedgerOutputContract(agent),
   ].filter(Boolean).join("\n");
 }
 
@@ -170,9 +176,14 @@ function implementationReviewText(text: string): boolean {
   return /\b(implement|implementation|changed|worker|verification|tests?|edit|mutation|mutaci[oó]n|fix|bugfix|refactor|feature|scaffold|code|c[oó]digo|build|update|actualiza|modifica)\b/i.test(text);
 }
 
+function claimLedgerOutputContract(agent: AgentDefinition | undefined): string | undefined {
+  if (!agent || agent.concern === "implementation" || agent.concern === "conflict-resolution") return undefined;
+  return "## Claim Ledger\n- Optional JSON for auditable claims: `{kind,subject,summary,evidence,evidenceKind,confidence}`; kinds include `transient-status`, `negative-claim`, `unknown`, `contradiction`.";
+}
+
 export function childToolNames(agent: AgentDefinition | undefined, task = "", needsArtifacts = false, hasPrevious = false, options: ChildToolOptions = {}): string[] {
   const deepHandoff = options.budgetProfile === "deep" || options.budgetProfile === "extended" || options.routeKind === "multi-agent-dag";
-  if (hasPrevious && shouldUseHandoffOnlyMode(agent, deepHandoff)) return [];
+  if (hasPrevious && shouldUseHandoffOnlyMode(agent, deepHandoff, task, Boolean(options.previousClaimsNeedAudit))) return [];
   if (!agent?.capabilities.length) {
     const fallback = new Set(agent?.tools.length ? agent.tools : ["read", "grep", "find", "ls"]);
     fallback.add("chalin_project_discovery");
@@ -231,7 +242,7 @@ export function resolveStepCompletionStatus(step: Pick<RunStepState, "metrics" |
   if (step.error) return "failed";
   if (!step.metrics?.budgetStopCount) return "complete";
   if (hasUsableHandoff(step)) return "complete";
-  return "budget-capped";
+  return "checkpointed";
 }
 
 export function isHandoffGapReadMode(agent: AgentDefinition | undefined, previous?: string, deepProjectAnalysis = false): boolean {
@@ -283,8 +294,18 @@ function memoryPolicyForAgent(agent: AgentDefinition | undefined): string | unde
       ? "- Use `chalin_memory_write` for compact durable knowledge and `chalin_memory_revise` when evidence proves memory stale/wrong. WriteGuard decides active/pending/rejected."
       : undefined,
     "- Keep memory token spend low: short queries, evidence only for review/contradiction, never logs/output/code dumps/trivial notes.",
+    "- No memory candidates for transient pass/fail/current-status claims from tests, builds, evals, CI, dry-runs, partial logs, previews, or unexecuted commands. Record stable commands/conventions instead.",
     "- Memory is guidance, not proof; current repo evidence and explicit user instructions win.",
   ].filter(Boolean).join("\n");
+}
+
+function evidenceClaimDiscipline(): string {
+  return [
+    "- Evidence-grade claims: Dry-runs, inventory commands, grep counts, and partial logs are not live verification; report them as inventory or partial evidence, never as current pass/fail status.",
+    "- Before saying a feature, API, file, route, command, dependency, or pattern is absent, perform a targeted local search/read or label it unknown/gap. Negative claims require evidence just like positive claims.",
+    "- Reconcile contradictions between handoffs before synthesis. If evidence conflicts, say what is unresolved and what check would settle it; do not concatenate raw upstream output as if all claims were simultaneously true.",
+    "- Do not write memory candidates for transient pass/fail/current-status claims. Durable memory may describe stable commands, conventions, or workflow rules.",
+  ].join("\n");
 }
 
 function extractAgentSection(text: string, start: string, end: string): string {
@@ -292,9 +313,30 @@ function extractAgentSection(text: string, start: string, end: string): string {
   return pattern.exec(text)?.[1]?.trim() ?? "";
 }
 
-function shouldUseHandoffOnlyMode(agent: AgentDefinition | undefined, deepHandoff: boolean): boolean {
+function shouldUseHandoffOnlyMode(agent: AgentDefinition | undefined, deepHandoff: boolean, task = "", previousClaimsNeedAudit = false): boolean {
   if (!agent || deepHandoff) return false;
+  if (previousClaimsNeedAudit) return false;
+  if (taskNeedsCriticalHandoffAudit(task)) return false;
   return agent.concern === "context-building";
+}
+
+function formatStructuredClaimAudit(claims: EvidenceClaim[]): string | undefined {
+  if (claims.length === 0) return undefined;
+  const lines = claims.slice(0, 12).map((claim) => {
+    const evidence = claim.evidence.length > 0 ? `evidence=${claim.evidence.slice(0, 4).join(", ")}` : "evidence=missing";
+    const evidenceKind = claim.evidenceKind ? ` evidenceKind=${claim.evidenceKind}` : "";
+    return `- ${claim.kind} · ${claim.subject} · confidence=${claim.confidence}${evidenceKind} · ${evidence} · ${claim.summary}`;
+  });
+  return [
+    "## Structured claim audit",
+    "- Previous agents marked these claims as needing audit or careful synthesis. Prefer this metadata over wording heuristics.",
+    "- Recheck only claims that affect the final answer; if you cannot recheck, preserve the uncertainty explicitly.",
+    ...lines,
+  ].join("\n");
+}
+
+function taskNeedsCriticalHandoffAudit(task: string): boolean {
+  return /\b(contradict|contradicci[oó]n|conflict|conflicto|critical claim|claim check|fact[- ]?check|reconcile|reconciliar|no existe|not present|absent|missing evidence|unknown|gap|unresolved)\b/i.test(task);
 }
 
 function taskNeedsExternalContext(agent: AgentDefinition): boolean {
@@ -421,7 +463,7 @@ function handoffGapReadContract(options: SdkPromptOptions, agent: AgentDefinitio
     "- If a read is blocked by the cross-step duplicate-read policy, do not retry variants of the same evidence path; use the handoff evidence and mark the claim as sampled/not rechecked.",
     "- Prefer citing evidence already present in the handoff. Use new reads only to close explicit gaps, then stop.",
     "- If coverage is incomplete, say exactly what remains unknown instead of expanding into a broad crawl.",
-    "- Return final answer material plus a compact handoff; do not emit a second raw exploration log.",
+    "- Reconcile contradictions before final handoff and do not concatenate raw upstream output; produce final answer material plus a compact handoff, not a second exploration log.",
   ].filter((line): line is string => Boolean(line)).join("\n");
 }
 

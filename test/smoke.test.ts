@@ -6,14 +6,15 @@ import { afterEach, test } from "bun:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import registerPiChalin from "../src/index.ts";
 import { resetAutorouteToolStateForTests, shouldUseCompactDirectOrchestrationPrompt } from "../src/autoroute.ts";
-import { resetRuntimeState, setLatestRun, setLiveStepSession } from "../src/runtime-state.ts";
+import { getDirectToolEventsForTests, getLatestRun, resetRuntimeState, setLatestRun, setLiveStepSession } from "../src/runtime-state.ts";
 import { openAgentManager, openAgentModelPicker, openSkillManager } from "../src/ui-agents.ts";
 import { openMemoryReview, openMemoryReviewWithLoading, openSmartPanel, openWebFetchAuditPanel, summarizeRuntimeGuards } from "../src/ui.ts";
-import { finalAnswerMaterial } from "../src/route-format.ts";
+import { finalAnswerMaterial, formatRoute } from "../src/route-format.ts";
 import { formatChalinRoutePlanWidget, formatChalinRunWidget } from "../src/route-widget.ts";
 import { createRunState, persistRun } from "../src/runner-state.ts";
 import { chalinFooterText } from "../src/ui-status.ts";
 import { createMemoryCandidate, MemoryStore } from "../src/memory.ts";
+import { buildRunLifecycleSpans, redactTraceAttribute } from "../src/observability.ts";
 import type { AgentDefinition, MemoryRecord, RunState } from "../src/schemas.ts";
 import { SkillCatalog } from "../src/skills.ts";
 import type { WebFetchAuditEntry } from "../src/webfetch.ts";
@@ -57,6 +58,13 @@ function memoryRecord(overrides: Partial<MemoryRecord>): MemoryRecord {
     revisionCount: 1,
     ...overrides,
   };
+}
+
+function directSteerTypesSince(fake: ReturnType<typeof createFakePi>, fromIndex: number): string[] {
+  return fake.messages
+    .slice(fromIndex)
+    .map((item) => (item.message as { customType?: string }).customType ?? "")
+    .filter((customType) => customType.startsWith("pi-chalin-direct-") || customType.startsWith("pi-chalin-docs-"));
 }
 
 function createFakePi() {
@@ -195,13 +203,12 @@ test("pi-chalin keeps the native prompt and teaches the primary Pi agent to deci
   assert.match(promptResult?.systemPrompt ?? "", /chalin_resume/i);
   assert.match(promptResult?.systemPrompt ?? "", /chalin_interview/i);
   assert.match(promptResult?.systemPrompt ?? "", /chalin_route/i);
-  assert.match(promptResult?.systemPrompt ?? "", /Call `chalin_route` first when specialist context isolation/i);
-  assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /named-file bugfixes/i);
-  assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /named-file refactors/i);
+  assert.match(promptResult?.systemPrompt ?? "", /Choose `chalin_route` when specialist context isolation/i);
+  assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /named-file bugfixes\/refactors/i);
   assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /Do not route or dry-run unless/i);
   assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /changed-file readback/i);
   assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /bounded read-only mini-project reviews/i);
-  assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /must satisfy every explicit criterion/i);
+  assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /satisfy every explicit criterion/i);
   assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /exact requested files\/APIs/i);
   assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /nearest verification/i);
   assert.match(promptResult?.message?.customType === "pi-chalin-orchestration" ? JSON.stringify(promptResult.message) : "", /test\/evidence path/i);
@@ -243,9 +250,9 @@ test("pi-chalin forces high thinking only for the parent orchestration decision"
   assert.deepEqual(fake.thinkingHistory.slice(-2), ["high", "minimal"]);
 });
 
-test("pi-chalin gates general no-path orchestration decisions with route-only tools", async () => {
+test("pi-chalin leaves general no-path routing decisions to the model with full tools", async () => {
   const fake = createFakePi();
-  const fullToolSet = ["read", "bash", "grep", "find", "ls", "chalin_route"];
+  const fullToolSet = ["read", "bash", "grep", "find", "ls", "chalin_interview", "chalin_route", "chalin_web_search"];
   fake.activeTools = [...fullToolSet];
   fake.thinkingLevel = "low";
   registerPiChalin(fake.api as never);
@@ -265,11 +272,126 @@ test("pi-chalin gates general no-path orchestration decisions with route-only to
   });
 
   assert.equal(fake.thinkingLevel, "high");
-  assert.deepEqual(fake.activeTools, ["chalin_route"]);
+  assert.deepEqual(fake.activeTools, fullToolSet);
   toolStart({ toolName: "chalin_route", args: {} });
   assert.equal(fake.thinkingLevel, "low");
   assert.deepEqual(fake.activeTools, fullToolSet);
-  assert.deepEqual(fake.toolSetHistory.slice(-2), [["chalin_route"], fullToolSet]);
+  assert.deepEqual(fake.toolSetHistory, []);
+});
+
+test("primary Pi keeps interview and web search available for ambiguous URL/docs decisions without forcing route", async () => {
+  const fake = createFakePi();
+  const fullToolSet = ["read", "bash", "grep", "find", "ls", "edit", "write", "chalin_interview", "chalin_route", "chalin_web_search"];
+  fake.activeTools = [...fullToolSet];
+  registerPiChalin(fake.api as never);
+  const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
+  const ctx = {
+    cwd: tempDir("pi-chalin-main-webfetch-"),
+    hasUI: false,
+    model: undefined,
+    modelRegistry: { getAvailable: () => [] },
+  };
+
+  await beforeAgentStart({
+    type: "before_agent_start",
+    prompt: "Actualiza docs/sdk-notes.md con los cambios puntuales de https://example.com/sdk-release-notes, preguntando si el alcance es ambiguo.",
+    systemPrompt: "base",
+    systemPromptOptions: {},
+  }, ctx);
+
+  assert.ok(fake.activeTools.includes("chalin_interview"));
+  assert.ok(fake.activeTools.includes("chalin_web_search"));
+  assert.ok(fake.activeTools.includes("read"));
+  assert.ok(fake.activeTools.includes("edit"));
+  assert.notDeepEqual(fake.activeTools, ["chalin_route"]);
+});
+
+test("bounded local prompts keep route and native tools available for model choice", async () => {
+  const fake = createFakePi();
+  const fullToolSet = ["read", "bash", "edit", "write", "grep", "find", "ls", "chalin_interview", "chalin_route", "chalin_web_search"];
+  fake.activeTools = [...fullToolSet];
+  registerPiChalin(fake.api as never);
+  const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
+
+  await beforeAgentStart({
+    type: "before_agent_start",
+    prompt: "Actualiza src/cache.ts y test/cache.test.ts para corregir una clave compuesta local y deja bun test pasando.",
+    systemPrompt: "base",
+    systemPromptOptions: {},
+  }, {
+    cwd: tempDir("pi-chalin-local-no-webfetch-"),
+    hasUI: false,
+    model: undefined,
+    modelRegistry: { getAvailable: () => [] },
+  });
+
+  assert.deepEqual(fake.activeTools, fullToolSet);
+});
+
+test("bounded release and git operations keep native and orchestration tools available", async () => {
+  const prompts = [
+    "hey bump the package json versions please, for the last merge that we do in the main branch",
+    "sync manifest and lockfile version metadata for the changed packages",
+    "move the current version bump changes to a release branch and open a fully documented PR",
+    "create a release branch for the current staged changes and push it",
+  ];
+
+  for (const prompt of prompts) {
+    const fake = createFakePi();
+    const fullToolSet = ["read", "bash", "edit", "write", "grep", "find", "ls", "chalin_interview", "chalin_route", "chalin_web_search", "chalin_memory_search"];
+    fake.activeTools = [...fullToolSet];
+    registerPiChalin(fake.api as never);
+    const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
+
+    await beforeAgentStart({
+      type: "before_agent_start",
+      prompt,
+      systemPrompt: "base",
+      systemPromptOptions: {},
+    }, {
+      cwd: tempDir("pi-chalin-bounded-release-direct-"),
+      hasUI: false,
+      model: undefined,
+      modelRegistry: { getAvailable: () => [] },
+    });
+
+    assert.ok(fake.activeTools.includes("read"), prompt);
+    assert.ok(fake.activeTools.includes("bash"), prompt);
+    assert.ok(fake.activeTools.includes("edit"), prompt);
+    assert.ok(fake.activeTools.includes("write"), prompt);
+    assert.ok(fake.activeTools.includes("chalin_route"), prompt);
+    assert.ok(fake.activeTools.includes("chalin_interview"), prompt);
+    assert.deepEqual(fake.activeTools, fullToolSet, prompt);
+  }
+});
+
+test("broad release and PR analysis are not programmatically forced to route-only", async () => {
+  const prompts = [
+    "review this PR and summarize architecture risks",
+    "analiza la estrategia de release y compara opciones para todo el monorepo",
+  ];
+
+  for (const prompt of prompts) {
+    const fake = createFakePi();
+    const fullToolSet = ["read", "bash", "edit", "write", "grep", "find", "ls", "chalin_interview", "chalin_route", "chalin_web_search", "chalin_memory_search"];
+    fake.activeTools = [...fullToolSet];
+    registerPiChalin(fake.api as never);
+    const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
+
+    await beforeAgentStart({
+      type: "before_agent_start",
+      prompt,
+      systemPrompt: "base",
+      systemPromptOptions: {},
+    }, {
+      cwd: tempDir("pi-chalin-broad-release-route-"),
+      hasUI: false,
+      model: undefined,
+      modelRegistry: { getAvailable: () => [] },
+    });
+
+    assert.deepEqual(fake.activeTools, fullToolSet, prompt);
+  }
 });
 
 test("pi-chalin keeps direct tools for bounded review, root docs edits, and explicit commands", async () => {
@@ -286,7 +408,7 @@ test("pi-chalin keeps direct tools for bounded review, root docs edits, and expl
 
   const prompts = [
     { text: "Revisa este mini proyecto y dime si hay riesgo de seguridad en el boundary de auth. No modifiques archivos; entrega evidencia con paths concretos.", expected: fullToolSet },
-    { text: "corrige un typo en el README", expected: ["bash", "edit", "write"] },
+    { text: "corrige un typo en el README", expected: fullToolSet },
     { text: "corre bun test y dime si pasa", expected: fullToolSet },
   ];
   for (const prompt of prompts) {
@@ -357,10 +479,10 @@ test("compact global orchestration requires routing for broad analysis and keeps
   assert.equal(promptResult?.message?.customType, "pi-chalin-compact-orchestration");
   assert.match(promptResult?.systemPrompt ?? "", /^base/);
   assert.match(promptResult?.systemPrompt ?? "", /pi-chalin orchestration \(compact\)/i);
-  assert.match(promptResult?.message?.content ?? "", /Call `chalin_route` as the first tool/i);
-  assert.match(promptResult?.message?.content ?? "", /bounded read-only mini-project reviews that explicitly forbid file changes stay native/i);
-  assert.match(promptResult?.message?.content ?? "", /risk\/security\/auth boundaries/i);
-  assert.match(promptResult?.message?.content ?? "", /Bounded read-only auth\/security review/i);
+  assert.match(promptResult?.message?.content ?? "", /the LM decides route, then tools/i);
+  assert.match(promptResult?.message?.content ?? "", /Decision guidance, not runtime classification/i);
+  assert.match(promptResult?.message?.content ?? "", /bounded read-only mini-project reviews/i);
+  assert.match(promptResult?.message?.content ?? "", /Bounded read-only auth\/security review guidance/i);
   assert.match(promptResult?.message?.content ?? "", /avoid repeated ls\/find after source hits/i);
   assert.match(promptResult?.message?.content ?? "", /exploit\/request path or bypass chain/i);
   assert.match(promptResult?.message?.content ?? "", /project understanding/i);
@@ -380,7 +502,7 @@ test("compact global orchestration requires routing for broad analysis and keeps
   assert.match(promptResult?.message?.content ?? "", /reviewer FAIL\/GAP requires focused repair/i);
   assert.match(promptResult?.message?.content ?? "", /Bounded greenfield\/scaffold efficiency/i);
   assert.match(promptResult?.message?.content ?? "", /repeated bash without an intervening edit is invalid/i);
-  assert.match(promptResult?.message?.content ?? "", /explicitly asks for direct\/native\/no-subagent work/i);
+  assert.match(promptResult?.message?.content ?? "", /The LM may choose otherwise from evidence/i);
   assert.match(promptResult?.message?.content ?? "", /starter test imports win over function names/i);
   assert.match(promptResult?.message?.content ?? "", /parallel-module bug/i);
   assert.match(promptResult?.message?.content ?? "", /first mutation before source\/test surface evidence is invalid/i);
@@ -412,8 +534,10 @@ test("compact global orchestration requires routing for broad analysis and keeps
   assert.match(promptResult?.message?.content ?? "", /answer in the user's language/i);
 });
 
-test("bounded read-only auth reviews use a tiny native steering prompt", async () => {
+test("bounded read-only auth reviews keep the model route decision open", async () => {
   const fake = createFakePi();
+  const fullToolSet = ["read", "bash", "grep", "find", "ls", "edit", "write", "chalin_interview", "chalin_route", "chalin_web_search"];
+  fake.activeTools = [...fullToolSet];
   registerPiChalin(fake.api as never);
   const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<{ message?: { customType?: string; content?: string; display?: boolean } } | undefined>;
 
@@ -429,26 +553,13 @@ test("bounded read-only auth reviews use a tiny native steering prompt", async (
     modelRegistry: { getAvailable: () => [] },
   });
 
-  assert.equal(promptResult?.message?.customType, "pi-chalin-review-compact-orchestration");
-  assert.match(promptResult?.message?.content ?? "", /compact bounded read-only review/i);
-  assert.match(promptResult?.message?.content ?? "", /smallest manifest\/source evidence/i);
-  assert.match(promptResult?.message?.content ?? "", /Do not start with chalin_project_discovery, chalin_project_snapshot, or chalin_route/i);
-  assert.match(promptResult?.message?.content ?? "", /broad\/project-wide uncertainty/i);
-  assert.match(promptResult?.message?.content ?? "", /direct auth\/session\/caller candidates/i);
-  assert.match(promptResult?.message?.content ?? "", /one targeted find for auth, session, authorization, middleware, or caller surfaces/i);
-  assert.match(promptResult?.message?.content ?? "", /No mutation, no bash, no tests\/docs/i);
-  assert.match(promptResult?.message?.content ?? "", /Prioritize trust boundaries/i);
-  assert.match(promptResult?.message?.content ?? "", /identity source/i);
-  assert.match(promptResult?.message?.content ?? "", /authorization\/permission checks/i);
-  assert.match(promptResult?.message?.content ?? "", /identity\/token input validation/i);
-  assert.match(promptResult?.message?.content ?? "", /misleading guard APIs/i);
-  assert.match(promptResult?.message?.content ?? "", /one verdict sentence using `riesgo de seguridad` or `security risk`/i);
-  assert.match(promptResult?.message?.content ?? "", /one concrete exploit\/request path or bypass chain/i);
-  assert.match(promptResult?.message?.content ?? "", /2-4 tight bullets/i);
-  assert.match(promptResult?.message?.content ?? "", /no tables, no project tree, no code fences/i);
-  assert.match(promptResult?.message?.content ?? "", /Include the boundary and caller paths when evidenced/i);
-  assert.doesNotMatch(promptResult?.message?.content ?? "", /src\/auth\.ts|src\/server\.ts/i);
-  assert.doesNotMatch(promptResult?.message?.content ?? "", /Bounded greenfield\/scaffold efficiency/i);
+  assert.equal(promptResult?.message?.customType, "pi-chalin-compact-orchestration");
+  assert.match(promptResult?.message?.content ?? "", /the code does not classify prompts for you/i);
+  assert.match(promptResult?.message?.content ?? "", /bounded read-only mini-project reviews/i);
+  assert.match(promptResult?.message?.content ?? "", /Bounded read-only auth\/security review guidance/i);
+  assert.ok(fake.activeTools.includes("read"));
+  assert.ok(fake.activeTools.includes("chalin_route"));
+  assert.deepEqual(fake.activeTools, fullToolSet);
 });
 
 test("resumable run context lets the parent decide chalin_resume without a prompt classifier", async () => {
@@ -500,6 +611,72 @@ test("resumable run context lets the parent decide chalin_resume without a promp
   const recovered = JSON.parse(fs.readFileSync(stale.logsPath!, "utf-8")) as RunState;
   assert.equal(recovered.status, "running");
   assert.doesNotMatch(recovered.warnings.join("\n"), /Recovered stale running run/);
+});
+
+test("new unrelated prompts do not inherit stale resumable run context", async () => {
+  const fake = createFakePi();
+  registerPiChalin(fake.api as never);
+  const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<{ systemPrompt?: string; message?: { customType?: string; content?: string; display?: boolean } } | undefined>;
+  const cwd = tempDir("pi-chalin-resume-isolation-");
+  const route: RunState["route"] = {
+    kind: "multi-agent-chain",
+    agents: ["scout", "planner", "worker"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    reason: "old interrupted workflow",
+    plan: { kind: "chain", steps: [{ agent: "scout", task: "scan" }, { agent: "planner", task: "plan" }, { agent: "worker", task: "implement" }] },
+  };
+  const stale = createRunState(route, cwd, "old docs spec task");
+  stale.status = "paused";
+  stale.steps[0]!.status = "complete";
+  stale.steps[0]!.output = { agent: "scout", text: "mapped", handoff: "Old scout handoff.", memoryCandidates: [], raw: "mapped", warnings: [] };
+  stale.steps[1]!.status = "paused";
+  persistRun(stale);
+
+  const promptResult = await beforeAgentStart({
+    type: "before_agent_start",
+    prompt: "hey haz un analisis full de este proyecto busca puntos debiles de mantenibilidad en profundidad",
+    systemPrompt: "base",
+    systemPromptOptions: {},
+  }, {
+    cwd,
+    hasUI: true,
+    model: undefined,
+    modelRegistry: { getAvailable: () => [] },
+    ui: { notify: () => {}, setStatus: () => {}, setWidget: () => {} },
+  });
+
+  assert.doesNotMatch(promptResult?.message?.content ?? "", /Resumable pi-chalin run available/i);
+  assert.doesNotMatch(promptResult?.message?.content ?? "", new RegExp(stale.id));
+});
+
+test("session_start resets stale in-memory chalin run state", async () => {
+  const fake = createFakePi();
+  registerPiChalin(fake.api as never);
+  const sessionStart = fake.handlers.get("session_start")?.[0] as (event: unknown, ctx: unknown) => void;
+  const cwd = tempDir("pi-chalin-session-reset-");
+  const run = createRunState({
+    kind: "single-agent",
+    agents: ["worker"],
+    risk: "low",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    reason: "stale running state",
+    plan: { kind: "single", agent: "worker", task: "old work" },
+  }, cwd, "old task");
+  setLatestRun(run);
+
+  sessionStart({ type: "session_start" }, {
+    cwd,
+    hasUI: true,
+    sessionManager: { getSessionDir: () => cwd, getSessionFile: () => path.join(cwd, "current.json"), getCwd: () => cwd },
+    ui: { notify: () => {}, setStatus: () => {}, setWidget: () => {} },
+  });
+
+  assert.equal(getLatestRun(), undefined);
 });
 
 test("pi-chalin uses compact orchestration context for bounded scaffold prompts", async () => {
@@ -1048,15 +1225,12 @@ test("pi-chalin uses compact orchestration context for bounded scaffold prompts"
     systemPrompt: "base",
     systemPromptOptions: {},
   }, ctx);
-  assert.equal(clampPrompt?.message?.customType, "pi-chalin-lean-package-local-path");
-  assert.match(clampPrompt?.message?.content ?? "", /lean package-local path/i);
-  assert.match(clampPrompt?.message?.content ?? "", /No ls\/find\/grep or pre-test shell/i);
-  assert.match(clampPrompt?.message?.content ?? "", /include one decimal/i);
-  assert.match(clampPrompt?.message?.content ?? "", /min==max/i);
-  assert.match(clampPrompt?.message?.content ?? "", /Do not invent RangeError, NaN, Infinity/i);
-  assert.deepEqual(fake.activeTools, ["read", "bash", "edit", "write"]);
-  assert.deepEqual(fake.toolSetHistory.at(-1), ["read", "bash", "edit", "write"]);
-  agentEnd({}, ctx);
+  assert.equal(clampPrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
+  assert.match(clampPrompt?.message?.content ?? "", /minimal bounded path/i);
+  assert.match(clampPrompt?.message?.content ?? "", /native work is usually enough/i);
+  assert.match(clampPrompt?.message?.content ?? "", /Numeric bounds\/clamp\/range/i);
+  assert.match(clampPrompt?.message?.content ?? "", /Do not invent reversed-bound, decimal, or non-finite policy/i);
+  assert.deepEqual(fake.activeTools, activeToolSet);
   assert.deepEqual(fake.activeTools, activeToolSet);
 
   const cautiousPackageLocalPrompt = await beforeAgentStart({
@@ -1077,15 +1251,11 @@ test("pi-chalin uses compact orchestration context for bounded scaffold prompts"
     systemPromptOptions: {},
   }, ctx);
   assert.equal(uvPrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(uvPrompt?.message?.content ?? "", /route-required path preflight/i);
-  assert.match(uvPrompt?.message?.content ?? "", /Prompt paths: `crates\/index-url\/src\/lib\.rs`/i);
-  assert.match(uvPrompt?.message?.content ?? "", /First tool must be `chalin_route`/i);
-  assert.match(uvPrompt?.message?.content ?? "", /Implementation topology/i);
-  assert.match(uvPrompt?.message?.content ?? "", /choose the smallest agent set/i);
-  assert.match(uvPrompt?.message?.content ?? "", /Worker execution and a later reviewer are mandatory/i);
-  assert.match(uvPrompt?.message?.content ?? "", /requested runner or nearest focused verification/i);
-  assert.ok((uvPrompt?.message?.content?.length ?? Infinity) < 2200);
-  assert.deepEqual(fake.activeTools, ["chalin_route"]);
+  assert.match(uvPrompt?.message?.content ?? "", /Prompt path: `crates\/index-url\/src\/lib\.rs`/i);
+  assert.match(uvPrompt?.message?.content ?? "", /minimal bounded path/i);
+  assert.match(uvPrompt?.message?.content ?? "", /LM finds broad ownership/i);
+  assert.ok((uvPrompt?.message?.content?.length ?? Infinity) < 3200);
+  assert.deepEqual(fake.activeTools, activeToolSet);
 
   const cachePrompt = await beforeAgentStart({
     type: "before_agent_start",
@@ -1094,13 +1264,11 @@ test("pi-chalin uses compact orchestration context for bounded scaffold prompts"
     systemPromptOptions: {},
   }, ctx);
   assert.equal(cachePrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(cachePrompt?.message?.content ?? "", /route-required path preflight/i);
-  assert.match(cachePrompt?.message?.content ?? "", /Prompt paths: `crates\/cache-key\/src\/lib\.rs`/i);
-  assert.match(cachePrompt?.message?.content ?? "", /First tool must be `chalin_route`/i);
-  assert.match(cachePrompt?.message?.content ?? "", /choose the smallest agent set/i);
-  assert.match(cachePrompt?.message?.content ?? "", /Worker execution and a later reviewer are mandatory/i);
-  assert.ok((cachePrompt?.message?.content?.length ?? Infinity) < 2600);
-  assert.deepEqual(fake.activeTools, ["chalin_route"]);
+  assert.match(cachePrompt?.message?.content ?? "", /Prompt path: `crates\/cache-key\/src\/lib\.rs`/i);
+  assert.match(cachePrompt?.message?.content ?? "", /minimal bounded path/i);
+  assert.match(cachePrompt?.message?.content ?? "", /Collection\/key/i);
+  assert.ok((cachePrompt?.message?.content?.length ?? Infinity) < 3600);
+  assert.deepEqual(fake.activeTools, activeToolSet);
 
   const ttlPrompt = await beforeAgentStart({
     type: "before_agent_start",
@@ -1149,8 +1317,8 @@ test("pi-chalin uses compact orchestration context for bounded scaffold prompts"
   }, ctx);
   assert.equal(cPrompt?.message?.customType, "pi-chalin-compact-orchestration");
   assert.match(cPrompt?.message?.content ?? "", /the code does not classify prompts for you/i);
-  assert.match(cPrompt?.message?.content ?? "", /First decide route, then tools/i);
-  assert.match(cPrompt?.message?.content ?? "", /Stay native for simple chat, one obvious command/i);
+  assert.match(cPrompt?.message?.content ?? "", /the LM decides route, then tools/i);
+  assert.match(cPrompt?.message?.content ?? "", /Native work is usually appropriate/i);
   assert.match(cPrompt?.message?.content ?? "", /specific function\/symbol\/API plus local verification/i);
   assert.match(cPrompt?.message?.content ?? "", /small bounded package\/class\/function work without prompt paths/i);
   assert.match(cPrompt?.message?.content ?? "", /edit source\+tests/i);
@@ -1253,7 +1421,7 @@ test("pi-chalin leaves surgical no-path routing to the model instead of a regex 
   assert.match(promptResult?.systemPrompt ?? "", /You are the primary Pi agent/i);
 });
 
-test("pi-chalin forces route-only tools for complex routed prompts while preserving bounded direct work", async () => {
+test("pi-chalin gives complex prompts routing guidance without forcing tool scopes", async () => {
   const prompt = "En esta base multi-lenguaje inspirada en Bun, haz un analisis profundo cross-language del fallo de `sync` con paquetes duplicados entre Zig y Rust. No cambies codigo: actualiza docs/lockfile-triage.md.";
   assert.equal(shouldUseCompactDirectOrchestrationPrompt(prompt), true);
   assert.equal(shouldUseCompactDirectOrchestrationPrompt("En este workspace Rust, implementa build_cache_key en crates/cache-key/src/lib.rs y deja cargo test pasando."), true);
@@ -1262,10 +1430,8 @@ test("pi-chalin forces route-only tools for complex routed prompts while preserv
   registerPiChalin(fake.api as never);
   const inputHandler = fake.handlers.get("input")?.[0] as (event: unknown, ctx: unknown) => Promise<{ action: string }>;
   const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<{ systemPrompt?: string; message?: { customType?: string; content?: string; display?: boolean } } | undefined>;
-  const agentEnd = fake.handlers.get("agent_end")?.[0] as (event: unknown, ctx: unknown) => void;
   const ctx = { cwd: tempDir("pi-chalin-cross-language-"), hasUI: false, model: undefined, modelRegistry: { getAvailable: () => [] } };
   const activeToolSet = ["chalin_project_discovery", "chalin_project_snapshot", "read", "bash", "grep", "find", "ls", "edit", "write", "chalin_interview", "chalin_route", "chalin_resume", "chalin_web_search", "chalin_memory_search"];
-  const routeFirstToolSet = ["chalin_route"];
   fake.activeTools = [...activeToolSet];
   const inputResult = await inputHandler({ type: "input", text: prompt, source: "interactive" }, ctx);
   assert.equal(inputResult.action, "continue");
@@ -1278,14 +1444,13 @@ test("pi-chalin forces route-only tools for complex routed prompts while preserv
   }, ctx);
 
   assert.equal(promptResult?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(promptResult?.message?.content ?? "", /route broad architecture docs/i);
+  assert.match(promptResult?.message?.content ?? "", /architecture docs context/i);
   assert.match(promptResult?.message?.content ?? "", /compact docs-artifact preflight/i);
-  assert.match(promptResult?.message?.content ?? "", /Route-required architecture docs/i);
-  assert.match(promptResult?.message?.content ?? "", /call `chalin_route` as the first tool/i);
+  assert.match(promptResult?.message?.content ?? "", /Architecture docs decision/i);
+  assert.match(promptResult?.message?.content ?? "", /often benefit from chalin_route/i);
   assert.match(promptResult?.message?.content ?? "", /choose the smallest agent set/i);
   assert.match(promptResult?.message?.content ?? "", /review evidence\/contract\/gaps\/readback/i);
   assert.match(promptResult?.message?.content ?? "", /not substitutes for route/i);
-  assert.match(promptResult?.message?.content ?? "", /Do not start native just because the mutation target is one docs file/i);
   assert.match(promptResult?.message?.content ?? "", /The routed workflow still updates only the requested docs artifact/i);
   assert.match(promptResult?.message?.content ?? "", /Cross-language\/runtime plans/i);
   assert.match(promptResult?.message?.content ?? "", /ABI-stable fixed-width integers or bitfields/i);
@@ -1302,10 +1467,6 @@ test("pi-chalin forces route-only tools for complex routed prompts while preserv
   assert.match(promptResult?.message?.content ?? "", /After evidence, write the docs next/i);
   assert.match(promptResult?.message?.content ?? "", /One write, one readback, at most one corrective edit\+readback/i);
   assert.match(promptResult?.message?.content ?? "", /Native final should be concise but complete/i);
-  assert.deepEqual(fake.activeTools, routeFirstToolSet);
-  assert.deepEqual(fake.toolSetHistory.at(-1), routeFirstToolSet);
-
-  agentEnd({}, ctx);
   assert.deepEqual(fake.activeTools, activeToolSet);
 
   const broadNoPath = await beforeAgentStart({
@@ -1315,11 +1476,8 @@ test("pi-chalin forces route-only tools for complex routed prompts while preserv
     systemPromptOptions: {},
   }, ctx);
   assert.equal(broadNoPath?.message?.customType, "pi-chalin-compact-orchestration");
-  assert.match(broadNoPath?.message?.content ?? "", /Call `chalin_route` as the first tool/i);
+  assert.match(broadNoPath?.message?.content ?? "", /chalin_route is useful/i);
   assert.match(broadNoPath?.message?.content ?? "", /deep project analysis/i);
-  assert.deepEqual(fake.activeTools, routeFirstToolSet);
-
-  agentEnd({}, ctx);
   assert.deepEqual(fake.activeTools, activeToolSet);
 
   const runtimePlan = await beforeAgentStart({
@@ -1331,14 +1489,11 @@ test("pi-chalin forces route-only tools for complex routed prompts while preserv
   assert.equal(runtimePlan?.message?.customType, "pi-chalin-path-compact-orchestration");
   assert.match(runtimePlan?.message?.content ?? "", /Prompt paths: `docs\/deny-net-plan\.md`/i);
   assert.match(runtimePlan?.message?.content ?? "", /exact evidence paths, requested artifact fields covered/i);
-  assert.match(runtimePlan?.message?.content ?? "", /route broad architecture docs/i);
-  assert.match(runtimePlan?.message?.content ?? "", /call `chalin_route` as the first tool/i);
+  assert.match(runtimePlan?.message?.content ?? "", /architecture docs context/i);
+  assert.match(runtimePlan?.message?.content ?? "", /often benefit from chalin_route/i);
   assert.match(runtimePlan?.message?.content ?? "", /Cross-language\/runtime plans/i);
   assert.match(runtimePlan?.message?.content ?? "", /ABI-stable fixed-width integers or bitfields/i);
   assert.match(runtimePlan?.message?.content ?? "", /compatibility wrappers/i);
-  assert.deepEqual(fake.activeTools, routeFirstToolSet);
-
-  agentEnd({}, ctx);
   assert.deepEqual(fake.activeTools, activeToolSet);
 
   const rustWorkspaceFeature = await beforeAgentStart({
@@ -1348,14 +1503,9 @@ test("pi-chalin forces route-only tools for complex routed prompts while preserv
     systemPromptOptions: {},
   }, ctx);
   assert.equal(rustWorkspaceFeature?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(rustWorkspaceFeature?.message?.content ?? "", /route-required path preflight/i);
-  assert.match(rustWorkspaceFeature?.message?.content ?? "", /First tool must be `chalin_route`/i);
-  assert.match(rustWorkspaceFeature?.message?.content ?? "", /choose the smallest agent set/i);
-  assert.match(rustWorkspaceFeature?.message?.content ?? "", /Worker execution and a later reviewer are mandatory/i);
-  assert.match(rustWorkspaceFeature?.message?.content ?? "", /requested runner or nearest focused verification/i);
-  assert.deepEqual(fake.activeTools, routeFirstToolSet);
-
-  agentEnd({}, ctx);
+  assert.match(rustWorkspaceFeature?.message?.content ?? "", /minimal bounded path/i);
+  assert.match(rustWorkspaceFeature?.message?.content ?? "", /native work is usually enough/i);
+  assert.match(rustWorkspaceFeature?.message?.content ?? "", /LM finds broad ownership/i);
   assert.deepEqual(fake.activeTools, activeToolSet);
 
   const diagnosticPlan = await beforeAgentStart({
@@ -1371,8 +1521,8 @@ test("pi-chalin forces route-only tools for complex routed prompts while preserv
   assert.match(diagnosticPlan?.message?.content ?? "", /Treat these as search keys, not files to read directly/i);
   assert.match(diagnosticPlan?.message?.content ?? "", /A raw inventory or one targeted find\/rg is evidence/i);
   assert.match(diagnosticPlan?.message?.content ?? "", /conventional path candidates are not/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /route broad architecture docs/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /Route-required architecture docs/i);
+  assert.match(diagnosticPlan?.message?.content ?? "", /architecture docs context/i);
+  assert.match(diagnosticPlan?.message?.content ?? "", /Architecture docs decision/i);
   assert.match(diagnosticPlan?.message?.content ?? "", /responsibility\/ownership maps/i);
   assert.match(diagnosticPlan?.message?.content ?? "", /evidence-derived validation/i);
   assert.match(diagnosticPlan?.message?.content ?? "", /problem taxonomy with evidence/i);
@@ -1394,10 +1544,8 @@ test("pi-chalin forces route-only tools for complex routed prompts while preserv
   assert.match(diagnosticPlan?.message?.content ?? "", /targeted find\/rg by exact basename or symbol/i);
   assert.match(diagnosticPlan?.message?.content ?? "", /Do not run wildcard `\*\*\/\*\.h`, `\*\*\/\*\.cpp`, docs, tests, or build-file searches/i);
   assert.match(diagnosticPlan?.message?.content ?? "", /roughly 80-120 lines/i);
-  assert.match(diagnosticPlan?.message?.content ?? "", /call `chalin_route` as the first tool/i);
+  assert.match(diagnosticPlan?.message?.content ?? "", /often benefit from chalin_route/i);
   assert.doesNotMatch(diagnosticPlan?.message?.content ?? "", /Diagnostic\/formatter planning|dependency-and-responsibility map/i);
-  assert.deepEqual(fake.activeTools, routeFirstToolSet);
-  agentEnd({}, ctx);
   assert.deepEqual(fake.activeTools, activeToolSet);
 
   const codePrompt = await beforeAgentStart({
@@ -1407,8 +1555,8 @@ test("pi-chalin forces route-only tools for complex routed prompts while preserv
     systemPromptOptions: {},
   }, ctx);
   assert.equal(codePrompt?.message?.customType, "pi-chalin-path-compact-orchestration");
-  assert.match(codePrompt?.message?.content ?? "", /Code\+test direct preference/i);
-  assert.match(codePrompt?.message?.content ?? "", /escalate to `chalin_route` only when evidence proves broader scope/i);
+  assert.match(codePrompt?.message?.content ?? "", /Code\+test decision/i);
+  assert.match(codePrompt?.message?.content ?? "", /route when evidence or the prompt indicates broader scope/i);
   assert.match(codePrompt?.message?.content ?? "", /batch implementation\+tests/i);
   assert.match(codePrompt?.message?.content ?? "", /skip grep\/find\/ls and manifest\/config/i);
   assert.match(codePrompt?.message?.content ?? "", /do not grep the same symbol\/file/i);
@@ -1416,8 +1564,6 @@ test("pi-chalin forces route-only tools for complex routed prompts while preserv
   assert.match(codePrompt?.message?.content ?? "", /For transformations/i);
   assert.doesNotMatch(codePrompt?.message?.content ?? "", /Parsers\/scanners\/state machines/i);
   assert.match(codePrompt?.message?.content ?? "", /No placeholders\/TODO/i);
-  assert.deepEqual(fake.activeTools, activeToolSet);
-  agentEnd({}, ctx);
   assert.deepEqual(fake.activeTools, activeToolSet);
 });
 
@@ -1612,7 +1758,8 @@ test("package-local bounded direct mode stays austere before verification", asyn
     systemPrompt: "base",
     systemPromptOptions: {},
   }, ctx);
-  assert.match(promptResult?.message?.content ?? "", /First read `package\.json`, `packages\/math\/src\/clamp\.ts`/i);
+  assert.match(promptResult?.message?.content ?? "", /Package-local convention/i);
+  assert.match(promptResult?.message?.content ?? "", /read root `package\.json` \+ `packages\/<pkg>\/test\/<stem>\.test\.\*`/i);
   assert.doesNotMatch(promptResult?.message?.content ?? "", /try before ls\/find/i);
 
   toolExecutionEnd({ toolName: "chalin_project_discovery", isError: false }, ctx);
@@ -1621,22 +1768,21 @@ test("package-local bounded direct mode stays austere before verification", asyn
   toolExecutionEnd({ toolName: "read", isError: false, args: { path: "packages/math/test/clamp.test.ts" } }, ctx);
   toolExecutionEnd({ toolName: "edit", isError: false, args: { path: "packages/math/src/clamp.ts" } }, ctx);
   toolExecutionEnd({ toolName: "edit", isError: false, args: { path: "packages/math/test/clamp.test.ts" } }, ctx);
-  assert.equal(fake.messages.some((item) => /pi-chalin-direct-(?:locator-loop|progress|source-test-ready)-nudge/.test((item.message as { customType?: string }).customType ?? "")), false);
+  assert.equal(fake.messages.some((item) => /pi-chalin-direct-locator-loop-nudge/.test((item.message as { customType?: string }).customType ?? "")), false);
+  assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-source-test-ready-nudge").length, 1);
 
   toolExecutionEnd({ toolName: "bash", isError: false, args: { command: "bun test" } }, ctx);
   const completion = fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-completion-nudge");
   assert.equal(completion.length, 1);
   const content = (completion[0]?.message as { content?: string }).content ?? "";
-  assert.match(content, /package-local source\/test edit/i);
-  assert.match(content, /No readback, rerun, broad discovery/i);
-  assert.doesNotMatch(content, /README\/API\/usage docs/i);
+  assert.match(content, /You changed files and ran `bun test`/i);
+  assert.match(content, /Final should be concise but complete/i);
 });
 
-test("bounded direct tool scopes hide unused search and orchestration tools", async () => {
+test("bounded direct prompts do not hide orchestration tools programmatically", async () => {
   const fake = createFakePi();
   registerPiChalin(fake.api as never);
   const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
-  const agentEnd = fake.handlers.get("agent_end")?.[0] as (event: unknown, ctx: unknown) => void;
   const ctx = {
     cwd: tempDir("pi-chalin-direct-tool-scope-"),
     hasUI: false,
@@ -1652,8 +1798,6 @@ test("bounded direct tool scopes hide unused search and orchestration tools", as
     systemPrompt: "base",
     systemPromptOptions: {},
   }, ctx);
-  assert.deepEqual(fake.activeTools, ["read", "bash", "edit", "write"]);
-  agentEnd({}, ctx);
   assert.deepEqual(fake.activeTools, fullToolSet);
 
   fake.activeTools = [...fullToolSet];
@@ -1663,8 +1807,6 @@ test("bounded direct tool scopes hide unused search and orchestration tools", as
     systemPrompt: "base",
     systemPromptOptions: {},
   }, ctx);
-  assert.deepEqual(fake.activeTools, ["bash", "edit", "write"]);
-  agentEnd({}, ctx);
   assert.deepEqual(fake.activeTools, fullToolSet);
 });
 
@@ -1733,6 +1875,56 @@ test("direct source and test edits reject trivial smoke coverage before final", 
   toolExecutionEnd({ toolName: "bash", isError: false, args: { command: "bun test test/sortItems.test.ts" } }, ctx);
   assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-completion-nudge").length, 1);
   assert.equal(await contextHandler({ type: "context", messages: [] }, ctx), undefined);
+});
+
+test("direct rare gap diagnostics are derived from tool event history", async () => {
+  const fake = createFakePi();
+  registerPiChalin(fake.api as never);
+  const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
+  const toolExecutionEnd = fake.handlers.get("tool_execution_end")?.[0] as (event: { toolName: string; isError?: boolean; args?: Record<string, unknown> }, ctx: unknown) => void;
+  const { getDirectDerivedGapDiagnosticsForTests } = await import("../src/runtime-state.ts");
+  const ctx = {
+    cwd: tempDir("pi-chalin-derived-gaps-"),
+    hasUI: false,
+    model: undefined,
+    modelRegistry: { getAvailable: () => [] },
+  };
+  await beforeAgentStart({
+    type: "before_agent_start",
+    prompt: "Create a TypeScript CLI package with package.json, src/cli.ts, tests, and real coverage.",
+    systemPrompt: "base",
+    systemPromptOptions: {},
+  }, ctx);
+
+  toolExecutionEnd({ toolName: "write", isError: false, args: { path: "src/cli.ts", content: "export function main() { return 1; }\n" } }, ctx);
+  toolExecutionEnd({ toolName: "write", isError: false, args: { path: "test/cli.test.ts", content: "test('empty', () => expect(1).toBe(1));\n" } }, ctx);
+  toolExecutionEnd({ toolName: "write", isError: false, args: { path: "package.json", content: JSON.stringify({ name: "demo", bin: { demo: "src/cli.ts" } }) } }, ctx);
+
+  assert.deepEqual(getDirectDerivedGapDiagnosticsForTests(), {
+    weakTestCoverage: true,
+    packageMetadata: true,
+    parallelSurface: undefined,
+  });
+
+  toolExecutionEnd({
+    toolName: "write",
+    isError: false,
+    args: {
+      path: "test/cli.test.ts",
+      content: [
+        "import { test, expect } from 'bun:test';",
+        "test('prints help', () => expect(renderHelp()).toContain('Usage'));",
+        "test('rejects blank input', () => expect(() => parseArgs([''])).toThrow());",
+      ].join("\n"),
+    },
+  }, ctx);
+  toolExecutionEnd({ toolName: "write", isError: false, args: { path: "package.json", content: JSON.stringify({ name: "demo", type: "module", bin: { demo: "src/cli.ts" } }) } }, ctx);
+
+  assert.deepEqual(getDirectDerivedGapDiagnosticsForTests(), {
+    weakTestCoverage: false,
+    packageMetadata: false,
+    parallelSurface: undefined,
+  });
 });
 
 test("direct C tests with multiple assert calls are not mistaken for trivial empty coverage", async () => {
@@ -1969,7 +2161,7 @@ test("direct scaffold mutations outside the current workspace get a hard-stop gu
   assert.equal(await contextHandler({ type: "context", messages: [] }, ctx), undefined);
 });
 
-test("test-only direct mode uses terse verify and completion nudges", async () => {
+test("test-only direct work uses generic evidence-based verify and completion nudges", async () => {
   const fake = createFakePi();
   registerPiChalin(fake.api as never);
   const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
@@ -1994,20 +2186,17 @@ test("test-only direct mode uses terse verify and completion nudges", async () =
 
   const progress = fake.messages.find((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-progress-nudge");
   const progressContent = (progress?.message as { content?: string }).content ?? "";
-  assert.match(progressContent, /Test-only edit done/i);
-  assert.match(progressContent, /Run the nearest test now/i);
-  assert.match(progressContent, /No readback, package\/config\/search/i);
-  assert.doesNotMatch(progressContent, /Preserve compatibility and requested package\/CLI\/API metadata/i);
+  assert.match(progressContent, /Files changed/i);
+  assert.match(progressContent, /run one focused verification/i);
+  assert.match(progressContent, /read changed files only for concrete missing evidence/i);
 
   toolExecutionEnd({ toolName: "bash", isError: false, args: { command: "bun test test/math.test.ts" } }, ctx);
 
   const completion = fake.messages.find((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-completion-nudge");
   const completionContent = (completion?.message as { content?: string }).content ?? "";
-  assert.match(completionContent, /Test-only change verified/i);
-  assert.match(completionContent, /Final now/i);
-  assert.match(completionContent, /Do not read back, rerun tests, or explain a plan/i);
-  assert.match(completionContent, /name the requested behavior and boundary/i);
-  assert.doesNotMatch(completionContent, /README\/API\/usage docs/i);
+  assert.match(completionContent, /You changed files and ran `bun test test\/math\.test\.ts`/i);
+  assert.match(completionContent, /Final should be concise but complete/i);
+  assert.match(completionContent, /requested behavior\/constraints/i);
 });
 
 test("direct bounded code tasks nudge away from pre-mutation verification loops", async () => {
@@ -2126,6 +2315,16 @@ test("direct bash end reuses command captured at tool start", async () => {
   toolExecutionEnd({ toolName: "edit", isError: false, args: { path: "tests/test_tokenizer.c" } }, ctx);
   toolExecutionStart({ toolName: "bash", args: { command: "make test" } }, ctx);
   toolExecutionEnd({ toolName: "bash", isError: false }, ctx);
+
+  assert.deepEqual(getDirectToolEventsForTests().map((event) => ({
+    phase: event.phase,
+    toolName: event.toolName,
+    command: event.command,
+    isError: event.isError,
+  })).slice(-2), [
+    { phase: "start", toolName: "bash", command: "make test", isError: undefined },
+    { phase: "completed", toolName: "bash", command: "make test", isError: false },
+  ]);
 
   const nudges = fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-completion-nudge");
   assert.equal(nudges.length, 1);
@@ -2416,7 +2615,7 @@ test("direct locator nudge stops search variants after a target read", async () 
   assert.match((nudges[0]?.message as { content?: string }).content ?? "", /Stop trying locator variants/i);
 });
 
-test("direct stateful/time drift gets a general coverage nudge", async () => {
+test("direct drift nudges use evidence loops instead of prompt stateful classification", async () => {
   const fake = createFakePi();
   registerPiChalin(fake.api as never);
   const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
@@ -2433,16 +2632,11 @@ test("direct stateful/time drift gets a general coverage nudge", async () => {
   toolExecutionEnd({ toolName: "read", isError: false, args: { path: "cache/cache_test.go" } }, ctx);
   toolExecutionEnd({ toolName: "grep", isError: false, args: { path: ".", pattern: "Cache" } }, ctx);
 
-  const ttlNudges = fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-stateful-time-nudge");
-  assert.equal(ttlNudges.length, 1);
-  assert.match((ttlNudges[0]?.message as { content?: string }).content ?? "", /Stateful\/time-sensitive task drift/i);
-  assert.match((ttlNudges[0]?.message as { content?: string }).content ?? "", /stop discovery once source and nearest tests are known/i);
-  assert.match((ttlNudges[0]?.message as { content?: string }).content ?? "", /happy path/i);
-  assert.match((ttlNudges[0]?.message as { content?: string }).content ?? "", /before\/at\/after the state transition/i);
-  assert.match((ttlNudges[0]?.message as { content?: string }).content ?? "", /state update or preservation/i);
-  assert.match((ttlNudges[0]?.message as { content?: string }).content ?? "", /independent entries\/keys/i);
-  assert.doesNotMatch((ttlNudges[0]?.message as { content?: string }).content ?? "", /exactly 3/i);
-  assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-locator-loop-nudge").length, 0);
+  assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-stateful-time-nudge").length, 0);
+  const locatorNudges = fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-locator-loop-nudge");
+  assert.equal(locatorNudges.length, 1);
+  assert.match((locatorNudges[0]?.message as { content?: string }).content ?? "", /target read\/search evidence/i);
+  assert.match((locatorNudges[0]?.message as { content?: string }).content ?? "", /Stop trying locator variants/i);
 });
 
 test("direct docs-only edits verify with read instead of shell nudges", async () => {
@@ -2459,22 +2653,21 @@ test("direct docs-only edits verify with read instead of shell nudges", async ()
 
   await beforeAgentStart({ type: "before_agent_start", prompt: "actualiza docs/plan.md sin tocar codigo", systemPrompt: "base", systemPromptOptions: {} }, ctx);
   toolExecutionEnd({ toolName: "bash", isError: false, args: { command: "cargo test" } }, ctx);
-  const shellNudge = fake.messages.find((item) => (item.message as { customType?: string }).customType === "pi-chalin-docs-only-shell-nudge");
-  assert.match((shellNudge?.message as { content?: string }).content ?? "", /names only docs artifacts/i);
-  assert.match((shellNudge?.message as { content?: string }).content ?? "", /Stop running shell verification/i);
+  assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-docs-only-shell-nudge").length, 0);
+  const beforeWriteMessages = fake.messages.length;
   toolExecutionEnd({ toolName: "write", isError: false, args: { path: "docs/plan.md" } }, ctx);
 
-  const progress = fake.messages.find((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-progress-nudge");
-  assert.match((progress?.message as { content?: string }).content ?? "", /Docs changed/i);
-  assert.match((progress?.message as { content?: string }).content ?? "", /do not run find\/grep\/bash after the write/i);
-  assert.match((progress?.message as { content?: string }).content ?? "", /searched\/not-found/i);
-
+  assert.deepEqual(
+    directSteerTypesSince(fake, beforeWriteMessages),
+    ["pi-chalin-direct-ready-to-verify-nudge"],
+    "a docs-only write gets one direct steer: read back the artifact",
+  );
   const ready = fake.messages.find((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-ready-to-verify-nudge");
   assert.match((ready?.message as { content?: string }).content ?? "", /Read updated docs/i);
 
   toolExecutionEnd({ toolName: "bash", isError: false, args: { command: "cargo test" } }, ctx);
   assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-completion-nudge").length, 0, "post-write shell is not valid docs-only verification");
-  assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-docs-only-shell-nudge").length, 2, "post-write shell gets a second docs-only correction");
+  assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-docs-only-shell-nudge").length, 1, "post-write shell gets a docs-only correction");
 
   toolExecutionEnd({ toolName: "read", isError: false, args: { path: "docs/plan.md" } }, ctx);
   const completion = fake.messages.find((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-completion-nudge");
@@ -2485,7 +2678,7 @@ test("direct docs-only edits verify with read instead of shell nudges", async ()
   assert.doesNotMatch((completion?.message as { content?: string }).content ?? "", /escape hatches.*warning suppression/i);
 });
 
-test("direct runbook docs reject pre-write shell by default", async () => {
+test("direct docs shell guard is based on post-write docs mutation evidence", async () => {
   const fake = createFakePi();
   registerPiChalin(fake.api as never);
   const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
@@ -2499,16 +2692,16 @@ test("direct runbook docs reject pre-write shell by default", async () => {
 
   await beforeAgentStart({ type: "before_agent_start", prompt: "Actualiza docs/runbook.md explicando cómo ejecutar tests, diagnosticar fallo de sync y rollback seguro usando evidencia del repo. No cambies código.", systemPrompt: "base", systemPromptOptions: {} }, ctx);
   toolExecutionEnd({ toolName: "bash", isError: false, args: { command: "bun test" } }, ctx);
-  assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-docs-only-shell-nudge").length, 1);
+  assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-docs-only-shell-nudge").length, 0);
   toolExecutionEnd({ toolName: "bash", isError: false, args: { command: "bun -e \"import './src/sync.ts'; console.log('ok')\"" } }, ctx);
-  assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-docs-only-shell-nudge").length, 1);
+  assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-docs-only-shell-nudge").length, 0);
 
   toolExecutionEnd({ toolName: "bash", isError: false, args: { command: "bun test" } }, ctx);
-  assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-docs-only-shell-nudge").length, 1);
+  assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-docs-only-shell-nudge").length, 0);
 
   toolExecutionEnd({ toolName: "write", isError: false, args: { path: "docs/runbook.md" } }, ctx);
   toolExecutionEnd({ toolName: "bash", isError: false, args: { command: "bun test" } }, ctx);
-  assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-docs-only-shell-nudge").length, 2);
+  assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-docs-only-shell-nudge").length, 1);
 });
 
 test("direct runbook docs use read evidence by default before writing", async () => {
@@ -2557,7 +2750,7 @@ test("direct README docs-only prompts use readback verification", async () => {
 
   await beforeAgentStart({ type: "before_agent_start", prompt: "Actualiza README.md con uso real, solo docs y sin tocar codigo", systemPrompt: "base", systemPromptOptions: {} }, ctx);
   toolExecutionEnd({ toolName: "bash", isError: false, args: { command: "bun test" } }, ctx);
-  assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-docs-only-shell-nudge").length, 1);
+  assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-docs-only-shell-nudge").length, 0);
   toolExecutionEnd({ toolName: "write", isError: false, args: { path: "README.md" } }, ctx);
   toolExecutionEnd({ toolName: "read", isError: false, args: { path: "README.md" } }, ctx);
 
@@ -2584,7 +2777,7 @@ test("direct docs prompts with explicit shell validation are not treated as docs
   assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-docs-only-shell-nudge").length, 0);
 });
 
-test("direct scaffold evidence loop nudges compact product creation", async () => {
+test("direct scaffold-like discovery uses the generic locator evidence loop", async () => {
   const fake = createFakePi();
   registerPiChalin(fake.api as never);
   const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
@@ -2599,14 +2792,14 @@ test("direct scaffold evidence loop nudges compact product creation", async () =
   await beforeAgentStart({ type: "before_agent_start", prompt: "Create a new CLI package with package.json, README usage, src/cli.ts, and tests.", systemPrompt: "base", systemPromptOptions: {} }, ctx);
   toolExecutionEnd({ toolName: "ls", isError: false, args: { path: "." } }, ctx);
   toolExecutionEnd({ toolName: "read", isError: false, args: { path: "package.json" } }, ctx);
+  toolExecutionEnd({ toolName: "read", isError: false, args: { path: "src/cli.ts" } }, ctx);
   toolExecutionEnd({ toolName: "find", isError: false, args: { path: ".", pattern: "*.ts" } }, ctx);
 
-  const nudges = fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-scaffold-evidence-loop-nudge");
+  const nudges = fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-locator-loop-nudge");
   assert.equal(nudges.length, 1);
-  assert.match((nudges[0]?.message as { content?: string }).content ?? "", /enough scaffold\/greenfield evidence/i);
-  assert.match((nudges[0]?.message as { content?: string }).content ?? "", /package\/bin\/export metadata/i);
-  assert.match((nudges[0]?.message as { content?: string }).content ?? "", /runner-discoverable tests/i);
-  assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-locator-loop-nudge").length, 0);
+  assert.match((nudges[0]?.message as { content?: string }).content ?? "", /target read\/search evidence/i);
+  assert.match((nudges[0]?.message as { content?: string }).content ?? "", /Stop trying locator variants/i);
+  assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-scaffold-evidence-loop-nudge").length, 0);
 });
 
 test("direct edit and verification loops get reuse nudges without blocking tools", async () => {
@@ -2829,10 +3022,20 @@ test("chalin_interview asks TUI questions and persists artifact answers", async 
   );
 
   const text = result.content.map((part) => part.text).join("\n");
-  assert.match(text, /pi-chalin interview · answered/);
+  assert.match(text, /chalin_interview answered/);
   assert.deepEqual(result.details.interview?.answers.map((answer) => answer.answer), ["MVP slice", "Do not touch billing yet."]);
   assert.equal(result.details.interview?.answers[0]?.recommended, true);
   assert.equal(result.details.interview?.answers[1]?.custom, true);
+
+  const renderedResult = (tool as unknown as { renderResult: (...args: never[]) => { render(width: number): string[] } }).renderResult(
+    result as never,
+    {} as never,
+    { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text, bold: (text: string) => text } as never,
+    {} as never,
+  ).render(96).join("\n");
+  assert.match(renderedResult, /answered · 2 answers/);
+  assert.match(renderedResult, /scope: MVP slice/);
+  assert.doesNotMatch(renderedResult, /reason:/);
   assert.equal(titles.length, 2);
   assert.ok(optionsSeen[0]?.includes("MVP slice (RECOMMENDED)"));
   assert.ok(optionsSeen[0]?.includes("Custom answer…"));
@@ -2840,6 +3043,89 @@ test("chalin_interview asks TUI questions and persists artifact answers", async 
   const state = JSON.parse(fs.readFileSync(path.join(cwd, ".pi-chalin", "artifacts", "features", "ambiguous-feature", "state.json"), "utf-8"));
   assert.equal(state.interviewDecisions.length, 1);
   assert.match(JSON.stringify(state), /Do not touch billing yet/);
+});
+
+test("chalin_interview presents batched editable questions in a custom overlay", async () => {
+  const fake = createFakePi();
+  registerPiChalin(fake.api as never);
+  const tool = fake.tools.get("chalin_interview") as unknown as { execute: (...args: never[]) => Promise<{ content: Array<{ type: string; text: string }>; details: { interview?: { answers: Array<{ answer: string; custom: boolean; recommended: boolean }> } } }> };
+  const cwd = tempDir("pi-chalin-interview-overlay-");
+  const renders: string[] = [];
+  let customOptions: unknown;
+  let selectCalled = false;
+  let renderRequests = 0;
+  const plainTheme = {
+    fg: (_color: string, text: string) => text,
+    bg: (_color: string, text: string) => text,
+    bold: (text: string) => text,
+  };
+
+  const result = await tool.execute(
+    "tool-interview" as never,
+    {
+      featureId: "editable-feature",
+      task: "Implement the ambiguous feature.",
+      reason: "Scope and exclusions are unknown.",
+      questions: [
+        { id: "scope", question: "What scope should pi-chalin implement first?", choices: [{ label: "MVP slice", recommended: true }, { label: "Full migration" }] },
+        { id: "exclude", question: "Any area to exclude?", choices: [{ label: "No exclusions", recommended: true }, { label: "Auth only" }] },
+      ],
+    } as never,
+    undefined as never,
+    undefined as never,
+    {
+      cwd,
+      hasUI: true,
+      ui: {
+        select: async () => {
+          selectCalled = true;
+          return undefined;
+        },
+        input: async () => undefined,
+        notify: () => {},
+        custom: async (factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (result: unknown) => void) => { render(width: number): string[]; handleInput?(data: string): void }, options: unknown) => {
+          customOptions = options;
+          let overlayResult: unknown;
+          const component = factory({ requestRender: () => { renderRequests += 1; } }, plainTheme, {}, (value) => { overlayResult = value; });
+          renders.push(component.render(96).join("\n"));
+          component.handleInput?.("\x1b[B");
+          component.handleInput?.("\r");
+          component.handleInput?.("\x1b[B");
+          component.handleInput?.("\x1b[B");
+          component.handleInput?.("\r");
+          for (const char of "Do not touch billing yet.") component.handleInput?.(char);
+          component.handleInput?.("\r");
+          component.handleInput?.("\t");
+          component.handleInput?.("\x1b[A");
+          component.handleInput?.("\r");
+          component.handleInput?.("\r");
+          return overlayResult;
+        },
+      },
+    } as never,
+  );
+
+  assert.equal(selectCalled, false);
+  assert.match(JSON.stringify(customOptions), /"overlay":true/);
+  assert.match(JSON.stringify(customOptions), /"anchor":"bottom-center"/);
+  assert.match(JSON.stringify(customOptions), /"width":"100%"/);
+  assert.match(renders[0] ?? "", /╭/);
+  assert.match(renders[0] ?? "", /Interview/);
+  assert.match(renders[0] ?? "", /←/);
+  assert.match(renders[0] ?? "", /□ scope/);
+  assert.match(renders[0] ?? "", /□ exclude/);
+  assert.match(renders[0] ?? "", /✓ Submit/);
+  assert.match(renders[0] ?? "", /What scope should pi-chalin implement first\?/);
+  assert.doesNotMatch(renders[0] ?? "", /Any area to exclude\?/);
+  assert.match(renders[0] ?? "", /❯ 1\. MVP slice/);
+  assert.match(renders[0] ?? "", /recommended/);
+  assert.match(renders[0] ?? "", /Tab switch/);
+  assert.doesNotMatch(renders[0] ?? "", /chalin_interview/);
+  for (const line of (renders[0] ?? "").split("\n")) assert.ok(visibleWidth(line) <= 96, `line exceeds overlay width: ${visibleWidth(line)} > 96`);
+  assert.ok(renderRequests > 0);
+  assert.deepEqual(result.details.interview?.answers.map((answer) => answer.answer), ["MVP slice", "Do not touch billing yet."]);
+  assert.equal(result.details.interview?.answers[0]?.recommended, true);
+  assert.equal(result.details.interview?.answers[1]?.custom, true);
 });
 
 test("chalin_route executes the workflow chosen by the primary Pi agent", async () => {
@@ -2882,6 +3168,130 @@ test("chalin_route executes the workflow chosen by the primary Pi agent", async 
   assert.ok(widgets.every((args) => args[1] === undefined), "chalin_route may clear the legacy widget but must not create a duplicate persistent widget");
 });
 
+test("observability lifecycle spans cover run stage review repair checkpoint interview webfetch with redacted attributes", () => {
+  const startedAt = Date.now();
+  const run: RunState = {
+    id: "chalin-observe",
+    route: {
+      kind: "multi-agent-dag",
+      agents: ["worker", "reviewer"],
+      risk: "medium",
+      ambiguity: "high",
+      needsMemory: false,
+      needsArtifacts: true,
+      reason: "Implement with review and repair.",
+      plan: {
+        kind: "dag",
+        stages: [
+          { id: "implementation", tasks: [{ agent: "worker", task: "Implement." }] },
+          { id: "review", tasks: [{ agent: "reviewer", task: "Review." }] },
+        ],
+      },
+    },
+    rootTask: "Use token sk-live-secret against https://example.com/private?api_key=abc",
+    status: "paused",
+    startedAt: new Date(startedAt).toISOString(),
+    endedAt: new Date(startedAt + 25).toISOString(),
+    logsPath: "/tmp/chalin-observe.json",
+    warnings: ["checkpointed partial handoff", "review repair queued"],
+    steps: [
+      {
+        id: "implementation:step-1",
+        agent: "worker",
+        task: "Implement.",
+        status: "checkpointed",
+        checkpoint: { kind: "budget-cap", reason: "Budget cap reached during SDK child execution.", continuation: "continue" },
+        metrics: {
+          durationMs: 10,
+          usage: emptyTestUsage(),
+          toolCalls: 2,
+          toolCallsByName: { chalin_web_search: 1, chalin_artifact_write: 1 },
+          budgetStopCount: 1,
+          spans: [
+            { id: "webfetch-1", parentId: "implementation:step-1", name: "https://example.com/private?api_key=abc", kind: "webfetch", startedAt, endedAt: startedAt + 1, attributes: { url: "https://example.com/private?api_key=abc" } },
+            { id: "checkpoint-1", parentId: "implementation:step-1", name: "checkpoint", kind: "checkpoint", startedAt: startedAt + 2, endedAt: startedAt + 3 },
+          ],
+        },
+      },
+      {
+        id: "review-repair-1-worker",
+        agent: "worker",
+        task: "Repair.",
+        status: "complete",
+        metrics: {
+          durationMs: 7,
+          usage: emptyTestUsage(),
+          toolCalls: 1,
+          toolCallsByName: { chalin_interview: 1 },
+          spans: [
+            { id: "interview-1", parentId: "review-repair-1-worker", name: "clarify token sk-live-secret", kind: "interview", startedAt: startedAt + 4, endedAt: startedAt + 5, attributes: { prompt: "token sk-live-secret" } },
+          ],
+        },
+      },
+      {
+        id: "review-repair-1-reviewer",
+        agent: "reviewer",
+        task: "Review repair.",
+        status: "complete",
+        metrics: {
+          durationMs: 8,
+          usage: emptyTestUsage(),
+          toolCalls: 0,
+          toolCallsByName: {},
+        },
+      },
+    ],
+  };
+
+  const spans = buildRunLifecycleSpans(run);
+  const kinds = new Set(spans.map((span) => span.kind));
+  assert.ok(kinds.has("run"));
+  assert.ok(kinds.has("stage"));
+  assert.ok(kinds.has("handoff"));
+  assert.ok(kinds.has("review"));
+  assert.ok(kinds.has("repair"));
+  assert.ok(kinds.has("checkpoint"));
+  assert.ok(kinds.has("interview"));
+  assert.ok(kinds.has("webfetch"));
+  assert.equal(redactTraceAttribute("token", "sk-live-secret"), "[REDACTED]");
+  assert.doesNotMatch(JSON.stringify(spans), /sk-live-secret|api_key=abc/);
+});
+
+test("observability does not create lifecycle spans for DAG stages that never started", () => {
+  const startedAt = Date.now();
+  const route: RunState["route"] = {
+    kind: "multi-agent-dag",
+    agents: ["scout", "planner"],
+    risk: "low",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    reason: "Analyze and synthesize.",
+    plan: {
+      kind: "dag",
+      stages: [
+        { id: "evidence", tasks: [{ agent: "scout", task: "Map evidence." }] },
+        { id: "synthesis", tasks: [{ agent: "planner", task: "Synthesize." }] },
+      ],
+    },
+  };
+  const run = createRunState(route, tempDir("pi-chalin-observe-pending-stage-"));
+  run.status = "paused";
+  run.startedAt = new Date(startedAt).toISOString();
+  run.endedAt = new Date(startedAt + 120000).toISOString();
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.startedAt = new Date(startedAt).toISOString();
+  run.steps[0]!.endedAt = new Date(startedAt + 1000).toISOString();
+  run.steps[0]!.output = { agent: "scout", text: "mapped", handoff: "mapped", raw: "", memoryCandidates: [], warnings: [] };
+  run.steps[1]!.status = "pending";
+
+  const stageIds = buildRunLifecycleSpans(run)
+    .filter((span) => span.kind === "stage")
+    .map((span) => span.attributes?.stageId);
+
+  assert.deepEqual(stageIds, ["evidence"]);
+});
+
 test("finalAnswerMaterial preserves multi-agent analysis evidence instead of only last handoff", () => {
   const cwd = tempDir("pi-chalin-final-material-evidence-");
   const run = createRunState({
@@ -2915,6 +3325,155 @@ test("finalAnswerMaterial preserves multi-agent analysis evidence instead of onl
   assert.match(material ?? "", /Evidence Table/);
   assert.match(material ?? "", /Final synthesis/);
   assert.doesNotMatch(material ?? "", /truncated reviewer/);
+});
+
+test("finalAnswerMaterial prefers final synthesis and keeps prior evidence compact", () => {
+  const run = createRunState({
+    kind: "multi-agent-dag",
+    agents: ["scout", "researcher", "planner"],
+    risk: "low",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: false,
+    reason: "Deep analysis.",
+    plan: {
+      kind: "dag",
+      stages: [
+        { id: "evidence", tasks: [{ agent: "scout", task: "Map repo." }, { agent: "researcher", task: "Check docs." }] },
+        { id: "synthesis", tasks: [{ agent: "planner", task: "Synthesize." }] },
+      ],
+    },
+  }, tempDir("pi-chalin-final-material-synthesis-"));
+  run.status = "complete";
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.output = {
+    agent: "scout",
+    text: `Coverage Matrix: runtime covered in src/index.ts.\n${"raw scout crawl ".repeat(500)}\nEvidence Table: src/runner.ts owns execution.`,
+    handoff: "scout handoff",
+    raw: "",
+    memoryCandidates: [],
+    warnings: [],
+  };
+  run.steps[1]!.status = "complete";
+  run.steps[1]!.output = {
+    agent: "researcher",
+    text: "Effect evidence: Layer and Schedule are applicable.",
+    handoff: "research handoff",
+    raw: "",
+    memoryCandidates: [],
+    warnings: [],
+  };
+  run.steps[2]!.status = "complete";
+  run.steps[2]!.output = {
+    agent: "planner",
+    text: "Final synthesis: prioritize runner and memory boundaries.",
+    handoff: "planner handoff",
+    raw: "",
+    memoryCandidates: [],
+    warnings: [],
+  };
+
+  const material = finalAnswerMaterial(run) ?? "";
+
+  assert.ok(material.startsWith("Final synthesis"));
+  assert.match(material, /Supporting evidence/);
+  assert.match(material, /Coverage Matrix/);
+  assert.match(material, /Effect evidence/);
+  assert.doesNotMatch(material, /raw scout crawl raw scout crawl raw scout crawl raw scout crawl raw scout crawl/);
+});
+
+test("paused DAGs do not expose partial evidence as final answer material", () => {
+  const route: RunState["route"] = {
+    kind: "multi-agent-dag",
+    agents: ["scout", "reviewer", "researcher", "planner"],
+    risk: "low",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    reason: "Deep project analysis.",
+    plan: {
+      kind: "dag",
+      stages: [
+        { id: "evidence", tasks: [{ agent: "scout", task: "Map repo." }, { agent: "reviewer", task: "Review maintainability." }, { agent: "researcher", task: "Research external context." }] },
+        { id: "synthesis", tasks: [{ agent: "planner", task: "Synthesize final plan." }] },
+      ],
+    },
+  };
+  const run = createRunState(route, tempDir("pi-chalin-paused-final-material-"));
+  run.status = "paused";
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.output = { agent: "scout", text: "Scout evidence.", handoff: "Scout evidence.", raw: "", memoryCandidates: [], warnings: [] };
+  run.steps[1]!.status = "complete";
+  run.steps[1]!.output = { agent: "reviewer", text: "Reviewer evidence.", handoff: "Reviewer evidence.", raw: "", memoryCandidates: [], warnings: [] };
+  run.steps[2]!.status = "paused";
+  run.steps[2]!.pauseReason = "idle-stall";
+  run.steps[2]!.error = "SDK runner idle stalled for researcher after 120000ms without activity";
+  run.steps[3]!.status = "pending";
+
+  const text = formatRoute(route, { route, approval: { action: "allow", reason: "test" }, run, memories: [], diagnostics: [] });
+
+  assert.equal(finalAnswerMaterial(run), undefined);
+  assert.match(text, /pi-chalin paused: scout → reviewer → researcher → planner/);
+  assert.doesNotMatch(text, /pi-chalin completed/);
+  assert.doesNotMatch(text, /Final answer material:/);
+  assert.doesNotMatch(text, /Supporting findings:/);
+  assert.doesNotMatch(text, /Subagent handoff:/);
+  assert.match(text, /Partial subagent summary:/);
+  assert.equal((text.match(/Scout evidence/g) ?? []).length, 1);
+  assert.match(text, /researcher: SDK runner idle stalled/);
+  assert.match(text, /planner: waiting for resume/);
+  assert.ok(text.length < 1200);
+});
+
+test("finalAnswerMaterial uses structured claim evidence without heading-specific text", () => {
+  const run = createRunState({
+    kind: "multi-agent-dag",
+    agents: ["scout", "planner"],
+    risk: "low",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: false,
+    reason: "Deep analysis.",
+    plan: {
+      kind: "dag",
+      stages: [
+        { id: "evidence", tasks: [{ agent: "scout", task: "Map repo." }] },
+        { id: "synthesis", tasks: [{ agent: "planner", task: "Synthesize." }] },
+      ],
+    },
+  }, tempDir("pi-chalin-final-material-claims-"));
+  run.status = "complete";
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.output = {
+    agent: "scout",
+    text: "Notas compactas sin encabezados convencionales.",
+    handoff: "Notas compactas sin encabezados convencionales.",
+    raw: "",
+    memoryCandidates: [],
+    warnings: [],
+    claims: [{
+      kind: "negative-claim",
+      subject: "browser automation capability",
+      summary: "No direct browser automation entrypoint was found in the repo surface.",
+      evidence: ["src/tools.ts", "src/child-tools.ts"],
+      confidence: 0.72,
+    }],
+  } as never;
+  run.steps[1]!.status = "complete";
+  run.steps[1]!.output = {
+    agent: "planner",
+    text: "Final synthesis: keep direct capability checks in the orchestrator.",
+    handoff: "Final synthesis: keep direct capability checks in the orchestrator.",
+    raw: "",
+    memoryCandidates: [],
+    warnings: [],
+  };
+
+  const material = finalAnswerMaterial(run) ?? "";
+
+  assert.match(material, /browser automation capability/);
+  assert.match(material, /src\/tools\.ts/);
+  assert.doesNotMatch(material, /Notas compactas sin encabezados convencionales/);
 });
 
 test("finalAnswerMaterial preserves single scout analysis instead of compact handoff", () => {
@@ -3347,7 +3906,7 @@ test("Live status opens a tabbed overlay with current subagent history", async (
   }
 });
 
-test("chalin result widget counts budget-capped checkpoints as progressed work", () => {
+test("chalin result widget counts checkpointed steps as progressed work", () => {
   const run: RunState = {
     id: "chalin-budget-panel",
     route: { kind: "multi-agent-dag", agents: ["scout", "context-builder"], risk: "low", ambiguity: "low", needsMemory: false, needsArtifacts: true, reason: "test" },
@@ -3355,7 +3914,7 @@ test("chalin result widget counts budget-capped checkpoints as progressed work",
     startedAt: new Date().toISOString(),
     warnings: [],
     steps: [
-      { id: "discover:step-1", agent: "scout", task: "Map project", status: "budget-capped", output: { agent: "scout", text: "partial", handoff: "Project mapped enough to continue.", memoryCandidates: [], raw: "partial", warnings: [] } },
+      { id: "discover:step-1", agent: "scout", task: "Map project", status: "checkpointed", checkpoint: { kind: "budget-cap", reason: "Budget cap reached during SDK child execution.", continuation: "continue" }, output: { agent: "scout", text: "partial", handoff: "Project mapped enough to continue.", memoryCandidates: [], raw: "partial", warnings: [] } },
       { id: "fanout:step-1", agent: "context-builder", task: "Analyze backend", status: "running" },
     ],
   };
@@ -3363,8 +3922,9 @@ test("chalin result widget counts budget-capped checkpoints as progressed work",
   const preview = formatChalinRunWidget(run);
 
   assert.match(preview, /1\/2/);
-  assert.match(preview, /✓ scout/);
-  assert.match(preview, /Project mapped enough to continue/);
+  assert.match(preview, /✓ scout — Map project/);
+  assert.doesNotMatch(preview, /Project mapped enough to continue/);
+  assert.match(preview, /budget limit reached/);
 });
 
 test("/chalin Smart Panel does not auto-open memory when pending memories exist", async () => {
@@ -4140,7 +4700,7 @@ test("summarizeRuntimeGuards surfaces policy, budget, worktree, and model fallba
 
   assert.match(lines.join("\n"), /guards: attention/);
   assert.match(lines.join("\n"), /policy violations: 1/);
-  assert.match(lines.join("\n"), /budget: stopped max_tool_calls 3\/2 via read \(1 stops\)/);
+  assert.match(lines.join("\n"), /budget: limit reached max_tool_calls 3\/2 via read \(1 legacy stops\)/);
   assert.match(lines.join("\n"), /worktrees: isolated writers/);
   assert.match(lines.join("\n"), /model fallback: 1/);
 });
@@ -4151,15 +4711,17 @@ test("chalin_route renders a compact agent tree widget instead of a plain tool l
     task: "revisa este proyecto en profundidad",
     topology: "chain",
     steps: [
-      { agent: "scout", task: "Map project structure and high-signal files." },
-      { agent: "context-builder", task: "Synthesize findings for the user." },
+      { agent: "scout", task: "Map project structure and high-signal files. Include package entrypoints and test commands." },
+      { agent: "context-builder", task: "**Synthesize findings for the user:** include risks, modules, and validation." },
     ],
   });
 
   assert.match(planned, /pi-chalin · chain/);
-  assert.match(planned, /├ ○ scout/);
-  assert.match(planned, /└ ○ context-builder/);
+  assert.match(planned, /├ ○ scout — Map project structure/);
+  assert.match(planned, /└ ○ context-builder — Synthesize findings for the user/);
   assert.doesNotMatch(planned, /^chalin_route$/m);
+  assert.doesNotMatch(planned, /\*\*/);
+  assert.doesNotMatch(planned, /Include package entrypoints/);
 
   const running = formatChalinRunWidget({
     id: "chalin-test",
@@ -4168,18 +4730,21 @@ test("chalin_route renders a compact agent tree widget instead of a plain tool l
     startedAt: new Date().toISOString(),
     warnings: [],
     steps: [
-      { id: "step-1", agent: "scout", task: "Map project.", status: "complete", output: { agent: "scout", text: "mapped", handoff: "src/index.ts is the entrypoint", memoryCandidates: [], raw: "mapped", warnings: [] } },
-      { id: "step-2", agent: "context-builder", task: "Synthesize.", status: "running" },
+      { id: "step-1", agent: "scout", task: "Map project structure and high-signal files. Include package entrypoints.", status: "complete", output: { agent: "scout", text: "mapped", handoff: "src/index.ts is the entrypoint", memoryCandidates: [], raw: "mapped", warnings: [] } },
+      { id: "step-2", agent: "context-builder", task: "Synthesize findings for the user. Include risks and validation.", status: "running" },
     ],
   });
 
   assert.match(running, /pi-chalin · understand · running · 1\/2/);
-  assert.match(running, /├ ✓ scout/);
-  assert.match(running, /└ ◆ context-builder/);
+  assert.match(running, /current: context-builder — Synthesize findings for the user/);
+  assert.match(running, /├ ✓ scout — Map project structure/);
+  assert.match(running, /└ ◆ context-builder — Synthesize findings for the user/);
+  assert.doesNotMatch(running, /src\/index\.ts is the entrypoint/);
+  assert.doesNotMatch(running, /Include risks/);
   assert.match(running, /tools: 0 · guards: checking/);
 });
 
-test("chalin_route marks budget-capped handoff steps as checkpointed, not pending", () => {
+test("chalin_route marks budget checkpoint handoff steps as checkpointed, not pending", () => {
   const running = formatChalinRunWidget({
     id: "chalin-budget-live",
     route: { kind: "multi-agent-dag", agents: ["scout", "context-builder"], risk: "low", ambiguity: "low", needsMemory: false, needsArtifacts: true, reason: "test" },
@@ -4194,15 +4759,15 @@ test("chalin_route marks budget-capped handoff steps as checkpointed, not pendin
       budgetStopCount: 1,
     },
     steps: [
-      { id: "discover:step-1", agent: "scout", task: "Map project.", status: "budget-capped", output: { agent: "scout", text: "Partial map", handoff: "README and docs mapped; continue with backend.", memoryCandidates: [], raw: "Partial map", warnings: [] } },
+      { id: "discover:step-1", agent: "scout", task: "Map project.", status: "checkpointed", checkpoint: { kind: "budget-cap", reason: "Budget cap reached during SDK child execution.", continuation: "continue" }, output: { agent: "scout", text: "Partial map", handoff: "README and docs mapped; continue with backend.", memoryCandidates: [], raw: "Partial map", warnings: [] } },
       { id: "fanout:step-1", agent: "context-builder", task: "Analyze backend.", status: "running" },
     ],
   });
 
   assert.match(running, /running · 1\/2/);
-  assert.match(running, /├ ✓ scout — README and docs mapped/);
+  assert.match(running, /├ ✓ scout — Map project/);
   assert.match(running, /budget limit reached/);
-  assert.match(running, /└ ◆ context-builder/);
+  assert.match(running, /└ ◆ context-builder — Analyze backend/);
   assert.doesNotMatch(running, /├ ○ scout/);
 });
 
@@ -4234,6 +4799,35 @@ test("chalin_route failed DAG highlights the failed step and marks downstream pe
   assert.doesNotMatch(failed, /context-builder — working/);
 });
 
+test("chalin_route paused DAG shows pending downstream work as waiting for resume", () => {
+  const paused = formatChalinRunWidget({
+    id: "chalin-paused-dag",
+    route: { kind: "multi-agent-dag", agents: ["scout", "reviewer", "researcher", "planner"], risk: "low", ambiguity: "low", needsMemory: false, needsArtifacts: true, reason: "test" },
+    status: "paused",
+    startedAt: new Date().toISOString(),
+    warnings: ["SDK runner paused researcher: SDK runner idle stalled for researcher after 120000ms without activity."],
+    metrics: {
+      durationMs: 120000,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      toolCalls: 0,
+      toolCallsByName: {},
+    },
+    steps: [
+      { id: "evidence:scout", agent: "scout", task: "Map project.", status: "complete", output: { agent: "scout", text: "mapped", handoff: "mapped", memoryCandidates: [], raw: "mapped", warnings: [] } },
+      { id: "evidence:reviewer", agent: "reviewer", task: "Review project.", status: "complete", output: { agent: "reviewer", text: "reviewed", handoff: "reviewed", memoryCandidates: [], raw: "reviewed", warnings: [] } },
+      { id: "evidence:researcher", agent: "researcher", task: "Research context.", status: "paused", error: "SDK runner idle stalled for researcher after 120000ms without activity" },
+      { id: "synthesis:planner", agent: "planner", task: "Synthesize final answer.", status: "pending" },
+    ],
+  });
+
+  assert.match(paused, /pi-chalin · review · paused · 2\/4/);
+  assert.match(paused, /paused: researcher — SDK runner idle stalled/);
+  assert.match(paused, /■ researcher — SDK runner idle stalled/);
+  assert.match(paused, /○ planner — waiting for resume/);
+  assert.doesNotMatch(paused, /planner — working/);
+  assert.doesNotMatch(paused, /current: planner/);
+});
+
 
 test("summarizeRuntimeGuards labels budget-only caps without scary attention", () => {
   const lines = summarizeRuntimeGuards({
@@ -4256,4 +4850,49 @@ test("summarizeRuntimeGuards labels budget-only caps without scary attention", (
   assert.match(lines.join("\n"), /guards: ok/);
   assert.match(lines.join("\n"), /budget: warning max_tool_calls 43\/40 via read/);
   assert.doesNotMatch(lines.join("\n"), /guards: attention/);
+});
+
+test("runtime and route widgets surface inefficient late-signal evidence loops", () => {
+  const run: RunState = {
+    id: "chalin-inefficient",
+    route: { kind: "multi-agent-dag", agents: ["scout"], risk: "low", ambiguity: "low", needsMemory: false, needsArtifacts: true, reason: "test" },
+    status: "complete",
+    startedAt: new Date().toISOString(),
+    warnings: [],
+    steps: [{
+      id: "step-1",
+      agent: "scout",
+      task: "Map project.",
+      status: "complete",
+      output: { agent: "scout", text: "mapped", handoff: "mapped", memoryCandidates: [], raw: "mapped", warnings: [] },
+      metrics: {
+        durationMs: 100,
+        usage: emptyTestUsage(),
+        toolCalls: 12,
+        toolCallsByName: { read: 10, grep: 2 },
+        crossStepDuplicateReadCount: 2,
+        utility: {
+          findingsPerTool: 0.167,
+          filesReadPerFinding: 2,
+          duplicateReads: 0,
+          toolCallsBeforeFirstSignal: 10,
+          verificationDone: false,
+          memoryCandidatesQuality: 0,
+        },
+      },
+    }],
+    metrics: {
+      durationMs: 100,
+      usage: emptyTestUsage(),
+      toolCalls: 12,
+      toolCallsByName: { read: 10, grep: 2 },
+      crossStepDuplicateReadCount: 2,
+      crossStepDuplicateReads: ["src/index.ts", "src/tools.ts"],
+    },
+  };
+
+  assert.match(summarizeRuntimeGuards(run).join("\n"), /late signal: 10 calls/);
+  assert.match(summarizeRuntimeGuards(run).join("\n"), /cross-step duplicates: 2/);
+  assert.match(formatChalinRunWidget(run), /guards: inefficient/);
+  assert.match(formatChalinRunWidget(run), /cross-step duplicate reads: 2/);
 });

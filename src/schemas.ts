@@ -173,7 +173,22 @@ export interface ApprovalDecision {
   reason: string;
 }
 
-export type RunStatus = "pending" | "running" | "complete" | "failed" | "paused" | "budget-capped" | "stale-repaired";
+export type RunStatus = "pending" | "running" | "complete" | "failed" | "paused" | "stale-repaired";
+export type RunStepStatus = "pending" | "running" | "complete" | "failed" | "paused" | "checkpointed";
+export type LegacyRunStatus = RunStatus | "budget-capped";
+export type LegacyRunStepStatus = RunStepStatus | "budget-capped";
+export type RunStepPauseReason = "aborted" | "idle-stall";
+export type CheckpointKind = "budget-cap" | "needs-continuation" | "low-signal" | "awaiting-review" | "split-recommended";
+export type CheckpointContinuation = "continue" | "review" | "split" | "resume";
+
+export interface CheckpointInfo {
+  kind: CheckpointKind;
+  reason: string;
+  continuation: CheckpointContinuation;
+  progressScore?: number;
+  capHits?: BudgetCapHit[];
+  legacyStatus?: "budget-capped";
+}
 
 export interface MemoryCandidate {
   id: string;
@@ -229,11 +244,28 @@ export interface MemoryAuditEvent {
   metadata?: Record<string, unknown>;
 }
 
+export const EVIDENCE_CLAIM_KINDS = ["stable-fact", "transient-status", "negative-claim", "unknown", "contradiction"] as const;
+export type EvidenceClaimKind = (typeof EVIDENCE_CLAIM_KINDS)[number];
+
+export const EVIDENCE_KINDS = ["read", "search", "verified-command", "partial", "handoff", "inference", "none"] as const;
+export type EvidenceKind = (typeof EVIDENCE_KINDS)[number];
+
+export interface EvidenceClaim {
+  kind: EvidenceClaimKind;
+  subject: string;
+  summary: string;
+  evidence: string[];
+  evidenceKind?: EvidenceKind;
+  confidence: number;
+  sourceAgent?: string;
+}
+
 export interface AgentOutput {
   agent: string;
   text: string;
   handoff?: string;
   memoryCandidates: MemoryCandidate[];
+  claims?: EvidenceClaim[];
   raw: string;
   warnings: string[];
 }
@@ -294,6 +326,7 @@ export interface RunStepMetrics {
   filesRead?: string[];
   readBytes?: number;
   outputChars?: number;
+  outputCharsByToolName?: Record<string, number>;
   outputTruncatedCount?: number;
   filesTouched?: string[];
   shellCommands?: string[];
@@ -321,6 +354,11 @@ export interface RunStepMetrics {
   skillEvents?: SkillTraceEvent[];
 }
 
+export interface RunMetricsCheckpoint {
+  steps: number;
+  kinds: Partial<Record<CheckpointKind, number>>;
+}
+
 export type ModelResolutionSource = "session-override" | "agent" | "tier" | "inherit";
 export type ModelResolutionStatus = "selected" | "invalid" | "unavailable" | "unauthenticated" | "fallback" | "runtime-error";
 
@@ -342,7 +380,8 @@ export interface RunStepState {
   id: string;
   agent: string;
   task: string;
-  status: RunStatus;
+  status: RunStepStatus;
+  checkpoint?: CheckpointInfo;
   budget?: ToolBudgetProfile;
   maxToolCalls?: number;
   startedAt?: string;
@@ -351,6 +390,7 @@ export interface RunStepState {
   thinkingLevel?: AgentThinkingLevel;
   output?: AgentOutput;
   error?: string;
+  pauseReason?: RunStepPauseReason;
   currentTool?: string;
   modelResolution?: ModelResolutionLog;
   metrics?: RunStepMetrics;
@@ -366,6 +406,7 @@ export interface RunState {
   route: RouteDecision;
   rootTask?: string;
   status: RunStatus;
+  schemaVersion?: number;
   startedAt: string;
   endedAt?: string;
   steps: RunStepState[];
@@ -399,6 +440,7 @@ export interface RunState {
     tokenomics?: TokenomicsSummary;
     spans?: StructuredTraceSpan[];
     skillEvents?: SkillTraceEvent[];
+    checkpoints?: RunMetricsCheckpoint;
   };
 }
 

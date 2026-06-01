@@ -123,7 +123,7 @@ export class ChalinKernel {
     return Effect.gen(function* () {
       const approval = approvalOverride ?? approvalDecision(self.config, route);
       const diagnostics = [...self.catalog.diagnostics.warnings, ...self.catalog.diagnostics.errors];
-      const memories = route.needsMemory ? yield* Effect.tryPromise(() => self.retrieveRouteMemories(route, prompt)) : [];
+      const memories = route.needsMemory && !memoryDisabled() ? yield* Effect.tryPromise(() => self.retrieveRouteMemories(route, prompt)) : [];
       if (approval.action !== "allow" || !route.plan) return { route, approval, memories, diagnostics };
 
       const agents = self.resolvePlanAgents(route);
@@ -141,7 +141,7 @@ export class ChalinKernel {
       const runner = context.extensionContext ? self.sdkRunner : self.runner;
       const run = yield* runWorkerRunnerEffect(runner, route, { ...context, cwd: self.cwd, config: self.config, rootTask: prompt, agents, modelOverrides: self.modelOverrides, thinkingOverrides: self.thinkingOverrides });
       const candidates = run.steps.flatMap((step) => step.output?.memoryCandidates ?? []);
-      if (candidates.length > 0) {
+      if (candidates.length > 0 && !memoryDisabled()) {
         if (context.extensionContext) {
           self.persistMemoriesAfterToolResult(candidates, run.id, context.extensionContext.hasUI);
         } else {
@@ -162,7 +162,7 @@ export class ChalinKernel {
     const runner = context.extensionContext ? this.sdkRunner : this.runner;
     const resumed = await Effect.runPromise(resumeWorkerRunnerEffect(runner, run, { ...context, cwd: this.cwd, config: this.config, rootTask: run.rootTask, agents, modelOverrides: this.modelOverrides, thinkingOverrides: this.thinkingOverrides }));
     const candidates = resumed.steps.flatMap((step) => step.output?.memoryCandidates ?? []);
-    if (candidates.length > 0) {
+    if (candidates.length > 0 && !memoryDisabled()) {
       if (context.extensionContext) this.persistMemoriesAfterToolResult(candidates, resumed.id, context.extensionContext.hasUI);
       else await this.memory.submitCandidates(candidates);
     }
@@ -225,6 +225,7 @@ export function routeFromPlan(input: {
 }): RouteDecision {
   const steps = sanitizeSteps(input.steps ?? []);
   if (input.topology === "memory-only") {
+    if (memoryDisabled()) return askUser("pi-chalin memory disabled for harness ablation eval.");
     return {
       kind: "memory-only",
       agents: [],
@@ -245,7 +246,7 @@ export function routeFromPlan(input: {
       agents,
       risk: input.risk ?? riskFromPlan(allSteps),
       ambiguity: "low",
-      needsMemory: Boolean(input.needsMemory),
+      needsMemory: routeNeedsMemory(input.needsMemory),
       needsArtifacts: input.needsArtifacts ?? allSteps.some((step) => ["scout", "planner", "worker", "reviewer", "context-builder"].includes(step.agent)),
       reason: input.reason?.trim() || "Primary Pi agent selected a staged DAG workflow dynamically.",
       plan: { kind: "dag", stages },
@@ -260,11 +261,19 @@ export function routeFromPlan(input: {
     agents,
     risk: input.risk ?? riskFromPlan(steps),
     ambiguity: "low",
-    needsMemory: Boolean(input.needsMemory),
+    needsMemory: routeNeedsMemory(input.needsMemory),
     needsArtifacts: input.needsArtifacts ?? steps.some((step) => ["scout", "planner", "worker", "reviewer", "context-builder"].includes(step.agent)),
     reason: input.reason?.trim() || "Primary Pi agent selected this chalin workflow dynamically.",
     plan,
   };
+}
+
+function routeNeedsMemory(value: boolean | undefined): boolean {
+  return !memoryDisabled() && Boolean(value);
+}
+
+function memoryDisabled(): boolean {
+  return process.env.PI_CHALIN_DISABLE_MEMORY === "1";
 }
 
 function sanitizeSteps(steps: AgentStep[]): AgentStep[] {

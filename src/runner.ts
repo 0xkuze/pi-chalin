@@ -3,15 +3,16 @@ import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { Context, Effect, Layer } from "effect";
 import type { AgentDefinition, AgentThinkingLevel } from "./schemas.ts";
 import { evaluateBudgetUsage, policyForStep, recordBudgetCheckpoint, scoreProgress, summarizeToolUtility } from "./budget.ts";
+import { candidateMatchesTransientClaim, claimsNeedingAudit, claimsRequireAudit, isTransientVerificationStateClaim, parseClaimLedger } from "./evidence-claims.ts";
 import type { ChalinPathsOptions } from "./paths.ts";
 import { createMemoryCandidate } from "./memory.ts";
 import { createConfiguredMemoryStore } from "./memory-provider.ts";
-import type { AgentOutput, AgentStep, BudgetCapHit, MemoryCandidate, RouteDecision, RoutePlan, RunState, RunStepMetrics, RunStepState, TokenUsageSummary, ToolBudgetProfile } from "./schemas.ts";
+import type { AgentOutput, AgentStep, BudgetCapHit, EvidenceClaim, MemoryCandidate, RouteDecision, RoutePlan, RunState, RunStepMetrics, RunStepState, TokenUsageSummary, ToolBudgetProfile } from "./schemas.ts";
 import { createChildToolPolicy, createChildTools, type ChalinDelegateParamsShape, type ChildToolActivity, type ChildToolPolicy } from "./child-tools.ts";
 import { createChalinChildSessionManager } from "./child-sessions.ts";
 import { buildProjectSnapshot, formatProjectSnapshot } from "./snapshot.ts";
 import { ArtifactStore } from "./artifacts.ts";
-import { buildPromptTokenomics, createSkillTraceEvent, createStructuredSpan, mergeTraceSpans, type SkillTraceEvent, type StructuredTraceSpan, type TokenomicsSummary } from "./observability.ts";
+import { buildPromptTokenomics, buildRunLifecycleSpans, buildToolOutputTokenomics, createSkillTraceEvent, createStructuredSpan, mergeTraceSpans, type SkillTraceEvent, type StructuredTraceSpan, type StructuredTraceSpanKind, type TokenomicsSummary } from "./observability.ts";
 import { resolveAgentModel, resolveAgentThinking, resolveInheritedModelFallback, type ResolvedAgentModel } from "./model-resolution.ts";
 import { buildSdkPrompt, childToolNames, handoffReviewToolCallLimit, isHandoffGapReadMode, resolveStepCompletionStatus, synthesisCrossStepDuplicateReadLimit, synthesisGapReadLimit, synthesisToolCallLimit, type SdkPromptOptions } from "./runner-prompt.ts";
 import { createRunState, isUsableStepHandoff, persistRun, prepareRunForResume } from "./runner-state.ts";
@@ -19,6 +20,7 @@ import { clearLiveStepSession, setLiveStepSession, type LiveStepSessionRef } fro
 import { cleanupWorktrees, mergeWorktreeChanges, needsWorktreeIsolation, prepareWorktreeIsolation, type WorktreeIsolationPlan } from "./worktrees.ts";
 import { DEFAULT_CONFIG, type ChalinConfig } from "./config.ts";
 import { SkillCatalog, effectiveSkillToolNames, resolveSkillsForStep } from "./skills.ts";
+import { checkpointSummary, isUsableStepStatus } from "./status.ts";
 
 export interface WorkerRunnerContext extends ChalinPathsOptions {
   agents: Map<string, AgentDefinition>;
@@ -388,7 +390,20 @@ async function runSdkDag(
       break;
     }
     const stageSteps = run.steps.filter((step) => step.id.startsWith(`${stage.id}:`));
-    await runSdkStage(run, stage, stageSteps, context, extensionContext, previous);
+    const stageResult = await runSdkStage(run, stage, stageSteps, context, extensionContext, previous);
+    const recoveredPauses = recoverPausedReadOnlyDagStage(stageSteps, context.agents);
+    if (recoveredPauses > 0) {
+      run.warnings.push(`DAG stage ${stage.id} continued with partial fan-out results after ${recoveredPauses} read-only idle stall(s).`);
+      persistRun(run);
+      context.onUpdate?.(run);
+    }
+    if (stageResult.paused && stageSteps.some((step) => step.status === "paused")) {
+      run.warnings.push(stageResult.isolated
+        ? `DAG stage ${stage.id} paused after a child idle stall; isolated writer changes were not merged.`
+        : `DAG stage ${stage.id} paused after a child idle stall.`);
+      persistRun(run);
+      context.onUpdate?.(run);
+    }
     for (const step of stageSteps) maybeAppendImplementationReviewRepair(run, step);
     previous = aggregateStageHandoff(stageSteps);
     if (shouldStopAfterDagStage(stageSteps, context.agents)) break;
@@ -618,9 +633,24 @@ export function shouldStopAfterDagStage(stageSteps: Pick<RunStepState, "status" 
   if (stageSteps.some((step) => step.status === "paused")) return true;
   const failedSteps = stageSteps.filter((step) => step.status === "failed");
   if (failedSteps.length === 0) return false;
-  const usableSteps = stageSteps.filter((step) => step.status === "complete" || step.status === "budget-capped");
+  const usableSteps = stageSteps.filter((step) => isUsableStepStatus(step.status));
   if (usableSteps.length === 0) return true;
   return failedSteps.some((step) => isWriterAgent(agents.get(step.agent)));
+}
+
+export function recoverPausedReadOnlyDagStage(stageSteps: RunStepState[], agents: Map<string, AgentDefinition>): number {
+  if (!stageSteps.some((step) => isUsableStepStatus(step.status))) return 0;
+  let recovered = 0;
+  for (const step of stageSteps) {
+    if (step.status !== "paused") continue;
+    if (step.pauseReason !== "idle-stall") continue;
+    if (isWriterAgent(agents.get(step.agent))) continue;
+    step.status = "failed";
+    step.pauseReason = undefined;
+    step.error ??= "SDK runner idle stalled before producing a handoff.";
+    recovered += 1;
+  }
+  return recovered;
 }
 
 function isWriterAgent(agent?: AgentDefinition): boolean {
@@ -638,10 +668,10 @@ async function runSdkStage(
   context: WorkerRunnerContext,
   extensionContext: ExtensionContext,
   previous: string,
-): Promise<void> {
+): Promise<{ paused: boolean; isolated: boolean }> {
   let isolation: WorktreeIsolationPlan | undefined;
   const runnableSteps = stageSteps.filter((step) => !isUsableStepHandoff(step));
-  if (runnableSteps.length === 0) return;
+  if (runnableSteps.length === 0) return { paused: false, isolated: false };
   if (needsWorktreeIsolation(stage.tasks, context.agents)) {
     isolation = prepareWorktreeIsolation({ cwd: context.cwd, runId: `${run.id}-${stage.id}`, steps: stage.tasks, agents: context.agents });
     run.warnings.push(...isolation.warnings);
@@ -655,7 +685,7 @@ async function runSdkStage(
       }
       persistRun(run);
       context.onUpdate?.(run);
-      return;
+      return { paused: false, isolated: Boolean(isolation.enabled) };
     }
     run.warnings.push(`DAG stage ${stage.id} worktree isolation active.`);
   }
@@ -671,15 +701,13 @@ async function runSdkStage(
       { concurrency: "unbounded" },
     ).pipe(Effect.withSpan(`runner.sdk.dag.${stage.id}`)));
     if (stageSteps.some((step) => step.status === "paused")) {
-      run.warnings.push(isolation?.enabled
-        ? `DAG stage ${stage.id} paused after a child idle stall; isolated writer changes were not merged.`
-        : `DAG stage ${stage.id} paused after a child idle stall.`);
       persistRun(run);
       context.onUpdate?.(run);
-      return;
+      return { paused: true, isolated: Boolean(isolation?.enabled) };
     }
 
     if (isolation?.enabled) await mergeIsolatedStage(run, context, extensionContext, isolation);
+    return { paused: false, isolated: Boolean(isolation?.enabled) };
   } finally {
     if (isolation?.enabled) run.warnings.push(...cleanupWorktrees({ cwd: context.cwd, plan: isolation }));
   }
@@ -697,6 +725,8 @@ async function runSdkStep(
     return { aborted: true };
   }
   step.status = "running";
+  step.error = undefined;
+  step.pauseReason = undefined;
   step.startedAt = new Date().toISOString();
   persistRun(run);
   context.onUpdate?.(run);
@@ -731,17 +761,22 @@ async function runSdkStep(
     const maxToolCalls = budgetPolicy.caps.maxToolCalls;
     step.budget = budgetPolicy.profile;
     step.maxToolCalls = maxToolCalls;
+    const previousClaims = previousClaimsBeforeStep(run, step);
     const baseAllowedTools = childToolNames(agent, step.task, run.route.needsArtifacts, Boolean(options.previous), {
       budgetProfile: budgetPolicy.profile,
       routeKind: run.route.kind,
       memoryEnabled: run.route.needsMemory,
       delegationDepth: currentSubagentDepth(run),
       maxDelegationDepth: maxSubagentDepth(),
+      previousClaimsNeedAudit: claimsRequireAudit(previousClaims),
     });
     const allowedTools = effectiveSkillToolNames(baseAllowedTools, skillResolution.active.map((item) => item.skill));
     const prompt = buildSdkPrompt(agent, step.task, options.cwd, options.previous, budgetPolicy, "normal", promptOptions);
+    const promptPhase = promptTokenomicsPhaseForStep(step, agent);
     const tokenomics = buildPromptTokenomics({
-      childPrompt: prompt,
+      childPrompt: promptPhase === "childPrompt" ? prompt : "",
+      reviewer: promptPhase === "reviewer" ? prompt : "",
+      repair: promptPhase === "repair" ? prompt : "",
       memory: promptOptions.memoryContext ?? "",
       handoff: options.previous ?? "",
     });
@@ -809,8 +844,8 @@ async function runSdkStep(
       break;
     }
     step.status = resolveStepCompletionStatus(step);
-    if (step.status === "budget-capped") {
-      run.warnings.push(`${step.agent} reached budget cap; checkpointed partial handoff for continuation.`);
+    if (step.status === "checkpointed") {
+      run.warnings.push(`${step.agent} checkpointed partial handoff for ${step.checkpoint?.continuation ?? "continuation"}.`);
       await recordBudgetCheckpoint(new ArtifactStore({ cwd: context.cwd }), run.id, step, "Budget cap reached during SDK child execution.");
     }
     persistRun(run);
@@ -820,12 +855,14 @@ async function runSdkStep(
     if (isAbortError(error)) {
       step.status = "paused";
       step.error = errorMessage(error);
+      step.pauseReason = "aborted";
       markRunAborted(run, context, step.error);
       return { aborted: true };
     }
     if (isIdleStallError(error)) {
       step.status = "paused";
       step.error = error.message;
+      step.pauseReason = "idle-stall";
       run.warnings.push(`SDK runner paused ${step.agent}: ${step.error}. Resume can start a fresh child session.`);
       persistRun(run);
       context.onUpdate?.(run);
@@ -878,7 +915,7 @@ async function runSdkSessionAttempt(input: {
         id: `${spanIdPrefix}:tool:${toolSpanIndex++}`,
         parentId: `${spanIdPrefix}:step`,
         name: toolActivity.toolName,
-        kind: "tool-call",
+        kind: traceKindForTool(toolActivity.toolName),
         startedAt: toolActivity.at,
         endedAt: toolActivity.at,
         attributes: { toolName: toolActivity.toolName, blocked: true },
@@ -892,7 +929,7 @@ async function runSdkSessionAttempt(input: {
       id: `${spanIdPrefix}:tool:${start?.index ?? toolSpanIndex++}`,
       parentId: `${spanIdPrefix}:step`,
       name: toolActivity.toolName,
-      kind: "tool-call",
+      kind: traceKindForTool(toolActivity.toolName),
       startedAt: start?.at ?? toolActivity.at,
       endedAt: toolActivity.at,
       attributes: { toolName: toolActivity.toolName },
@@ -914,11 +951,15 @@ async function runSdkSessionAttempt(input: {
     },
     onActivity: recordToolActivity,
   });
-  const attemptMetrics = (messages: unknown[] = []) => ({
-    ...mergePolicyMetrics(extractSessionMetrics(messages, stepStartedAtMs), childPolicy),
-    tokenomics: input.tokenomics,
-    spans: mergeTraceSpans(baseStepSpans(spanIdPrefix, input.step, stepStartedAtMs, Date.now(), input.tokenomics, input.promptOptions), toolSpans),
-  });
+  const attemptMetrics = (messages: unknown[] = []) => {
+    const metrics = mergePolicyMetrics(extractSessionMetrics(messages, stepStartedAtMs), childPolicy);
+    const tokenomics = mergeTokenomics(input.tokenomics, tokenomicsForToolOutputs(metrics)) ?? input.tokenomics;
+    return {
+      ...metrics,
+      tokenomics,
+      spans: mergeTraceSpans(baseStepSpans(spanIdPrefix, input.step, stepStartedAtMs, Date.now(), tokenomics, input.promptOptions), toolSpans),
+    };
+  };
   const { createAgentSession } = await import("@earendil-works/pi-coding-agent");
   const sessionManager = createChalinChildSessionManager({ cwd: input.cwd, runId: input.run.id, step: input.step, extensionContext: input.extensionContext });
   const releaseChildEnv = enterChildEnv();
@@ -1104,6 +1145,15 @@ function maxSubagentDepth(): number {
   return Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : 2;
 }
 
+export function promptTokenomicsPhaseForStep(
+  step: Pick<RunStepState, "id" | "agent">,
+  agent?: Pick<AgentDefinition, "concern">,
+): "childPrompt" | "reviewer" | "repair" {
+  if (/^review-repair(?:-|:|$)/.test(step.id)) return "repair";
+  if (agent?.concern === "review" || step.agent === "reviewer") return "reviewer";
+  return "childPrompt";
+}
+
 const childEnv = { active: 0, previousChild: undefined as string | undefined, previousDisabled: undefined as string | undefined };
 
 function enterChildEnv(): () => void {
@@ -1131,9 +1181,11 @@ function enterChildEnv(): () => void {
 
 function buildPromptOptionsForStep(run: RunState, step: RunStepState, agent: AgentDefinition | undefined, policy: ReturnType<typeof policyForStep>, previous?: string): SdkPromptOptions {
   const priorFilesRead = priorFilesReadBeforeStep(run, step);
+  const previousClaims = claimsNeedingAudit(previousClaimsBeforeStep(run, step)).slice(0, 12);
   return {
     rootTask: run.rootTask,
     priorFilesRead,
+    previousClaims,
     ...(isHandoffGapReadMode(agent, previous, policy.profile === "deep") ? { synthesisGapReadLimit: synthesisGapReadLimit() } : {}),
   };
 }
@@ -1162,6 +1214,12 @@ function priorFilesReadBeforeStep(run: RunState, currentStep: RunStepState): str
   const index = run.steps.indexOf(currentStep);
   const previousSteps = index >= 0 ? run.steps.slice(0, index) : run.steps.filter((step) => step !== currentStep);
   return [...new Set(previousSteps.flatMap((step) => step.metrics?.filesRead ?? []))].slice(0, 80);
+}
+
+function previousClaimsBeforeStep(run: RunState, currentStep: RunStepState): EvidenceClaim[] {
+  const index = run.steps.indexOf(currentStep);
+  const previousSteps = index >= 0 ? run.steps.slice(0, index) : run.steps.filter((step) => step !== currentStep);
+  return previousSteps.flatMap((step) => step.output?.claims ?? []);
 }
 
 export function budgetPolicyForSdkStep(policy: ReturnType<typeof policyForStep>, agent: AgentDefinition | undefined, previous?: string): ReturnType<typeof policyForStep> {
@@ -1209,6 +1267,8 @@ function aggregateCompletedHandoffBefore(steps: RunStepState[], endIndex: number
 
 export function parseAgentOutput(agent: string, raw: string): AgentOutput {
   const warnings: string[] = [];
+  const claimLedger = parseClaimLedger(raw, agent);
+  warnings.push(...claimLedger.warnings);
   let handoff: string | undefined;
   const handoffMatch = raw.match(/##\s*Handoff\s*\n([\s\S]*?)(?:\n##\s|$)/i);
   if (handoffMatch?.[1]) handoff = truncateText(handoffMatch[1].trim(), handoffBudgetChars(agent));
@@ -1219,13 +1279,19 @@ export function parseAgentOutput(agent: string, raw: string): AgentOutput {
     for (const line of memoryBlock.split("\n")) {
       const parsed = parseMemoryCandidateLine(line);
       if (!parsed) continue;
+      const structuredTransient = candidateMatchesTransientClaim(parsed.content, claimLedger.claims);
+      if (isTransientVerificationStateClaim(parsed.content) || structuredTransient) {
+        const source = structuredTransient ? "structured transient verification claim" : "transient verification status";
+        warnings.push(`Dropped memory candidate with ${source}; require real non-dry-run command evidence instead.`);
+        continue;
+      }
       candidates.push(createMemoryCandidate({ category: parsed.category, content: parsed.content, sourceAgent: agent, confidence: parsed.confidence, scope: "project" }));
     }
   }
 
   if (raw.includes("## Memory Candidate") && candidates.length === 0) warnings.push("Memory candidate block was present but no valid bullet candidates were parsed.");
   const compactRaw = truncateText(raw.trim(), rawOutputBudgetChars());
-  return { agent, text: compactRaw, handoff, memoryCandidates: candidates.slice(0, memoryCandidateBudget()), raw: compactRaw, warnings };
+  return { agent, text: compactRaw, handoff, memoryCandidates: candidates.slice(0, memoryCandidateBudget()), claims: claimLedger.claims, raw: compactRaw, warnings };
 }
 
 
@@ -1417,8 +1483,8 @@ function completeRun(run: RunState, context: WorkerRunnerContext): RunState {
     ? "failed"
     : run.steps.some((step) => step.status === "paused")
       ? "paused"
-      : run.steps.some((step) => step.status === "budget-capped")
-        ? "budget-capped"
+      : run.steps.some((step) => step.status === "checkpointed")
+        ? "paused"
       : "complete";
   run.endedAt = new Date().toISOString();
   run.metrics = summarizeRunMetrics(run);
@@ -1557,7 +1623,7 @@ function sessionActivitySignature(messages: unknown[], policy: ChildToolPolicy):
   return `${messages.length}:${lastText.length}:${metrics.toolCalls}:${metrics.outputChars}:${metrics.readBytes}`;
 }
 
-export const DEFAULT_SDK_STEP_IDLE_STALL_MS = 90_000;
+export const DEFAULT_SDK_STEP_IDLE_STALL_MS = 120_000;
 
 export function sdkStepIdleStallMs(): number {
   const parsed = Number(process.env.PI_CHALIN_SDK_STEP_IDLE_STALL_MS);
@@ -1676,7 +1742,7 @@ function isAbortError(error: unknown): boolean {
 
 function isBudgetExceededError(error: unknown, step?: RunStepState): boolean {
   const message = errorMessage(error).toLowerCase();
-  return step?.status === "budget-capped" || message.includes("budget cap") || message.includes("budget exceeded");
+  return step?.status === "checkpointed" || message.includes("budget cap") || message.includes("budget exceeded");
 }
 
 function errorMessage(error: unknown): string {
@@ -1804,6 +1870,7 @@ function mergeAttemptMetrics(previous: RunStepMetrics | undefined, next: RunStep
     filesRead: [...new Set([...(previous.filesRead ?? []), ...(next.filesRead ?? [])])].slice(0, 50),
     readBytes: (previous.readBytes ?? 0) + (next.readBytes ?? 0),
     outputChars: (previous.outputChars ?? 0) + (next.outputChars ?? 0),
+    outputCharsByToolName: mergeNumberRecords(previous.outputCharsByToolName, next.outputCharsByToolName),
     outputTruncatedCount: (previous.outputTruncatedCount ?? 0) + (next.outputTruncatedCount ?? 0),
     filesTouched: [...new Set([...(previous.filesTouched ?? []), ...(next.filesTouched ?? [])])].slice(0, 50),
     shellCommands: [...(previous.shellCommands ?? []), ...(next.shellCommands ?? [])].slice(0, 50),
@@ -1825,10 +1892,11 @@ function mergePolicyMetrics(metrics: RunStepMetrics, policy: ChildToolPolicy): R
   const filesRead = [...new Set([...(metrics.filesRead ?? []), ...policyMetrics.filesRead])];
   const duplicateReadCount = Math.max(metrics.duplicateReadCount ?? 0, policyMetrics.duplicateReadCount);
   const budgetCapHits = mergeBudgetCapHits(metrics.budgetCapHits, policyMetrics.budgetCapHits);
-  const budgetStopCount = Math.max(metrics.budgetStopCount ?? 0, policyMetrics.budgetStopCount, countHardBudgetHits(budgetCapHits));
+  const budgetStopCount = Math.max(metrics.budgetStopCount ?? 0, policyMetrics.budgetStopCount);
   const shellCommands = [...(metrics.shellCommands ?? []), ...policyMetrics.shellCommands].slice(0, 50);
   const postMutationShellCommands = Math.max(metrics.postMutationShellCommands ?? 0, policyMetrics.postMutationShellCommands);
   const successfulPostMutationShellCommands = Math.max(metrics.successfulPostMutationShellCommands ?? 0, policyMetrics.successfulPostMutationShellCommands);
+  const outputCharsByToolName = mergeNumberRecordsByMax(metrics.outputCharsByToolName, policyMetrics.outputCharsByToolName);
   return {
     ...metrics,
     toolCalls: Math.max(metrics.toolCalls, policyMetrics.toolCalls),
@@ -1841,6 +1909,7 @@ function mergePolicyMetrics(metrics: RunStepMetrics, policy: ChildToolPolicy): R
     ...(filesRead.length ? { filesRead: filesRead.slice(0, 50) } : {}),
     readBytes: Math.max(metrics.readBytes ?? 0, policyMetrics.readBytes),
     outputChars: Math.max(metrics.outputChars ?? 0, policyMetrics.outputChars),
+    ...(Object.keys(outputCharsByToolName).length ? { outputCharsByToolName } : {}),
     outputTruncatedCount: Math.max(metrics.outputTruncatedCount ?? 0, policyMetrics.outputTruncatedCount),
     filesTouched: [...new Set([...(metrics.filesTouched ?? []), ...policyMetrics.filesTouched])].slice(0, 50),
     ...(shellCommands.length ? { shellCommands } : {}),
@@ -1848,6 +1917,32 @@ function mergePolicyMetrics(metrics: RunStepMetrics, policy: ChildToolPolicy): R
     ...(successfulPostMutationShellCommands > 0 ? { successfulPostMutationShellCommands } : {}),
     retriesByTool: { ...(metrics.retriesByTool ?? {}), ...policyMetrics.retriesByTool },
   };
+}
+
+function tokenomicsForToolOutputs(metrics: RunStepMetrics): TokenomicsSummary | undefined {
+  return buildToolOutputTokenomics(metrics.outputChars ?? 0, metrics.outputCharsByToolName);
+}
+
+function mergeNumberRecords(left: Record<string, number> | undefined, right: Record<string, number> | undefined): Record<string, number> {
+  const merged: Record<string, number> = {};
+  for (const [key, value] of Object.entries(left ?? {})) {
+    if (Number.isFinite(value)) merged[key] = (merged[key] ?? 0) + value;
+  }
+  for (const [key, value] of Object.entries(right ?? {})) {
+    if (Number.isFinite(value)) merged[key] = (merged[key] ?? 0) + value;
+  }
+  return merged;
+}
+
+function mergeNumberRecordsByMax(left: Record<string, number> | undefined, right: Record<string, number> | undefined): Record<string, number> {
+  const merged: Record<string, number> = {};
+  for (const [key, value] of Object.entries(left ?? {})) {
+    if (Number.isFinite(value)) merged[key] = Math.max(merged[key] ?? 0, value);
+  }
+  for (const [key, value] of Object.entries(right ?? {})) {
+    if (Number.isFinite(value)) merged[key] = Math.max(merged[key] ?? 0, value);
+  }
+  return merged;
 }
 
 function finalizeStepMetrics(metrics: RunStepMetrics, step: RunStepState, budgetPolicy: ReturnType<typeof policyForStep>, priorFilesRead: string[] = []): RunStepMetrics {
@@ -1876,7 +1971,25 @@ function finalizeStepMetrics(metrics: RunStepMetrics, step: RunStepState, budget
   const prior = new Set(priorFilesRead);
   const crossStepDuplicateReads = [...new Set((metrics.filesRead ?? []).filter((file) => prior.has(file)))];
   const budgetCapHits = mergeBudgetCapHits(metrics.budgetCapHits, health.caps);
-  const budgetStopCount = Math.max(metrics.budgetStopCount ?? 0, countHardBudgetHits(budgetCapHits));
+  const budgetStopCount = metrics.budgetStopCount ?? 0;
+  if (budgetStopCount > 0 || health.checkpointStatus) {
+    const kind = budgetStopCount > 0
+      ? "budget-cap"
+      : health.checkpointStatus === "checkpointed-low-signal"
+      ? "low-signal"
+      : health.checkpointStatus === "checkpointed-split-recommended"
+        ? "split-recommended"
+        : health.checkpointStatus === "checkpointed-awaiting-review"
+          ? "awaiting-review"
+          : "needs-continuation";
+    step.checkpoint = {
+      kind,
+      continuation: kind === "budget-cap" ? "continue" : kind === "awaiting-review" ? "review" : kind === "split-recommended" ? "split" : "resume",
+      reason: health.warnings[0] ?? "Budget gate checkpointed this step.",
+      progressScore: progress.score,
+      capHits: budgetCapHits,
+    };
+  }
   const skillEvents = mergeSkillTraceEvents([
     ...(step.skillTraceEvents ?? []),
     ...skillEventsForStep(step, utility),
@@ -2008,6 +2121,13 @@ function baseStepSpans(
   return spans;
 }
 
+function traceKindForTool(toolName: string): StructuredTraceSpanKind {
+  if (toolName === "chalin_web_search") return "webfetch";
+  if (toolName === "chalin_interview") return "interview";
+  if (toolName === "chalin_artifact_write") return "checkpoint";
+  return "tool-call";
+}
+
 function extractFindingLines(text: string): string[] {
   const block = text.match(/##\s*Findings\s*\n([\s\S]*?)(?:\n##\s|$)/i)?.[1] ?? text;
   return block.split("\n")
@@ -2035,10 +2155,6 @@ function mergeBudgetCapHits(...groups: Array<BudgetCapHit[] | undefined>): Budge
     }
   }
   return merged.slice(0, 50);
-}
-
-function countHardBudgetHits(hits: BudgetCapHit[] | undefined): number {
-  return (hits ?? []).filter((hit) => hit.severity === "hard").length;
 }
 
 function summarizeRunMetrics(run: RunState): RunState["metrics"] {
@@ -2085,8 +2201,9 @@ function summarizeRunMetrics(run: RunState): RunState["metrics"] {
     ...(crossStepDuplicateReadCount > 0 ? { crossStepDuplicateReadCount, crossStepDuplicateReads: [...new Set(crossStepDuplicateReads)].slice(0, 50) } : {}),
     ...(filesRead.length ? { filesRead: [...new Set(filesRead)].slice(0, 50) } : {}),
     ...(tokenomics ? { tokenomics } : {}),
-    ...(spans.length ? { spans: mergeTraceSpans(spans) } : {}),
+    ...(spans.length ? { spans: mergeTraceSpans(buildRunLifecycleSpans(run), spans) } : {}),
     ...(skillEvents.length ? { skillEvents: skillEvents.slice(0, 200) } : {}),
+    ...(checkpointSummary(run.steps) ? { checkpoints: checkpointSummary(run.steps) } : {}),
   };
 }
 

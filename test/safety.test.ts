@@ -58,9 +58,24 @@ test("child policy compresses oversized tool output and records output/read budg
   assert.match(result.content[0]!.text, /compressed by pi-chalin/);
   assert.equal(policy.metrics().outputTruncatedCount, 1);
   assert.ok(policy.metrics().readBytes < 7000);
+  assert.equal(policy.metrics().outputCharsByToolName.read, policy.metrics().readBytes);
 });
 
-test("child policy limits synthesis cross-step duplicate reads", () => {
+test("child policy tracks WebFetch output separately for tokenomics attribution", () => {
+  const policy = createChildToolPolicy({ cwd: process.cwd(), maxToolCalls: 4, allowedTools: ["chalin_web_search"] });
+  assert.deepEqual(policy.beforeTool("chalin_web_search", { url: "https://example.com/docs" }), { allowed: true });
+
+  policy.afterTool("chalin_web_search", {
+    content: [{ type: "text", text: "external docs evidence".repeat(100) }],
+    details: {},
+  });
+
+  const metrics = policy.metrics();
+  assert.ok((metrics.outputCharsByToolName.chalin_web_search ?? 0) > 0);
+  assert.equal(metrics.outputCharsByToolName.chalin_web_search, metrics.outputChars);
+});
+
+test("child policy guards repeated cross-step reads as a loop without budget stops", () => {
   const policy = createChildToolPolicy({
     cwd: process.cwd(),
     maxToolCalls: 10,
@@ -77,9 +92,30 @@ test("child policy limits synthesis cross-step duplicate reads", () => {
   assert.equal(warned.allowed, true);
   assert.equal(stillAllowed.allowed, true);
   assert.equal(blocked.allowed, false);
-  assert.match(blocked.reason, /max_cross_step_duplicate_reads=1/);
-  assert.equal(policy.metrics().budgetStopCount, 1);
+  assert.match(blocked.reason, /read_loop:src\/index\.ts/);
+  assert.equal(policy.metrics().budgetStopCount, 0);
   assert.ok(policy.metrics().budgetCapHits.some((hit) => hit.name === "max_cross_step_duplicate_reads" && hit.severity === "soft"));
-  assert.ok(policy.metrics().budgetCapHits.some((hit) => hit.name === "max_cross_step_duplicate_reads" && hit.severity === "hard"));
+  assert.equal(policy.metrics().budgetCapHits.some((hit) => hit.name === "max_cross_step_duplicate_reads" && hit.severity === "hard"), false);
+  assert.deepEqual(policy.metrics().policyViolations, ["read_loop:src/index.ts"]);
   assert.equal(policy.metrics().toolCalls, 3);
+});
+
+test("child policy guards same-file read loops inside one subagent", () => {
+  const policy = createChildToolPolicy({
+    cwd: process.cwd(),
+    maxToolCalls: 100,
+    allowedTools: ["read"],
+  });
+
+  assert.equal(policy.beforeTool("read", { path: "src/index.ts" }).allowed, true);
+  assert.equal(policy.beforeTool("read", { path: "src/index.ts" }).allowed, true);
+  assert.equal(policy.beforeTool("read", { path: "src/index.ts" }).allowed, true);
+  assert.equal(policy.beforeTool("read", { path: "src/index.ts" }).allowed, true);
+  const blocked = policy.beforeTool("read", { path: "src/index.ts" });
+
+  assert.equal(blocked.allowed, false);
+  assert.match(blocked.reason, /read_loop:src\/index\.ts/);
+  assert.equal(policy.metrics().budgetStopCount, 0);
+  assert.deepEqual(policy.metrics().policyViolations, ["read_loop:src/index.ts"]);
+  assert.equal(policy.metrics().toolCalls, 4);
 });
