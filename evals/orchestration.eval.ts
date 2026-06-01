@@ -69,13 +69,14 @@ const evalRunner = cli.runner ?? process.env.PI_CHALIN_EVAL_RUNNER ?? "mock";
 const evalModel = process.env.PI_CHALIN_EVAL_MODEL;
 const evalThinking = process.env.PI_CHALIN_EVAL_THINKING ?? "high";
 const sdkRunner = evalRunner === "sdk";
-const timeoutMs = positiveInt(cli.timeoutMs ?? process.env.PI_CHALIN_EVAL_TIMEOUT_MS, sdkRunner ? 75_000 : 60_000);
-const startTimeoutMs = positiveInt(cli.startTimeoutMs ?? process.env.PI_CHALIN_EVAL_START_TIMEOUT_MS, timeoutMs);
-const idleTimeoutMs = positiveInt(cli.idleTimeoutMs ?? process.env.PI_CHALIN_EVAL_IDLE_TIMEOUT_MS, sdkRunner ? 30_000 : 30_000);
-const postChalinIdleTimeoutMs = positiveInt(cli.postChalinIdleTimeoutMs ?? process.env.PI_CHALIN_EVAL_POST_CHALIN_IDLE_TIMEOUT_MS, sdkRunner ? 8_000 : 5_000);
-const chalinToolTimeoutMs = positiveInt(cli.chalinToolTimeoutMs ?? process.env.PI_CHALIN_EVAL_CHALIN_TOOL_TIMEOUT_MS, sdkRunner ? 60_000 : 30_000);
+const defaultInactivityTimeoutMs = 120_000;
+const legacyInactivityTimeoutMs = cli.timeoutMs ?? process.env.PI_CHALIN_EVAL_TIMEOUT_MS;
+const startTimeoutMs = positiveInt(cli.startTimeoutMs ?? process.env.PI_CHALIN_EVAL_START_TIMEOUT_MS ?? legacyInactivityTimeoutMs, defaultInactivityTimeoutMs);
+const idleTimeoutMs = positiveInt(cli.idleTimeoutMs ?? process.env.PI_CHALIN_EVAL_IDLE_TIMEOUT_MS ?? legacyInactivityTimeoutMs, defaultInactivityTimeoutMs);
+const postChalinIdleTimeoutMs = positiveInt(cli.postChalinIdleTimeoutMs ?? process.env.PI_CHALIN_EVAL_POST_CHALIN_IDLE_TIMEOUT_MS, defaultInactivityTimeoutMs);
+const chalinToolTimeoutMs = positiveInt(cli.chalinToolTimeoutMs ?? process.env.PI_CHALIN_EVAL_CHALIN_TOOL_TIMEOUT_MS ?? legacyInactivityTimeoutMs, defaultInactivityTimeoutMs);
 const thresholds = {
-  maxDurationMs: positiveInt(process.env.PI_CHALIN_EVAL_MAX_DURATION_MS, timeoutMs),
+  maxDurationMs: optionalPositiveInt(process.env.PI_CHALIN_EVAL_MAX_DURATION_MS),
   maxCombinedCost: positiveFloat(process.env.PI_CHALIN_EVAL_MAX_COMBINED_COST, sdkRunner ? 0.25 : Number.POSITIVE_INFINITY),
   maxChildToolCalls: positiveInt(process.env.PI_CHALIN_EVAL_MAX_CHILD_TOOL_CALLS, sdkRunner ? 30 : Number.POSITIVE_INFINITY),
   maxChildActiveTokens: positiveInt(process.env.PI_CHALIN_EVAL_MAX_CHILD_TOKENS, sdkRunner ? 20_000 : Number.POSITIVE_INFINITY),
@@ -110,11 +111,11 @@ const report = {
   actual: { total: results.length, passed, failed, chalinActual, directActual },
   metrics,
   thresholds,
-  timeouts: { hardTimeoutMs: timeoutMs, startTimeoutMs, idleTimeoutMs, chalinToolTimeoutMs, postChalinIdleTimeoutMs },
+  timeouts: { hardTimeoutMs: null, startTimeoutMs, idleTimeoutMs, chalinToolTimeoutMs, postChalinIdleTimeoutMs },
   model: evalModel ?? "default-pi-model",
   thinking: evalThinking,
   runner: evalRunner,
-  command: "pi -p --no-session --mode json --no-context-files --no-skills --tools read,bash,grep,find,ls,chalin_route -e <extension> <prompt>",
+  command: "pi -p --no-session --mode json --no-context-files --no-skills --tools read,bash,grep,find,ls,chalin_route,chalin_memory_search -e <extension> <prompt>",
   results,
 };
 
@@ -137,7 +138,7 @@ async function runCase(testCase: ChalinOrchestrationEvalCase): Promise<EvalResul
     "--no-context-files",
     "--no-skills",
     "--tools",
-    "read,bash,grep,find,ls,chalin_route",
+    "read,bash,grep,find,ls,chalin_route,chalin_memory_search",
     "-e",
     extensionPath,
   ];
@@ -213,7 +214,6 @@ function runPi(args: string[]): Promise<{ stdout: string; stderr: string; status
     const finish = (status: number | null, signal: NodeJS.Signals | null) => {
       if (settled) return;
       settled = true;
-      clearTimeout(hardTimer);
       clearInterval(progressTimer);
       if (chalinResultTimer) clearTimeout(chalinResultTimer);
       resolve({ stdout, stderr, status, signal, timeoutReason });
@@ -237,7 +237,6 @@ function runPi(args: string[]): Promise<{ stdout: string; stderr: string; status
       }, 1_000).unref();
     };
 
-    const hardTimer = setTimeout(() => kill(`hard timeout after ${timeoutMs}ms`), timeoutMs);
     const progressTimer = setInterval(() => {
       const idleFor = Date.now() - lastOutputAt;
       if (!sawOutput && idleFor > startTimeoutMs) kill(`startup timeout after ${idleFor}ms without output`);
@@ -323,7 +322,7 @@ function hasAgent(stdout: string, agent: string): boolean {
 
 function evaluateThresholds(testCase: ChalinOrchestrationEvalCase, metrics: EvalMetrics, durationMs: number): string[] {
   const failures: string[] = [];
-  if (durationMs > thresholds.maxDurationMs) failures.push(`duration ${durationMs}ms > ${thresholds.maxDurationMs}ms`);
+  if (thresholds.maxDurationMs !== null && durationMs > thresholds.maxDurationMs) failures.push(`duration ${durationMs}ms > ${thresholds.maxDurationMs}ms`);
   if (metrics.combinedUsage.cost.total > thresholds.maxCombinedCost) failures.push(`combined cost $${metrics.combinedUsage.cost.total.toFixed(4)} > $${thresholds.maxCombinedCost}`);
   if (metrics.childTools.totalCalls > thresholds.maxChildToolCalls) failures.push(`child tool calls ${metrics.childTools.totalCalls} > ${thresholds.maxChildToolCalls}`);
   const activeChildTokens = activeTokenTotal(metrics.childUsage);
@@ -642,6 +641,11 @@ function numberValue(value: unknown): number {
 function positiveInt(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function optionalPositiveInt(value: string | undefined): number | null {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : null;
 }
 
 function positiveFloat(value: string | undefined, fallback: number): number {

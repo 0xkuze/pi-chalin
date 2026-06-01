@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "bun:test";
 import { AgentCatalog } from "../src/agents.ts";
 import {
@@ -19,19 +22,20 @@ const expectedTopologyMap = new Map([
   ["memory-only", "memory-only"],
   ["none", "none"],
 ]);
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 test("orchestration eval cases cover chalin and direct decisions", () => {
   const summary = summarizeOrchestrationEvalCases();
 
-  assert.equal(summary.total, 19);
+  assert.equal(summary.total, 21);
   assert.equal(summary.chalinExpected, 13);
-  assert.equal(summary.directExpected, 6);
+  assert.equal(summary.directExpected, 8);
   assert.equal(summary.byTopology.single, 5);
   assert.equal(summary.byTopology.chain, 5);
   assert.equal(summary.byTopology.parallel, undefined);
   assert.equal(summary.byTopology.dag, 2);
   assert.equal(summary.byTopology["memory-only"], 1);
-  assert.equal(summary.byTopology.none, 6);
+  assert.equal(summary.byTopology.none, 8);
 
   for (const testCase of ORCHESTRATION_EVAL_CASES) {
     assert.ok(testCase.id.length > 0);
@@ -48,6 +52,17 @@ test("orchestration eval token threshold ignores cached reads as active token wo
   assert.equal(activeTokenTotal(usage), 9350);
 });
 
+test("orchestration eval uses inactivity guards instead of hard wall-clock deadlines", () => {
+  const source = readFileSync(resolve(repoRoot, "evals", "orchestration.eval.ts"), "utf-8");
+
+  assert.match(source, /defaultInactivityTimeoutMs = 120_000/);
+  assert.match(source, /hardTimeoutMs: null/);
+  assert.match(source, /startup timeout after/);
+  assert.match(source, /idle timeout after/);
+  assert.doesNotMatch(source, /hard timeout after/);
+  assert.doesNotMatch(source, /setTimeout\(\(\) => kill\(`hard timeout/);
+});
+
 test("orchestrator prompt teaches LLM-first routing without prompt keyword classifiers", () => {
   const catalog = AgentCatalog.load({ cwd: process.cwd() });
   const prompt = buildChalinOrchestratorSystemPrompt(catalog.list());
@@ -58,12 +73,12 @@ test("orchestrator prompt teaches LLM-first routing without prompt keyword class
   assert.match(prompt, /URL, current docs, release notes, changelog, or external documentation/i);
   assert.match(prompt, /call `chalin_web_search` before native local inspection or route/i);
   assert.match(prompt, /Interview when/i);
-  assert.match(prompt, /Call `chalin_route` first when specialist context isolation/i);
+  assert.match(prompt, /Choose `chalin_route` when specialist context isolation/i);
   assert.match(prompt, /Gate/i);
   assert.match(prompt, /branch\/diff\/PR/i);
   assert.match(prompt, /Architecture\/migration/i);
   assert.match(prompt, /Do not treat an explicit named-file refactor implementation as project strategy/i);
-  assert.match(prompt, /Direct bias/i);
+  assert.match(prompt, /Direct-work guidance/i);
   assert.match(prompt, /small target set of files/i);
   assert.match(prompt, /specific function\/symbol\/API plus a local verifier/i);
   assert.match(prompt, /bounded read-only mini-project review/i);
@@ -89,7 +104,7 @@ test("orchestrator prompt teaches LLM-first routing without prompt keyword class
   assert.match(prompt, /no unrequested deps/i);
   assert.doesNotMatch(prompt, /bun test|dependency-free TypeScript|Bun CLI|tsx|vitest|jest/i);
   assert.match(prompt, /explicit memory recall\/remembrance or memory inventory\/counts/i);
-  assert.match(prompt, /call `chalin_memory_search` first/i);
+  assert.match(prompt, /prefer `chalin_memory_search`/i);
   assert.match(prompt, /Routing principles/i);
   assert.match(prompt, /Use the available agent roster as tools/i);
   assert.match(prompt, /fixed recipe book/i);
@@ -117,20 +132,19 @@ test("orchestrator prompt teaches LLM-first routing without prompt keyword class
   assert.doesNotMatch(prompt, /regex|if the prompt contains|hard-coded prompt/i);
 });
 
-test("orchestrator prompt shows a selective likely roster with fallback guidance for clear prompts", () => {
+test("orchestrator prompt shows the full roster so the model chooses agents", () => {
   const catalog = AgentCatalog.load({ cwd: process.cwd() });
   const agents = catalog.list();
   const selected = selectLikelyAgentsForPrompt(agents, "Implementa src/cache.ts con tests y luego revisa la cobertura.");
   const names = selected.map((agent) => agent.name);
 
-  assert.deepEqual(names, ["reviewer", "worker"]);
+  assert.deepEqual(names, agents.map((agent) => agent.name));
 
   const prompt = buildChalinOrchestratorSystemPrompt(agents, "Implementa src/cache.ts con tests y luego revisa la cobertura.");
-  assert.match(prompt, /Likely-fit roster shown \(2\/\d+\)/);
-  assert.match(prompt, /Other configured agents remain available by name/i);
+  assert.match(prompt, /Full configured roster shown so the LM, not prompt keyword code, chooses the right agents/i);
   assert.match(prompt, /worker/);
   assert.match(prompt, /reviewer/);
-  assert.doesNotMatch(prompt, /conflict-resolver: Resolves isolated worktree merge conflicts/);
+  assert.match(prompt, /conflict-resolver: Resolves isolated worktree merge conflicts/);
 });
 
 test("chalin mutation routes without workers are normalized before execution and review", () => {

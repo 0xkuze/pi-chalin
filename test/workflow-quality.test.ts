@@ -1189,15 +1189,15 @@ test("workflow validation fails when Bun test command executes zero tests", () =
   fs.rmSync(fixture.cwd, { recursive: true, force: true });
 });
 
-test("workflow eval CLI helpers keep live runs bounded", () => {
+test("workflow eval CLI helpers keep run counts bounded and idle detection configurable", () => {
   assert.equal(resolveWorkflowTimeoutMs("999999"), MAX_WORKFLOW_TIMEOUT_MS);
   assert.equal(resolveWorkflowTimeoutMs("1500"), 1500);
   assert.equal(resolveWorkflowRunCount("999"), MAX_WORKFLOW_RUNS);
   assert.equal(resolveWorkflowRunCount("3"), 3);
-  assert.equal(DEFAULT_WORKFLOW_IDLE_TIMEOUT_MS, 90_000);
+  assert.equal(DEFAULT_WORKFLOW_IDLE_TIMEOUT_MS, 120_000);
   assert.equal(resolveWorkflowIdleTimeoutMs(undefined), DEFAULT_WORKFLOW_IDLE_TIMEOUT_MS);
   assert.equal(resolveWorkflowIdleTimeoutMs("1000"), 5000);
-  assert.equal(resolveWorkflowIdleTimeoutMs("999999", 60_000), 59_000);
+  assert.equal(resolveWorkflowIdleTimeoutMs("999999", 60_000), 999_999);
   assert.equal(resolveWorkflowInfraRetries(undefined), 1);
   assert.equal(resolveWorkflowInfraRetries("99"), 2);
   assert.equal(resolveWorkflowInfraRetries("0"), 0);

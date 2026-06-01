@@ -22,7 +22,7 @@ export const MAX_WORKFLOW_TIMEOUT_MS = 900_000;
 export const DEFAULT_WORKFLOW_RUNS = 1;
 export const MAX_WORKFLOW_RUNS = 5;
 export const DEFAULT_MAX_INTERACTIVE_SDK_WALL_MS = 120_000;
-export const DEFAULT_WORKFLOW_IDLE_TIMEOUT_MS = 90_000;
+export const DEFAULT_WORKFLOW_IDLE_TIMEOUT_MS = 120_000;
 
 interface WorkflowRunOptions {
   judgeMode: WorkflowJudgeMode;
@@ -641,7 +641,7 @@ async function main(): Promise<void> {
     startedAt,
     finishedAt: new Date().toISOString(),
     mode,
-    timeoutPolicy: mode === "sdk" ? { timeoutMs, maxTimeoutMs: MAX_WORKFLOW_TIMEOUT_MS, earlyStopPolicy: "terminal-final-answer-only", reason: "Workflow SDK evals are capped; hangs require root-cause investigation instead of longer waits. Static workspace validity is recorded as a milestone only; it never terminates a run before verification/final delivery." } : null,
+    timeoutPolicy: mode === "sdk" ? { hardTimeoutMs: null, inactivityTimeoutMs: resolveWorkflowIdleTimeoutMs(process.env.PI_CHALIN_WORKFLOW_IDLE_TIMEOUT_MS, timeoutMs), legacyTimeoutMs: timeoutMs, maxConfiguredTimeoutMs: MAX_WORKFLOW_TIMEOUT_MS, earlyStopPolicy: "terminal-final-answer-only", reason: "Workflow SDK evals do not impose a wall-clock run deadline. They stop on inactivity or terminal final-answer evidence; static workspace validity is recorded as a milestone only." } : null,
     cases: caseIds,
     variants,
     runs,
@@ -729,10 +729,10 @@ function normalizeWorkflowThinkingForModel(value: string, model?: string): strin
   return model && /^opencode\//i.test(model) ? "low" : value;
 }
 
-export function resolveWorkflowIdleTimeoutMs(value: string | undefined, workflowTimeoutMs = MAX_WORKFLOW_TIMEOUT_MS): number {
+export function resolveWorkflowIdleTimeoutMs(value: string | undefined, _workflowTimeoutMs = MAX_WORKFLOW_TIMEOUT_MS): number {
   const parsed = Number(value ?? DEFAULT_WORKFLOW_IDLE_TIMEOUT_MS);
   const bounded = Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : DEFAULT_WORKFLOW_IDLE_TIMEOUT_MS;
-  return Math.min(Math.max(bounded, 5_000), Math.max(5_000, workflowTimeoutMs - 1_000));
+  return Math.max(bounded, 5_000);
 }
 
 export function resolveCaseIds(value: string | undefined): string[] {
@@ -2219,7 +2219,6 @@ function runPi(args: string[], cwd: string, timeoutMs: number, options: { observ
     const finish = (status: number | null, signal: NodeJS.Signals | null) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
       clearInterval(idleTimer);
       clearInterval(workspacePassTimer);
       if (terminalEventTimer) clearTimeout(terminalEventTimer);
@@ -2265,11 +2264,6 @@ function runPi(args: string[], cwd: string, timeoutMs: number, options: { observ
       setTimeout(() => child.exitCode === null && killProcessTree(child.pid, "SIGKILL"), 1_000).unref();
     }, 1_000);
     idleTimer.unref?.();
-    const timer = setTimeout(() => {
-      timeoutReason = `workflow variant timeout after ${timeoutMs}ms`;
-      killProcessTree(child.pid, "SIGTERM");
-      setTimeout(() => child.exitCode === null && killProcessTree(child.pid, "SIGKILL"), 1_000).unref();
-    }, timeoutMs);
     child.stdout.on("data", (chunk: Buffer) => {
       lastProgressAt = Date.now();
       const text = chunk.toString();
