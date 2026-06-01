@@ -14,7 +14,7 @@ import { activateSkillForTurn, beginChalinRouteInvocation, disableSkillForTurn, 
 import { openSafetyApproval } from "./ui.ts";
 import { clearLegacyChalinControlWidget, setChalinStatus } from "./ui-status.ts";
 import { chalinRouteUpdateDetails, colorizeChalinWidget, footerStateForRun, formatChalinRoutePlanWidget, formatChalinRunWidget, formatChalinRunWidgetFromDetails, isUsableStepStatus, plannedWidgetRun, routeIntent, type ChalinRouteWidgetDetails } from "./route-widget.ts";
-import { fetchWebUrls, formatWebBundle, formatWebBundleWidget, searchWeb, type WebContextBundle } from "./webfetch.ts";
+import { fetchWebUrls, formatWebBundle, formatWebBundleProgressWidget, formatWebBundleWidget, searchWeb, type WebBundleProgressWidgetInput, type WebContextBundle } from "./webfetch.ts";
 import type { MemoryRecord, RouteDecision, RunState } from "./schemas.ts";
 import { collapseReadOnlyScoutContextRoute, inferRouteRequiresWorkspaceMutation, normalizeRouteForExecution } from "./route-guards.ts";
 import { compactRouteDetails, finalAnswerMaterial, formatRoute, outcomeForResult } from "./route-format.ts";
@@ -689,15 +689,20 @@ export function registerChalinTools(pi: ExtensionAPI): void {
     parameters: ChalinWebSearchParams,
     async execute(_toolCallId, params: ChalinWebSearchToolParams, signal, onUpdate, ctx) {
       const urls = [...(params.urls ?? []), ...(params.url ? [params.url] : [])].filter(Boolean);
-      const label = urls.length > 0 ? `fetching ${urls.length} URL${urls.length === 1 ? "" : "s"}` : `searching ${params.query ?? "web"}`;
-      onUpdate?.({ content: [{ type: "text", text: `chalin web · ${label} via Exa MCP…` }], details: { status: "running", provider: "exa-mcp" } });
+      const progressDetails: WebBundleProgressWidgetInput & { status: "running"; provider: "exa-mcp" } = urls.length > 0
+        ? { status: "running", provider: "exa-mcp", mode: "fetch", label: urls.length === 1 ? urls[0] ?? "URL" : `${urls.length} URLs`, requested: urls, done: 0, total: urls.length }
+        : { status: "running", provider: "exa-mcp", mode: "search", label: params.query ?? "web", requested: params.query ? [params.query] : [], done: 0, total: 1 };
+      onUpdate?.({ content: [{ type: "text", text: formatWebBundleProgressWidget(progressDetails) }], details: progressDetails });
       const bundle = urls.length > 0
         ? await fetchWebUrls({ cwd: ctx.cwd, urls, freshness: params.freshness, signal })
         : await searchWeb({ cwd: ctx.cwd, query: params.query ?? "", maxSources: params.maxSources, depth: params.depth, freshness: params.freshness, signal });
       return textResult(formatWebBundle(bundle), bundle);
     },
     renderResult(result, _options, _theme) {
-      const details = result.details as Partial<WebContextBundle> | undefined;
+      const details = result.details as (Partial<WebContextBundle> & Partial<WebBundleProgressWidgetInput> & { status?: string }) | undefined;
+      if (details?.status === "running" && (details.mode === "search" || details.mode === "fetch")) {
+        return new Text(formatWebBundleProgressWidget(details as WebBundleProgressWidgetInput), 0, 0);
+      }
       const rendered = details?.provider === "exa-mcp" && Array.isArray(details.sources)
         ? formatWebBundleWidget(details as WebContextBundle)
         : result.content.find((part) => part.type === "text")?.text ?? "";

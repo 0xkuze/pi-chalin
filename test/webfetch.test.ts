@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, test } from "bun:test";
-import { formatWebBundle, formatWebBundleWidget, formatWebFetchAudit, listWebFetchAudit, parseExaTextResults, searchWeb } from "../src/webfetch.ts";
+import { formatWebBundle, formatWebBundleProgressWidget, formatWebBundleWidget, formatWebFetchAudit, listWebFetchAudit, parseExaTextResults, searchWeb } from "../src/webfetch.ts";
 
 const tempDirs: string[] = [];
 afterEach(() => {
@@ -54,12 +54,34 @@ test("formatWebBundleWidget renders compact progress and source title bullets", 
     warnings: [],
   });
 
-  assert.match(widget, /Sites requested: \[##########\] 2\/2/);
+  assert.match(widget, /^Web search · Effect TypeScript docs/m);
+  assert.match(widget, /Fetched: \[██████████\] 2\/2/);
+  assert.match(widget, /Sources:/);
   assert.match(widget, /- Effect - The best way to build robust apps in TypeScript/);
+  assert.match(widget, /effect\.website/);
   assert.match(widget, /- Creating Effects \| Effect Documentation/);
+  assert.doesNotMatch(widget, /^chalin_web_search$/m);
+  assert.doesNotMatch(widget, /provider: .*cache: .*sources:/);
   assert.doesNotMatch(widget, /Summary:/);
   assert.doesNotMatch(widget, /Very long extracted content/);
-  assert.doesNotMatch(widget, /https:\/\/effect\.website/);
+  assert.doesNotMatch(widget, /https:\/\/effect\.website\//);
+});
+
+test("formatWebBundleProgressWidget renders a minimal in-flight fetch view", () => {
+  const widget = formatWebBundleProgressWidget({
+    mode: "fetch",
+    label: "https://www.youtube.com/watch?v=9kxx5xp5nTQ",
+    requested: ["https://www.youtube.com/watch?v=9kxx5xp5nTQ"],
+    done: 0,
+    total: 1,
+  });
+
+  assert.match(widget, /^Web fetch · https:\/\/www\.youtube\.com\/watch\?v=9kxx5xp5nTQ/m);
+  assert.match(widget, /Fetching: \[░░░░░░░░░░\] 0\/1/);
+  assert.match(widget, /Requested:/);
+  assert.match(widget, /- https:\/\/www\.youtube\.com\/watch\?v=9kxx5xp5nTQ/);
+  assert.doesNotMatch(widget, /provider:/);
+  assert.doesNotMatch(widget, /Summary:/);
 });
 
 

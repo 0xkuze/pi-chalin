@@ -28,6 +28,14 @@ export interface WebContextBundle {
   warnings: string[];
 }
 
+export interface WebBundleProgressWidgetInput {
+  mode: "search" | "fetch";
+  label: string;
+  requested?: string[];
+  done: number;
+  total: number;
+}
+
 export type WebFetchAuditFreshness = "fresh" | "stale" | "no-ttl";
 
 export interface WebFetchAuditEntry {
@@ -149,18 +157,35 @@ export function formatWebBundle(bundle: WebContextBundle): string {
 }
 
 export function formatWebBundleWidget(bundle: WebContextBundle): string {
-  const total = bundle.sources.length;
-  const title = bundle.query ? `chalin web search · ${bundle.query}` : `chalin web fetch · ${bundle.urls?.join(", ")}`;
+  const requestedTotal = bundle.urls?.length ?? bundle.sources.length;
+  const total = Math.max(requestedTotal, bundle.sources.length);
+  const mode = bundle.query ? "search" : "fetch";
+  const label = bundle.query ?? (bundle.urls?.length === 1 ? bundle.urls[0] ?? "URL" : `${bundle.urls?.length ?? bundle.sources.length} URLs`);
   const lines = [
-    "chalin_web_search",
-    title,
-    `provider: ${bundle.provider} · cache: ${bundle.cache.hit ? "hit" : "miss"} · sources: ${total}`,
+    `Web ${mode} · ${truncate(label, 76)}`,
+    `Fetched: ${progressBar(bundle.sources.length, total)} ${bundle.sources.length}/${total}`,
     "",
-    `Sites requested: ${progressBar(total, total)} ${total}/${total}`,
-    ...bundle.sources.map((source) => `- ${source.title || source.url || "Untitled source"}`),
+    "Sources:",
+    ...bundle.sources.slice(0, 6).map(formatSourceBullet),
+    ...(bundle.sources.length > 6 ? [`- …and ${bundle.sources.length - 6} more`] : []),
     ...(bundle.warnings.length > 0 ? ["", `Warnings: ${bundle.warnings.join("; ")}`] : []),
   ];
   return lines.join("\n");
+}
+
+export function formatWebBundleProgressWidget(input: WebBundleProgressWidgetInput): string {
+  const total = Math.max(0, input.total);
+  const done = Math.max(0, Math.min(total, input.done));
+  const requested = input.requested?.filter(Boolean) ?? [];
+  const lines = [
+    `Web ${input.mode} · ${truncate(input.label || (input.mode === "fetch" ? "URL" : "web"), 76)}`,
+    `Fetching: ${progressBar(done, total)} ${done}/${total}`,
+    requested.length > 0 ? "" : undefined,
+    requested.length > 0 ? "Requested:" : undefined,
+    ...requested.slice(0, 5).map((item) => `- ${truncate(item, 96)}`),
+    requested.length > 5 ? `- …and ${requested.length - 5} more` : undefined,
+  ];
+  return lines.filter((line): line is string => line !== undefined).join("\n");
 }
 
 export async function listWebFetchAudit(options: WebFetchAuditOptions): Promise<WebFetchAuditEntry[]> {
@@ -198,9 +223,24 @@ export async function listWebFetchAudit(options: WebFetchAuditOptions): Promise<
 
 function progressBar(done: number, total: number): string {
   const width = 10;
-  if (total <= 0) return `[${"-".repeat(width)}]`;
+  if (total <= 0) return `[${"░".repeat(width)}]`;
   const filled = Math.max(0, Math.min(width, Math.round((done / total) * width)));
-  return `[${"#".repeat(filled)}${"-".repeat(width - filled)}]`;
+  return `[${"█".repeat(filled)}${"░".repeat(width - filled)}]`;
+}
+
+function formatSourceBullet(source: WebSourceEvidence): string {
+  const title = truncate(source.title || source.url || "Untitled source", 72);
+  const domain = domainFromUrl(source.url);
+  return domain ? `- ${title} · ${domain}` : `- ${title}`;
+}
+
+function domainFromUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname.replace(/^www\./, "");
+  } catch {
+    return url.replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*$/, "");
+  }
 }
 
 export function formatWebFetchAudit(entries: WebFetchAuditEntry[]): string {
