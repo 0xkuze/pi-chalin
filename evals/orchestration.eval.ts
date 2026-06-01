@@ -65,6 +65,8 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const extensionPath = path.join(repoRoot, "src", "index.ts");
 const cli = parseCliArgs(process.argv.slice(2));
 const evalRunner = cli.runner ?? process.env.PI_CHALIN_EVAL_RUNNER ?? "mock";
+const evalModel = process.env.PI_CHALIN_EVAL_MODEL;
+const evalThinking = process.env.PI_CHALIN_EVAL_THINKING ?? "high";
 const sdkRunner = evalRunner === "sdk";
 const timeoutMs = positiveInt(cli.timeoutMs ?? process.env.PI_CHALIN_EVAL_TIMEOUT_MS, sdkRunner ? 75_000 : 60_000);
 const startTimeoutMs = positiveInt(cli.startTimeoutMs ?? process.env.PI_CHALIN_EVAL_START_TIMEOUT_MS, timeoutMs);
@@ -108,6 +110,9 @@ const report = {
   metrics,
   thresholds,
   timeouts: { hardTimeoutMs: timeoutMs, startTimeoutMs, idleTimeoutMs, chalinToolTimeoutMs, postChalinIdleTimeoutMs },
+  model: evalModel ?? "default-pi-model",
+  thinking: evalThinking,
+  runner: evalRunner,
   command: "pi -p --no-session --mode json --no-context-files --no-skills --tools read,bash,grep,find,ls,chalin_route -e <extension> <prompt>",
   results,
 };
@@ -135,9 +140,9 @@ async function runCase(testCase: ChalinOrchestrationEvalCase): Promise<EvalResul
     "-e",
     extensionPath,
   ];
-  const model = process.env.PI_CHALIN_EVAL_MODEL;
+  const model = evalModel;
   if (model) args.push("--model", model);
-  const thinking = process.env.PI_CHALIN_EVAL_THINKING ?? "minimal";
+  const thinking = evalThinking;
   if (thinking) args.push("--thinking", thinking);
   args.push(testCase.prompt);
 

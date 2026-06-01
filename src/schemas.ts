@@ -1,7 +1,18 @@
-import type { StructuredTraceSpan, TokenomicsSummary } from "./observability.ts";
+import type { SkillTraceEvent, StructuredTraceSpan, TokenomicsSummary } from "./observability.ts";
 
 export const AGENT_SCOPES = ["built-in", "project", "user"] as const;
 export type AgentScope = (typeof AGENT_SCOPES)[number];
+
+export const SKILL_SCOPES = ["built-in", "project", "user", "on-demand"] as const;
+export type SkillScope = (typeof SKILL_SCOPES)[number];
+export const SKILL_ACTIVATIONS = ["manual", "suggested", "auto"] as const;
+export type SkillActivation = (typeof SKILL_ACTIVATIONS)[number];
+export const SKILL_TRUST_LEVELS = ["trusted", "reviewed", "untrusted", "blocked"] as const;
+export type SkillTrust = (typeof SKILL_TRUST_LEVELS)[number];
+export const SKILL_LIFECYCLES = ["active", "stale", "expired", "candidate", "blocked"] as const;
+export type SkillLifecycle = (typeof SKILL_LIFECYCLES)[number];
+export const SKILL_SCRIPT_POLICIES = ["disabled", "sandboxed", "trusted-only"] as const;
+export type SkillScriptPolicy = (typeof SKILL_SCRIPT_POLICIES)[number];
 
 export const AGENT_CONCERNS = [
   "recon",
@@ -55,6 +66,56 @@ export interface AgentDefinition {
   systemPrompt: string;
   sourcePath?: string;
   diagnostics: string[];
+}
+
+export interface SkillDefinition {
+  name: string;
+  description: string;
+  scope: SkillScope;
+  extends: string[];
+  concerns: AgentConcern[];
+  capabilities: AgentCapability[];
+  activation: SkillActivation;
+  triggers: string[];
+  risk: RouteRisk;
+  maxActiveWith: string[];
+  allowedTools: string[];
+  deniedTools: string[];
+  requiresReview: boolean;
+  scripts: SkillScriptPolicy;
+  trust: SkillTrust;
+  lifecycle: SkillLifecycle;
+  version: number;
+  sourcePath: string;
+  checksum: string;
+  qualifiedName: string;
+  diagnostics: string[];
+  lastVerifiedAt?: string;
+  expiresAt?: string;
+  featureId?: string;
+  verifiedBy?: string;
+  commandEvidence: string[];
+  resources: string[];
+  body: string;
+  bodyLoaded: boolean;
+}
+
+export interface ResolvedSkill {
+  skill: SkillDefinition;
+  reason: string;
+}
+
+export interface RejectedSkill {
+  skill: SkillDefinition;
+  reason: string;
+  policy?: string;
+}
+
+export interface SkillResolutionResult {
+  active: ResolvedSkill[];
+  suggested: ResolvedSkill[];
+  rejected: RejectedSkill[];
+  events?: SkillTraceEvent[];
 }
 
 export interface AgentCatalogDiagnostics {
@@ -256,6 +317,8 @@ export interface RunStepMetrics {
   };
   tokenomics?: TokenomicsSummary;
   spans?: StructuredTraceSpan[];
+  skills?: string[];
+  skillEvents?: SkillTraceEvent[];
 }
 
 export type ModelResolutionSource = "session-override" | "agent" | "tier" | "inherit";
@@ -292,6 +355,10 @@ export interface RunStepState {
   modelResolution?: ModelResolutionLog;
   metrics?: RunStepMetrics;
   delegationDepth?: number;
+  activeSkills?: ResolvedSkill[];
+  suggestedSkills?: ResolvedSkill[];
+  rejectedSkills?: RejectedSkill[];
+  skillTraceEvents?: SkillTraceEvent[];
 }
 
 export interface RunState {
@@ -331,6 +398,7 @@ export interface RunState {
     filesRead?: string[];
     tokenomics?: TokenomicsSummary;
     spans?: StructuredTraceSpan[];
+    skillEvents?: SkillTraceEvent[];
   };
 }
 
@@ -345,6 +413,26 @@ export interface ChalinRuntimeState {
 
 export function isAgentScope(value: string): value is AgentScope {
   return (AGENT_SCOPES as readonly string[]).includes(value);
+}
+
+export function isSkillScope(value: string): value is SkillScope {
+  return (SKILL_SCOPES as readonly string[]).includes(value);
+}
+
+export function isSkillActivation(value: string): value is SkillActivation {
+  return (SKILL_ACTIVATIONS as readonly string[]).includes(value);
+}
+
+export function isSkillTrust(value: string): value is SkillTrust {
+  return (SKILL_TRUST_LEVELS as readonly string[]).includes(value);
+}
+
+export function isSkillLifecycle(value: string): value is SkillLifecycle {
+  return (SKILL_LIFECYCLES as readonly string[]).includes(value);
+}
+
+export function isSkillScriptPolicy(value: string): value is SkillScriptPolicy {
+  return (SKILL_SCRIPT_POLICIES as readonly string[]).includes(value);
 }
 
 export function isAgentConcern(value: string): value is AgentConcern {

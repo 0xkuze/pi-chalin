@@ -6,6 +6,7 @@ import type { MemoryStoreLike } from "./memory.ts";
 import { createConfiguredMemoryStore } from "./memory-provider.ts";
 import { MockWorkerRunner, SdkWorkerRunner, resumeWorkerRunnerEffect, runWorkerRunnerEffect, type WorkerRunner, type WorkerRunnerContext } from "./runner.ts";
 import type { AgentDefinition, AgentStage, AgentStep, AgentThinkingLevel, ApprovalDecision, MemoryRecord, RouteDecision, RoutePlan, RunState } from "./schemas.ts";
+import { recordSkillMetricsEffect } from "./skills.ts";
 
 export interface ChalinKernelOptions {
   cwd?: string;
@@ -45,6 +46,16 @@ export function kernelLayer(kernel: ChalinKernel): Layer.Layer<KernelService> {
 
 export function createKernelLayer(options?: ChalinKernelOptions): Layer.Layer<KernelService> {
   return kernelLayer(new ChalinKernel(options));
+}
+
+function recordRunSkillMetricsEffect(cwd: string, run: RunState): Effect.Effect<void, unknown> {
+  const skillEvents = [
+    ...(run.metrics?.skillEvents ?? []),
+    ...run.steps.flatMap((step) => step.metrics?.skillEvents ?? []),
+  ];
+  return skillEvents.length > 0
+    ? Effect.asVoid(recordSkillMetricsEffect({ cwd }, skillEvents))
+    : Effect.void;
 }
 
 export class ChalinKernel {
@@ -128,7 +139,7 @@ export class ChalinKernel {
       }
 
       const runner = context.extensionContext ? self.sdkRunner : self.runner;
-      const run = yield* runWorkerRunnerEffect(runner, route, { ...context, cwd: self.cwd, rootTask: prompt, agents, modelOverrides: self.modelOverrides, thinkingOverrides: self.thinkingOverrides });
+      const run = yield* runWorkerRunnerEffect(runner, route, { ...context, cwd: self.cwd, config: self.config, rootTask: prompt, agents, modelOverrides: self.modelOverrides, thinkingOverrides: self.thinkingOverrides });
       const candidates = run.steps.flatMap((step) => step.output?.memoryCandidates ?? []);
       if (candidates.length > 0) {
         if (context.extensionContext) {
@@ -137,6 +148,7 @@ export class ChalinKernel {
           yield* Effect.tryPromise(() => self.memory.submitCandidates(candidates));
         }
       }
+      yield* recordRunSkillMetricsEffect(self.cwd, run);
       if (route.needsArtifacts || run.steps.length > 1) yield* recordRunArtifactEffect(self.artifacts, run);
       return { route, approval, run, memories, diagnostics };
     }).pipe(Effect.withSpan("kernel.handleRoute"));
@@ -148,12 +160,13 @@ export class ChalinKernel {
     if (approval.action !== "allow" || !run.route.plan) return { route: run.route, approval, memories: [], diagnostics, run };
     const agents = this.resolvePlanAgents(run.route);
     const runner = context.extensionContext ? this.sdkRunner : this.runner;
-    const resumed = await Effect.runPromise(resumeWorkerRunnerEffect(runner, run, { ...context, cwd: this.cwd, rootTask: run.rootTask, agents, modelOverrides: this.modelOverrides, thinkingOverrides: this.thinkingOverrides }));
+    const resumed = await Effect.runPromise(resumeWorkerRunnerEffect(runner, run, { ...context, cwd: this.cwd, config: this.config, rootTask: run.rootTask, agents, modelOverrides: this.modelOverrides, thinkingOverrides: this.thinkingOverrides }));
     const candidates = resumed.steps.flatMap((step) => step.output?.memoryCandidates ?? []);
     if (candidates.length > 0) {
       if (context.extensionContext) this.persistMemoriesAfterToolResult(candidates, resumed.id, context.extensionContext.hasUI);
       else await this.memory.submitCandidates(candidates);
     }
+    await Effect.runPromise(recordRunSkillMetricsEffect(this.cwd, resumed));
     await this.artifacts.recordRun(resumed);
     return { route: resumed.route, approval, run: resumed, memories: [], diagnostics };
   }

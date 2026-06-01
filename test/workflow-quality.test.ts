@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { setDefaultTimeout, test } from "bun:test";
 import { WORKFLOW_ORACLE_DIR, createWorkflowFixture, getWorkflowEvalCase, listWorkflowCommunityCases, listWorkflowComplexCases, listWorkflowEvalCases, listWorkflowHoldoutCases, selectWorkflowPrompt } from "../evals/workflow-cases.ts";
 import { buildWorkflowShardChildArgs, resolveWorkflowShardArgs } from "../evals/workflow-sharded.eval.ts";
-import { appendWorkflowTail, assertSdkRunBudget, auditWorkflowProductionFastPaths, auditWorkflowTraceForCheating, buildWorkflowComparativeJudgeInfrastructureSkip, buildWorkflowComparativeJudgePrompt, buildWorkflowContentOnlyComparativeJudgePrompt, buildWorkflowJudgePrompt, collectWorkflowEvidence, detectWorkflowInfrastructureFailure, detectWorkflowVerification, effectiveWorkflowFinalText, enforceWorkflowImplementationComparativeWinner, evaluateWorkflowRegressionGates, extractFinalText, extractTokenTotal, extractWorkflowUsage, observeTerminalAssistantAnswer, parseJsonObjectFromText, resolveCaseIds, resolveComparativeJudgeMode, resolveGentleCompanionRoot, resolveGentlePiRoot, resolveVariants, resolveWorkflowArgs, resolveWorkflowIdleTimeoutMs, resolveWorkflowInfraRetries, resolveWorkflowOutputStoragePolicy, resolveWorkflowRunCount, resolveWorkflowThinking, resolveWorkflowTimeoutMs, shouldRequireChalinRoute, shouldRequireGentleSubagent, shouldRetainWorkflowFixture, shouldRetryWorkflowRun, shouldRunWorkflowJudge, shouldStoreFullWorkflowOutput, summarizeComparison, summarizeWorkflowBlindJudgeStability, summarizeWorkflowFailures, toolsForWorkflowVariant, workflowAgentHistory, workflowChalinRouteAgentMetrics, workflowDiagnostics, workflowFixtureFingerprint, workflowPromptVariantIndexForRun, workflowRegressionGatesEnabled, workflowReportFilename, workflowToolHistory, writeWorkflowReport, DEFAULT_WORKFLOW_IDLE_TIMEOUT_MS, MAX_WORKFLOW_RUNS, MAX_WORKFLOW_TIMEOUT_MS } from "../evals/workflow-quality.eval.ts";
+import { appendWorkflowTail, assertSdkRunBudget, auditWorkflowProductionFastPaths, auditWorkflowTraceForCheating, buildWorkflowComparativeJudgeInfrastructureSkip, buildWorkflowComparativeJudgePrompt, buildWorkflowContentOnlyComparativeJudgePrompt, buildWorkflowJudgePrompt, collectWorkflowEvidence, detectWorkflowInfrastructureFailure, detectWorkflowVerification, effectiveWorkflowFinalText, enforceWorkflowImplementationComparativeWinner, evaluateWorkflowRegressionGates, extractFinalText, extractTokenTotal, extractWorkflowUsage, observeTerminalAssistantAnswer, parseJsonObjectFromText, resolveCaseIds, resolveComparativeJudgeMode, resolveGentleCompanionRoot, resolveGentlePiRoot, resolveVariants, resolveWorkflowArgs, resolveWorkflowIdleTimeoutMs, resolveWorkflowInfraRetries, resolveWorkflowOutputStoragePolicy, resolveWorkflowRunCount, resolveWorkflowThinking, resolveWorkflowTimeoutMs, shouldRequireChalinRoute, shouldRequireGentleSubagent, shouldRetainWorkflowFixture, shouldRetryWorkflowRun, shouldRunWorkflowJudge, shouldStoreFullWorkflowOutput, summarizeComparison, summarizeWorkflowBlindJudgeStability, summarizeWorkflowFailures, summarizeWorkflowSkillsAb, toolsForWorkflowVariant, workflowAgentHistory, workflowChalinRouteAgentMetrics, workflowDiagnostics, workflowFixtureFingerprint, workflowPromptVariantIndexForRun, workflowRegressionGatesEnabled, workflowReportFilename, workflowToolHistory, writeWorkflowReport, DEFAULT_WORKFLOW_IDLE_TIMEOUT_MS, MAX_WORKFLOW_RUNS, MAX_WORKFLOW_TIMEOUT_MS } from "../evals/workflow-quality.eval.ts";
 import { scoreWorkflowWorkspace } from "../evals/workflow-quality-lib.ts";
 
 setDefaultTimeout(60_000);
@@ -1217,8 +1217,10 @@ test("workflow eval CLI helpers keep live runs bounded", () => {
   assert.deepEqual(resolveVariants(undefined), ["simple", "chalin"]);
   assert.deepEqual(resolveVariants("chalin"), ["chalin"]);
   assert.deepEqual(resolveVariants("harnesses"), ["chalin", "gentle"]);
+  assert.deepEqual(resolveVariants("skills-ab"), ["chalin-skills-off", "chalin-skills-on"]);
   assert.deepEqual(resolveVariants("all-harnesses"), ["simple", "chalin", "gentle"]);
   assert.ok(resolveCaseIds("all").length >= 6);
+  assert.deepEqual(resolveCaseIds("skills-ab"), ["holdout-bugfix-date-parser"]);
   assert.deepEqual(resolveCaseIds("holdout"), listWorkflowHoldoutCases().map((item) => item.id));
   assert.deepEqual(resolveCaseIds("community"), listWorkflowCommunityCases().map((item) => item.id));
   assert.deepEqual(resolveCaseIds("complex"), listWorkflowComplexCases().map((item) => item.id));
@@ -1251,6 +1253,8 @@ test("workflow eval keeps bounded docs evidence shell available for chalin", () 
   assert.match(toolsForWorkflowVariant("chalin", docsCase), /\bchalin_route\b/);
   assert.match(toolsForWorkflowVariant("chalin", docsCase), /\bbash\b/);
   assert.match(toolsForWorkflowVariant("chalin", bugfixCase), /\bbash\b/);
+  assert.equal(toolsForWorkflowVariant("chalin-skills-off", docsCase), toolsForWorkflowVariant("chalin", docsCase));
+  assert.equal(toolsForWorkflowVariant("chalin-skills-on", docsCase), toolsForWorkflowVariant("chalin", docsCase));
   assert.match(toolsForWorkflowVariant("simple", docsCase), /\bbash\b/);
 });
 
@@ -1704,6 +1708,67 @@ test("workflow comparison rejects simple baseline wins based only on cost or spe
 
   assert.equal(grouped[0]?.pass, false);
   assert.match(grouped[0]?.reason ?? "", /qualityGate:required/);
+});
+
+test("workflow comparison treats skills-on as target against skills-off", () => {
+  const output = (variant: "chalin-skills-off" | "chalin-skills-on", score: number, tokenTotal: number) => ({
+    variant,
+    runIndex: 1,
+    durationMs: 12_000,
+    workspace: { caseId: "holdout-bugfix-date-parser", pass: true, score, qualityScore: score, efficiencyScore: 100 },
+    trace: { pass: true, score: 100, warnings: [], critical: [] },
+    diagnostics: {
+      infrastructureFailure: undefined,
+      finalAnswerMissing: false,
+      verificationPassed: true,
+      duplicateToolCalls: 0,
+      chalinRouteCalls: 0,
+      chalinRouteNonExecutable: 0,
+      toolEvents: 4,
+      readCalls: 1,
+      writeCalls: 1,
+      editCalls: 1,
+      retries: 0,
+      tokenTotal,
+    },
+    judge: undefined,
+  });
+  const grouped = summarizeComparison([
+    output("chalin-skills-off", 90, 20_000),
+    output("chalin-skills-on", 100, 21_000),
+  ] as never, [{
+    caseId: "holdout-bugfix-date-parser",
+    runIndex: 1,
+    target: "chalin-skills-on",
+    candidates: [
+      { label: "A", variant: "chalin-skills-off", deterministicPass: true, workspaceScore: 90, traceScore: 100, durationMs: 12_000, tokens: 20_000 },
+      { label: "B", variant: "chalin-skills-on", deterministicPass: true, workspaceScore: 100, traceScore: 100, durationMs: 12_000, tokens: 21_000 },
+    ],
+    winnerLabel: "B",
+    winnerVariant: "chalin-skills-on",
+    ranking: ["B", "A"],
+    scores: { A: 90, B: 100 },
+    targetWins: true,
+    targetRank: 1,
+    verdict: "skills-on produced the stronger fix",
+    critical: [],
+    warnings: [],
+  } as never]);
+
+  assert.equal(grouped[0]?.pass, true);
+  assert.match(grouped[0]?.reason ?? "", /chalin-skills-on-vs-chalin-skills-off/);
+  assert.equal(grouped[0]?.comparativeJudges?.[0]?.target, "chalin-skills-on");
+
+  const summary = summarizeWorkflowSkillsAb([
+    output("chalin-skills-off", 90, 20_000),
+    output("chalin-skills-on", 100, 21_000),
+  ] as never, grouped[0]?.comparativeJudges ?? []);
+  assert.equal(summary.targetWins, 1);
+  assert.equal(summary.baselineWins, 0);
+  assert.equal(summary.blindJudgeWinRate, 1);
+  assert.equal(summary.exactBinomialTwoSidedP, 1);
+  assert.equal(summary.totalTokensDelta, 1_000);
+  assert.equal(summary.interpretation, "preliminary-positive");
 });
 
 test("workflow regression gates warn on recovered-infra p95 when all chalin runs pass", () => {

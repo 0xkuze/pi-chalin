@@ -114,10 +114,12 @@ export function recordRunArtifactEffect(store: ArtifactStore, run: RunState): Ef
 }
 
 export class ArtifactStore {
+  private readonly paths: ReturnType<typeof resolveChalinPaths>;
   private readonly root: string;
 
   constructor(options: ChalinPathsOptions) {
-    this.root = path.join(resolveChalinPaths(options).projectRoot, ".pi-chalin", "artifacts");
+    this.paths = resolveChalinPaths(options);
+    this.root = path.join(this.paths.projectRoot, ".pi-chalin", "artifacts");
   }
 
   async initFeature(input: { featureId: string; goal: string; chain?: string[]; currentStep?: string }): Promise<FeatureArtifactState> {
@@ -310,10 +312,29 @@ function appendJsonLine(file: string, value: unknown): void {
 }
 
 function formatWorkerSkill(skill: WorkerSkillArtifact): string {
+  const expiresAt = new Date(Date.parse(skill.createdAt) + 30 * 24 * 60 * 60 * 1000).toISOString();
   return [
     "---",
     `name: ${skill.name}`,
     `description: ${skill.summary}`,
+    "scope: on-demand",
+    "extends:",
+    "  - worker",
+    "concerns:",
+    "  - implementation",
+    "capabilities:",
+    "  - validate",
+    "activation: manual",
+    "triggers: []",
+    "risk: low",
+    "allowedTools: []",
+    "deniedTools: []",
+    "requiresReview: false",
+    "scripts: disabled",
+    "trust: untrusted",
+    "lifecycle: candidate",
+    `expiresAt: ${expiresAt}`,
+    "version: 1",
     "---",
     "",
     "## Purpose",

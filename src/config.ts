@@ -38,6 +38,20 @@ export interface ChalinConfig {
       project?: string;
     };
   };
+  skills: {
+    enabled: boolean;
+    autoActivation: boolean;
+    maxActiveDirect: number;
+    maxActivePerStep: number;
+    allowProjectSkills: boolean;
+    allowUserSkills: boolean;
+    allowOnDemandSkills: boolean;
+    allowSkillScripts: boolean;
+    staleAfterDays: number;
+    requireAuditForProjectSkills: boolean;
+    requireAuditForUserSkills: boolean;
+    telemetry: boolean;
+  };
 }
 
 export interface LoadedChalinConfig {
@@ -81,6 +95,20 @@ export const DEFAULT_CONFIG: ChalinConfig = {
       syncThrottleMs: 30_000,
       timeoutMs: 800,
     },
+  },
+  skills: {
+    enabled: true,
+    autoActivation: true,
+    maxActiveDirect: 1,
+    maxActivePerStep: 2,
+    allowProjectSkills: true,
+    allowUserSkills: true,
+    allowOnDemandSkills: true,
+    allowSkillScripts: false,
+    staleAfterDays: 30,
+    requireAuditForProjectSkills: true,
+    requireAuditForUserSkills: true,
+    telemetry: true,
   },
 };
 
@@ -186,6 +214,36 @@ function coerceConfig(input: ChalinConfig, diagnostics: string[]): ChalinConfig 
   if (config.memory.engram.project !== undefined && typeof config.memory.engram.project !== "string") {
     diagnostics.push(`Invalid memory.engram.project '${String(config.memory.engram.project)}'; removing override.`);
     delete config.memory.engram.project;
+  }
+  if (!isObject(config.skills)) config.skills = structuredClone(DEFAULT_CONFIG.skills);
+  for (const key of [
+    "enabled",
+    "autoActivation",
+    "allowProjectSkills",
+    "allowUserSkills",
+    "allowOnDemandSkills",
+    "allowSkillScripts",
+    "requireAuditForProjectSkills",
+    "requireAuditForUserSkills",
+    "telemetry",
+  ] as const) {
+    if (typeof config.skills[key] !== "boolean") {
+      diagnostics.push(`Invalid skills.${key} '${String(config.skills[key])}'; using '${DEFAULT_CONFIG.skills[key]}'.`);
+      config.skills[key] = DEFAULT_CONFIG.skills[key];
+    }
+  }
+  for (const [key, min, max] of [
+    ["maxActiveDirect", 0, 5],
+    ["maxActivePerStep", 0, 5],
+    ["staleAfterDays", 1, 365],
+  ] as const) {
+    const value = config.skills[key];
+    if (!Number.isFinite(value) || value < min || value > max) {
+      diagnostics.push(`Invalid skills.${key} '${String(value)}'; using '${DEFAULT_CONFIG.skills[key]}'.`);
+      config.skills[key] = DEFAULT_CONFIG.skills[key];
+    } else {
+      config.skills[key] = Math.floor(value);
+    }
   }
   return config;
 }

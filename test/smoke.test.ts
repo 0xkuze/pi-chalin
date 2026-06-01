@@ -7,7 +7,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import registerPiChalin from "../src/index.ts";
 import { resetAutorouteToolStateForTests, shouldUseCompactDirectOrchestrationPrompt } from "../src/autoroute.ts";
 import { resetRuntimeState, setLatestRun, setLiveStepSession } from "../src/runtime-state.ts";
-import { openAgentManager, openAgentModelPicker } from "../src/ui-agents.ts";
+import { openAgentManager, openAgentModelPicker, openSkillManager } from "../src/ui-agents.ts";
 import { openMemoryReview, openMemoryReviewWithLoading, openSmartPanel, openWebFetchAuditPanel, summarizeRuntimeGuards } from "../src/ui.ts";
 import { finalAnswerMaterial } from "../src/route-format.ts";
 import { formatChalinRoutePlanWidget, formatChalinRunWidget } from "../src/route-widget.ts";
@@ -15,6 +15,7 @@ import { createRunState, persistRun } from "../src/runner-state.ts";
 import { chalinFooterText } from "../src/ui-status.ts";
 import { createMemoryCandidate, MemoryStore } from "../src/memory.ts";
 import type { AgentDefinition, MemoryRecord, RunState } from "../src/schemas.ts";
+import { SkillCatalog } from "../src/skills.ts";
 import type { WebFetchAuditEntry } from "../src/webfetch.ts";
 
 const tempDirs: string[] = [];
@@ -24,6 +25,10 @@ afterEach(() => {
   while (tempDirs.length > 0) fs.rmSync(tempDirs.pop()!, { recursive: true, force: true });
 });
 function tempDir(prefix: string): string { const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); tempDirs.push(dir); return dir; }
+function writeSkillFileForSmoke(filePath: string, body: string): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, body.trimStart(), "utf-8");
+}
 function emptyTestUsage() {
   return {
     input: 0,
@@ -65,6 +70,8 @@ function createFakePi() {
     activeTools: [] as string[],
     toolSetHistory: [] as string[][],
     messages: [] as Array<{ message: unknown; options: unknown }>,
+    thinkingLevel: "minimal",
+    thinkingHistory: [] as string[],
     api: {
       registerCommand(name: string, options: unknown) {
         commands.set(name, options);
@@ -84,6 +91,13 @@ function createFakePi() {
       setActiveTools(toolNames: string[]) {
         fake.activeTools = [...toolNames];
         fake.toolSetHistory.push([...toolNames]);
+      },
+      getThinkingLevel() {
+        return fake.thinkingLevel;
+      },
+      setThinkingLevel(level: string) {
+        fake.thinkingLevel = level;
+        fake.thinkingHistory.push(level);
       },
     },
   };
@@ -202,6 +216,89 @@ test("pi-chalin keeps the native prompt and teaches the primary Pi agent to deci
   assert.match(promptResult?.systemPrompt ?? "", /reviewer/);
   assert.equal(promptResult?.message?.customType, "pi-chalin-orchestration");
   assert.equal(promptResult?.message?.display, false);
+});
+
+test("pi-chalin forces high thinking only for the parent orchestration decision", async () => {
+  const fake = createFakePi();
+  fake.thinkingLevel = "minimal";
+  registerPiChalin(fake.api as never);
+  const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
+  const toolStart = fake.handlers.get("tool_execution_start")?.[0] as (event: unknown) => void;
+
+  await beforeAgentStart({
+    type: "before_agent_start",
+    prompt: "Revisa este proyecto y dime su estructura.",
+    systemPrompt: "base",
+    systemPromptOptions: {},
+  }, {
+    cwd: tempDir("pi-chalin-thinking-router-"),
+    hasUI: false,
+    model: undefined,
+    modelRegistry: { getAvailable: () => [] },
+  });
+
+  assert.equal(fake.thinkingLevel, "high");
+  toolStart({ toolName: "chalin_route", args: {} });
+  assert.equal(fake.thinkingLevel, "minimal");
+  assert.deepEqual(fake.thinkingHistory.slice(-2), ["high", "minimal"]);
+});
+
+test("pi-chalin gates general no-path orchestration decisions with route-only tools", async () => {
+  const fake = createFakePi();
+  const fullToolSet = ["read", "bash", "grep", "find", "ls", "chalin_route"];
+  fake.activeTools = [...fullToolSet];
+  fake.thinkingLevel = "low";
+  registerPiChalin(fake.api as never);
+  const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
+  const toolStart = fake.handlers.get("tool_execution_start")?.[0] as (event: unknown) => void;
+
+  await beforeAgentStart({
+    type: "before_agent_start",
+    prompt: "Dime como esta organizado este proyecto y si conviene dividir responsabilidades.",
+    systemPrompt: "base",
+    systemPromptOptions: {},
+  }, {
+    cwd: tempDir("pi-chalin-mode-gate-"),
+    hasUI: false,
+    model: undefined,
+    modelRegistry: { getAvailable: () => [] },
+  });
+
+  assert.equal(fake.thinkingLevel, "high");
+  assert.deepEqual(fake.activeTools, ["chalin_route"]);
+  toolStart({ toolName: "chalin_route", args: {} });
+  assert.equal(fake.thinkingLevel, "low");
+  assert.deepEqual(fake.activeTools, fullToolSet);
+  assert.deepEqual(fake.toolSetHistory.slice(-2), [["chalin_route"], fullToolSet]);
+});
+
+test("pi-chalin keeps direct tools for bounded review, root docs edits, and explicit commands", async () => {
+  const fake = createFakePi();
+  const fullToolSet = ["read", "bash", "grep", "find", "ls", "edit", "write", "chalin_route"];
+  registerPiChalin(fake.api as never);
+  const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
+  const ctx = {
+    cwd: tempDir("pi-chalin-direct-gate-exclusions-"),
+    hasUI: false,
+    model: undefined,
+    modelRegistry: { getAvailable: () => [] },
+  };
+
+  const prompts = [
+    { text: "Revisa este mini proyecto y dime si hay riesgo de seguridad en el boundary de auth. No modifiques archivos; entrega evidencia con paths concretos.", expected: fullToolSet },
+    { text: "corrige un typo en el README", expected: ["bash", "edit", "write"] },
+    { text: "corre bun test y dime si pasa", expected: fullToolSet },
+  ];
+  for (const prompt of prompts) {
+    fake.activeTools = [...fullToolSet];
+    await beforeAgentStart({
+      type: "before_agent_start",
+      prompt: prompt.text,
+      systemPrompt: "base",
+      systemPromptOptions: {},
+    }, ctx);
+    assert.deepEqual(fake.activeTools, prompt.expected, prompt.text);
+  }
 });
 
 test("primary Pi agent receives compact global memory context before direct or routed decisions", async () => {
@@ -3437,6 +3534,59 @@ test("Agent manager confirms reset actions before removing overrides", async () 
   assert.match(notifications.join("\n"), /project\/worker reset to inherit/);
 });
 
+test("Skill manager shows governance fields and supports per-turn activation", async () => {
+  const cwd = tempDir("pi-chalin-skill-manager-ui-");
+  const packageRoot = tempDir("pi-chalin-skill-manager-package-");
+  writeSkillFileForSmoke(path.join(packageRoot, "skills", "review-final-gate", "SKILL.md"), `
+---
+name: review-final-gate
+description: Reviewer checklist that requires implementation evidence and verifier evidence.
+scope: built-in
+extends:
+  - reviewer
+concerns:
+  - review
+capabilities:
+  - validate
+activation: auto
+triggers:
+  - review
+risk: medium
+allowedTools:
+  - read
+deniedTools:
+  - bash
+requiresReview: false
+scripts: disabled
+trust: trusted
+lifecycle: active
+version: 1
+lastVerifiedAt: "2026-05-31T00:00:00.000Z"
+commandEvidence:
+  - "bun test"
+---
+Check implementation evidence, verifier evidence, and final answer honesty.
+`);
+  const catalog = SkillCatalog.load({ cwd, packageRoot });
+  const selections: Array<{ title: string; options: string[] }> = [];
+  const notifications: string[] = [];
+
+  await openSkillManager({
+    cwd,
+    hasUI: true,
+    ui: {
+      select: async (title: string, options: string[]) => {
+        selections.push({ title, options });
+        return title === "Skills" ? options[0] : "Use this turn";
+      },
+      notify: (message: string) => notifications.push(message),
+    },
+  } as never, catalog);
+
+  assert.match(selections[0]?.options.join("\n") ?? "", /built-in:review-final-gate · built-in · trust trusted · life active · activation auto · agents reviewer · verified 2026-05-31T00:00:00.000Z · 1 evidence/);
+  assert.match(notifications.join("\n"), /skill activated for this turn: built-in:review-final-gate/);
+});
+
 test("Memory Review uses compact list items and a detail drill-down", async () => {
   const record = memoryRecord({
     status: "pending",
@@ -3897,6 +4047,23 @@ test("/chalin settings exposes agents diagnostics and maintenance", async () => 
   });
   assert.match(notifications.join("\n"), /model overrides: \d+/);
   assert.match(notifications.join("\n"), /thinking overrides: \d+/);
+
+  notifications.length = 0;
+  await command.handler("settings", {
+    cwd,
+    hasUI: true,
+    ui: {
+      select: async (title: string, options: string[]) => {
+        if (title === "Settings") return options.find((option) => option.startsWith("Skills ·"));
+        if (title === "Skills") return "Policy summary";
+        return undefined;
+      },
+      notify: (message: string) => notifications.push(message),
+      setStatus: () => {},
+    },
+  });
+  assert.match(notifications.join("\n"), /Skill policy/);
+  assert.match(notifications.join("\n"), /on-demand skills: on/);
 
   notifications.length = 0;
   await command.handler("settings", {

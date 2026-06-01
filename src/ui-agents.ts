@@ -1,7 +1,9 @@
 import { DynamicBorder, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import { Container, fuzzyFilter, getKeybindings, Input, Spacer, Text, type Focusable, type TUI } from "@earendil-works/pi-tui";
 import { setAgentModelOverride, setAgentThinkingOverride, type ModelPersistenceTarget } from "./config.ts";
-import type { AgentDefinition, AgentThinkingLevel } from "./schemas.ts";
+import { activateSkillForTurn, disableSkillForTurn } from "./runtime-state.ts";
+import type { AgentDefinition, AgentThinkingLevel, SkillDefinition, SkillLifecycle } from "./schemas.ts";
+import { SkillMetricsStore, auditSkill, formatSkillShow, promoteSkill, retireSkill, type SkillCatalog, type SkillMetricsSnapshot } from "./skills.ts";
 
 const MODEL_PICKER_VISIBLE_ROWS = 12;
 
@@ -13,6 +15,105 @@ interface AgentModelOption {
   id?: string;
   name?: string;
   searchText: string;
+}
+
+export async function openSkillManager(ctx: ExtensionContext, catalog: SkillCatalog): Promise<void> {
+  const skills = catalog.list();
+  const metrics = new SkillMetricsStore({ cwd: ctx.cwd }).snapshot();
+  if (!ctx.hasUI) {
+    ctx.ui.notify(formatSkillCatalogForUi(skills, catalog.diagnostics.warnings, metrics), skills.length > 0 ? "info" : "warning");
+    return;
+  }
+
+  if (skills.length === 0) {
+    ctx.ui.notify("No pi-chalin skills found.", "warning");
+    return;
+  }
+
+  const selected = await ctx.ui.select("Skills", [
+    ...skills.map((skill) => formatSkillSummaryForUi(skill, metrics)),
+    "Close",
+  ]);
+  if (!selected || selected === "Close") return;
+
+  const skill = skills.find((candidate) => selected.startsWith(`${candidate.qualifiedName} ·`));
+  if (!skill) return;
+
+  const action = await ctx.ui.select(skill.qualifiedName, [
+    "Inspect",
+    "Audit",
+    "Use this turn",
+    "Disable this turn",
+    "Promote to project",
+    "Promote to user",
+    "Mark stale",
+    "Mark expired",
+    "Block",
+    "Close",
+  ]);
+
+  if (action === "Inspect") {
+    ctx.ui.notify(formatSkillShow(skill), skill.diagnostics.length > 0 ? "warning" : "info");
+    return;
+  }
+  if (action === "Audit") {
+    const audit = auditSkill(skill);
+    ctx.ui.notify(formatSkillShow(skill, audit), audit.status === "blocked" ? "warning" : "info");
+    return;
+  }
+  if (action === "Use this turn") {
+    const overrides = activateSkillForTurn(skill.qualifiedName);
+    ctx.ui.notify(`skill activated for this turn: ${skill.qualifiedName}\nactive overrides: ${[...overrides.explicit].join(", ") || "none"}`, "info");
+    return;
+  }
+  if (action === "Disable this turn") {
+    const overrides = disableSkillForTurn(skill.qualifiedName);
+    ctx.ui.notify(`skill disabled for this turn: ${skill.qualifiedName}\ndisabled overrides: ${[...overrides.disabled].join(", ") || "none"}`, "info");
+    return;
+  }
+  if (action === "Promote to project" || action === "Promote to user") {
+    const targetScope = action.endsWith("user") ? "user" : "project";
+    try {
+      const result = promoteSkill({ cwd: ctx.cwd, reference: skill.qualifiedName, targetScope, reviewedBy: "skill-manager" });
+      ctx.ui.notify(`skill promoted: ${result.skill.qualifiedName}\npath: ${result.path}\naudit: ${result.audit.status}`, "info");
+    } catch (error) {
+      ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+    }
+    return;
+  }
+  if (action === "Mark stale" || action === "Mark expired" || action === "Block") {
+    const lifecycle: Exclude<SkillLifecycle, "active" | "candidate"> = action === "Mark expired" ? "expired" : action === "Block" ? "blocked" : "stale";
+    const result = retireSkill({ cwd: ctx.cwd, reference: skill.qualifiedName, lifecycle, actor: "skill-manager" });
+    ctx.ui.notify(`skill retired: ${result.skill.qualifiedName} -> ${result.skill.lifecycle}\npath: ${result.path}`, "info");
+  }
+}
+
+function formatSkillCatalogForUi(skills: SkillDefinition[], warnings: string[], metrics: SkillMetricsSnapshot): string {
+  return [
+    skills.length ? `Skills (${skills.length})` : "No pi-chalin skills found.",
+    ...skills.map((skill) => formatSkillSummaryForUi(skill, metrics)),
+    ...warnings.map((warning) => `warning: ${warning}`),
+  ].join("\n");
+}
+
+function formatSkillSummaryForUi(skill: SkillDefinition, metrics?: SkillMetricsSnapshot): string {
+  const verified = skill.lastVerifiedAt ? `verified ${skill.lastVerifiedAt}` : "unverified";
+  const evidence = skill.commandEvidence.length > 0 ? `${skill.commandEvidence.length} evidence` : "no evidence";
+  const record = metrics?.skills[skill.qualifiedName];
+  const flags = [
+    skill.qualifiedName,
+    skill.scope,
+    `trust ${skill.trust}`,
+    `life ${skill.lifecycle}`,
+    `activation ${skill.activation}`,
+    `agents ${skill.extends.join(",") || "*"}`,
+    verified,
+    evidence,
+    record ? `uses ${record.activations}` : "uses 0",
+    record ? `outcomes ${record.outcomes}` : "outcomes 0",
+    skill.diagnostics.length ? `${skill.diagnostics.length} diagnostics` : undefined,
+  ].filter(Boolean).join(" · ");
+  return `${flags} · ${skill.description}`;
 }
 
 export async function openAgentManager(

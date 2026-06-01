@@ -8,6 +8,7 @@ type ChalinRouteWidgetStep = {
   status?: RunStatus;
   model?: string;
   thinkingLevel?: string;
+  skills?: string[];
   error?: string;
   handoff?: string;
 };
@@ -97,6 +98,7 @@ export function chalinRouteUpdateDetails(run: RunState): ChalinRouteWidgetDetail
         status: step.status,
         model: step.model,
         thinkingLevel: step.thinkingLevel,
+        skills: step.activeSkills?.map((item) => item.skill.name),
         error: step.error,
         handoff: truncate(step.output?.handoff || step.output?.text || "", 180),
       })),
@@ -136,7 +138,8 @@ function formatWidgetStep(step: ChalinRouteWidgetStep, index: number, total: num
             ? "skipped after failure"
           : step.task || "working";
   const suffix = step.status === "budget-capped" ? " · budget limit reached" : "";
-  return `${treePrefix(index, total)} ${statusGlyph(step.status)} ${step.agent} — ${truncate(detail, 88)}${suffix}`;
+  const skills = step.skills?.length ? ` · skills:${step.skills.join(",")}` : "";
+  return `${treePrefix(index, total)} ${statusGlyph(step.status)} ${step.agent}${skills} — ${truncate(detail, 88)}${suffix}`;
 }
 
 function statusGlyph(status: RunStatus | undefined): string {

@@ -6,7 +6,8 @@ import {
   summarizeOrchestrationEvalCases,
 } from "../evals/orchestration-cases.ts";
 import { buildChalinOrchestratorSystemPrompt } from "../src/orchestration.ts";
-import { collapseReadOnlyScoutContextRoute, ensureMutationRouteHasWorkerAndReviewer, inferRouteRequiresWorkspaceMutation } from "../src/route-guards.ts";
+import { routeFromPlan } from "../src/kernel.ts";
+import { collapseReadOnlyScoutContextRoute, ensureMutationRouteHasWorkerAndReviewer, inferRouteRequiresWorkspaceMutation, normalizeRouteForExecution } from "../src/route-guards.ts";
 import type { RouteDecision } from "../src/schemas.ts";
 
 const expectedTopologyMap = new Map([
@@ -24,9 +25,9 @@ test("orchestration eval cases cover chalin and direct decisions", () => {
   assert.equal(summary.total, 19);
   assert.equal(summary.chalinExpected, 13);
   assert.equal(summary.directExpected, 6);
-  assert.equal(summary.byTopology.single, 3);
-  assert.equal(summary.byTopology.chain, 6);
-  assert.equal(summary.byTopology.parallel, 1);
+  assert.equal(summary.byTopology.single, 5);
+  assert.equal(summary.byTopology.chain, 5);
+  assert.equal(summary.byTopology.parallel, undefined);
   assert.equal(summary.byTopology.dag, 2);
   assert.equal(summary.byTopology["memory-only"], 1);
   assert.equal(summary.byTopology.none, 6);
@@ -84,8 +85,12 @@ test("orchestrator prompt teaches LLM-first routing without prompt keyword class
   assert.match(prompt, /Use the available agent roster as tools/i);
   assert.match(prompt, /fixed recipe book/i);
   assert.match(prompt, /staged fan-out\/fan-in/i);
-  assert.match(prompt, /Topology defaults are defaults/i);
+  assert.match(prompt, /Minimal topology defaults are defaults/i);
   assert.match(prompt, /deep project analysis split by folders\/modules -> DAG/i);
+  assert.match(prompt, /architecture or migration across many components -> chain scout -> planner/i);
+  assert.match(prompt, /formal project-wide audit\/test-command-policy review -> single reviewer/i);
+  assert.match(prompt, /local module-splitting\/options comparison -> chain scout -> planner/i);
+  assert.match(prompt, /risky implementation with tests -> chain worker -> reviewer/i);
   assert.match(prompt, /independent writer slices -> DAG/i);
   assert.match(prompt, /memory-only route if direct memory search is unavailable/i);
   assert.match(prompt, /Coverage Matrix/i);
@@ -170,6 +175,26 @@ test("route tool infers mutation intent when a routed implementation omits the m
 
   assert.equal(inferRouteRequiresWorkspaceMutation(route, "Fix the tokenizer and make test must pass."), true);
   assert.equal(inferRouteRequiresWorkspaceMutation(route, "Read-only analysis only; do not modify files."), false);
+});
+
+test("route tool infers mutation intent from delegated step tasks", () => {
+  const route = routeFromPlan({
+    topology: "chain",
+    steps: [
+      { agent: "planner", task: "Plan how to change only the target validation block." },
+      { agent: "reviewer", task: "Review that the patch would avoid rewriting the file." },
+    ],
+    reason: "Parent selected a compact safety workflow.",
+  });
+
+  assert.equal(inferRouteRequiresWorkspaceMutation(route, "Handle the requested work."), true);
+
+  const normalized = normalizeRouteForExecution(route, {
+    requiresWorkspaceMutation: inferRouteRequiresWorkspaceMutation(route, "Handle the requested work."),
+    task: "Handle the requested work.",
+  });
+
+  assert.deepEqual(normalized.agents, ["planner", "worker", "reviewer"]);
 });
 
 test("implementation routes with workers are normalized to include a post-worker reviewer", () => {

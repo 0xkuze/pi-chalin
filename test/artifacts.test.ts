@@ -63,7 +63,9 @@ test("ArtifactStore persists resumable feature state with checkpoints and valida
 
   assert.ok(fs.existsSync(path.join(cwd, ".pi-chalin", "artifacts", "features", "memory-and-artifacts", "state.json")));
   assert.ok(fs.existsSync(path.join(cwd, ".pi-chalin", "artifacts", "features", "memory-and-artifacts", "checkpoints.jsonl")));
-  assert.ok(fs.existsSync(path.join(cwd, ".pi-chalin", "artifacts", "features", "memory-and-artifacts", "skills", "memory-worker", "SKILL.md")));
+  const skillPath = path.join(cwd, ".pi-chalin", "artifacts", "features", "memory-and-artifacts", "skills", "memory-worker", "SKILL.md");
+  assert.ok(fs.existsSync(skillPath));
+  assert.match(fs.readFileSync(skillPath, "utf-8"), /lifecycle: candidate\nexpiresAt: /);
 });
 
 test("ChalinKernel records run artifacts for long or artifact-aware workflows", async () => {

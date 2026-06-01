@@ -11,7 +11,7 @@ import { gradePiTrace, parsePiJsonTrace, type TraceQualityReport, type TraceVari
 import { DEFAULT_JUDGE_MODEL, resolveJudgeTimeoutMs } from "./trace-quality.eval.ts";
 import { summarizeWorkflowImprovementRunSignals, summarizeWorkflowImprovementSignals } from "./workflow-improvement.ts";
 
-const workflowVariants = ["simple", "chalin", "gentle"] as const;
+const workflowVariants = ["simple", "chalin", "chalin-skills-off", "chalin-skills-on", "gentle"] as const;
 export type WorkflowVariant = (typeof workflowVariants)[number];
 export type WorkflowJudgeMode = "none" | "auto" | "pi";
 export type WorkflowComparativeJudgeMode = "none" | "pi" | "content-only" | "both";
@@ -331,11 +331,52 @@ export interface WorkflowBlindJudgeStability {
   recommendation: "enable-comparative-judge" | "rerun-judge-or-check-infrastructure" | "rerun-with-runs>=2" | "candidate-for-promotion" | "inspect-per-run-differences-before-promoting" | "compare-winning-competitor-trajectories";
 }
 
+export interface WorkflowSkillsAbSummary {
+  target: "chalin-skills-on";
+  baseline: "chalin-skills-off";
+  runs: number;
+  comparablePairs: number;
+  targetWins: number;
+  baselineWins: number;
+  skippedJudges: number;
+  blindJudgeWinRate: number;
+  blindJudgeWilson95: { low: number; high: number };
+  exactBinomialTwoSidedP: number;
+  interpretation: "preliminary-positive" | "preliminary-negative" | "inconclusive" | "no-data";
+  totalTokensTarget: number;
+  totalTokensBaseline: number;
+  totalTokensDelta: number;
+  avgTokensTarget: number;
+  avgTokensBaseline: number;
+  avgTokensDelta: number;
+  avgDurationMsTarget: number;
+  avgDurationMsBaseline: number;
+  avgDurationMsDelta: number;
+  avgWorkspaceScoreTarget: number;
+  avgWorkspaceScoreBaseline: number;
+  avgWorkspaceScoreDelta: number;
+  passRateTarget: number;
+  passRateBaseline: number;
+  caseSummaries: Array<{
+    caseId: string;
+    runs: number;
+    targetWins: number;
+    baselineWins: number;
+    winRate: number;
+    exactBinomialTwoSidedP: number;
+    avgTokensDelta: number;
+    avgDurationMsDelta: number;
+    avgWorkspaceScoreDelta: number;
+  }>;
+}
+
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const extensionPath = path.join(repoRoot, "src", "index.ts");
 const defaultGentleRoot = path.resolve(repoRoot, "..", "gentle-pi");
 const defaultMatrixPath = path.join(repoRoot, "evals", "results", "workflow-quality-matrix.jsonl");
 const targetVariant: WorkflowVariant = "chalin";
+const skillsOnVariant = "chalin-skills-on" satisfies WorkflowVariant;
+const skillsOffVariant = "chalin-skills-off" satisfies WorkflowVariant;
 const baselineVariant: WorkflowVariant = "simple";
 const evidenceIgnoredDirs = new Set([".git", "node_modules", ".pi", ".pi-chalin", ".pi-lens", WORKFLOW_ORACLE_DIR, "dist", "coverage", "target"]);
 const gentleCompanionPackages = [
@@ -454,7 +495,36 @@ const workflowPresetArgs = {
     thinking: "adaptive",
     matrixPath: "evals/results/workflow-quality-routed-harness.jsonl",
   },
+  "skills-ab": {
+    mode: "sdk",
+    case: "skills-ab",
+    variant: "skills-ab",
+    runs: "3",
+    timeoutMs: "90000",
+    allowMulti: "1",
+    allowLong: "1",
+    gates: "0",
+    judge: "none",
+    comparativeJudge: "content-only",
+    judgeModel: "zai/glm-5.1",
+    model: "zai/glm-5.1",
+    thinking: "adaptive",
+    storeFailedOutput: "1",
+    matrixPath: "evals/results/workflow-quality-skills-llm-ab.jsonl",
+  },
 } satisfies Record<string, Record<string, string>>;
+
+function isChalinHarnessVariant(variant: WorkflowVariant): boolean {
+  return variant === "chalin" || variant === skillsOffVariant || variant === skillsOnVariant;
+}
+
+function targetVariantForOutputs(outputs: readonly Pick<WorkflowRunOutput, "variant">[]): WorkflowVariant {
+  return outputs.some((output) => output.variant === skillsOnVariant) ? skillsOnVariant : targetVariant;
+}
+
+function baselineVariantForTarget(target: WorkflowVariant): WorkflowVariant {
+  return target === skillsOnVariant ? skillsOffVariant : baselineVariant;
+}
 
 if (isMain()) await main();
 
@@ -565,7 +635,8 @@ async function main(): Promise<void> {
     grouped,
     comparativeJudges,
     contentComparativeJudges: contentComparativeJudges.length ? contentComparativeJudges : undefined,
-    improvementSignals: mode === "sdk" ? summarizeWorkflowImprovementSignals({ outputs, comparativeJudges }) : undefined,
+    improvementSignals: mode === "sdk" && !variants.includes(skillsOnVariant) ? summarizeWorkflowImprovementSignals({ outputs, comparativeJudges }) : undefined,
+    skillsAbSummary: mode === "sdk" && variants.includes(skillsOffVariant) && variants.includes(skillsOnVariant) ? summarizeWorkflowSkillsAb(outputs, comparativeJudges) : undefined,
     categorySummary: summarizeByCategory(outputs),
     failureUx: mode === "fixtures" ? [] : summarizeWorkflowFailures(outputs),
     outputs: outputs.map((item) => compactOutput(item, outputStoragePolicy)),
@@ -643,6 +714,7 @@ export function resolveWorkflowIdleTimeoutMs(value: string | undefined, workflow
 
 export function resolveCaseIds(value: string | undefined): string[] {
   if (!value || value === "all") return listWorkflowEvalCases().map((item) => item.id);
+  if (value === "skills-ab" || value === "skills-llm-ab") return ["holdout-bugfix-date-parser"];
   if (value === "holdout" || value === "holdout-all") return listWorkflowHoldoutCases().map((item) => item.id);
   if (value === "community" || value === "community-all") return listWorkflowCommunityCases().map((item) => item.id);
   if (value === "complex" || value === "complex-all") return listWorkflowComplexCases().map((item) => item.id);
@@ -660,7 +732,8 @@ export function resolveCaseIds(value: string | undefined): string[] {
 export function resolveVariants(value: string | undefined): WorkflowVariant[] {
   if (!value || value === "both" || value === "all") return ["simple", "chalin"];
   if (value === "harnesses" || value === "chalin-vs-gentle") return ["chalin", "gentle"];
-  if (value === "all-harnesses") return [...workflowVariants];
+  if (value === "skills-ab" || value === "skills-llm-ab") return [skillsOffVariant, skillsOnVariant];
+  if (value === "all-harnesses") return ["simple", "chalin", "gentle"];
   if (isWorkflowVariant(value)) return [value];
   throw new Error(`Unsupported workflow variant: ${value}`);
 }
@@ -1031,6 +1104,81 @@ export function summarizeWorkflowBlindJudgeStability(comparativeJudges: readonly
   };
 }
 
+export function summarizeWorkflowSkillsAb(outputs: readonly WorkflowRunOutput[], comparativeJudges: readonly WorkflowComparativeJudgeVerdict[]): WorkflowSkillsAbSummary {
+  const targetOutputs = outputs.filter((output) => output.variant === skillsOnVariant);
+  const baselineOutputs = outputs.filter((output) => output.variant === skillsOffVariant);
+  const comparablePairs = pairedSkillsAbOutputs(outputs);
+  const judges = comparativeJudges.filter((judge) => !judge.skipped && judge.target === skillsOnVariant);
+  const targetWins = judges.filter((judge) => judge.targetWins).length;
+  const baselineWins = judges.filter((judge) => judge.winnerVariant === skillsOffVariant).length;
+  const skippedJudges = comparativeJudges.filter((judge) => judge.skipped && judge.target === skillsOnVariant).length;
+  const winRate = judges.length > 0 ? round(targetWins / judges.length, 3) : 0;
+  const caseIds = [...new Set(outputs.map((output) => output.workspace.caseId))];
+  return {
+    target: skillsOnVariant,
+    baseline: skillsOffVariant,
+    runs: Math.max(targetOutputs.length, baselineOutputs.length),
+    comparablePairs: comparablePairs.length,
+    targetWins,
+    baselineWins,
+    skippedJudges,
+    blindJudgeWinRate: winRate,
+    blindJudgeWilson95: wilsonInterval(targetWins, judges.length),
+    exactBinomialTwoSidedP: exactBinomialTwoSidedP(targetWins, judges.length),
+    interpretation: skillsAbInterpretation(targetWins, baselineWins, judges.length),
+    totalTokensTarget: targetOutputs.reduce((sum, output) => sum + output.diagnostics.tokenTotal, 0),
+    totalTokensBaseline: baselineOutputs.reduce((sum, output) => sum + output.diagnostics.tokenTotal, 0),
+    totalTokensDelta: targetOutputs.reduce((sum, output) => sum + output.diagnostics.tokenTotal, 0) - baselineOutputs.reduce((sum, output) => sum + output.diagnostics.tokenTotal, 0),
+    avgTokensTarget: avg(targetOutputs.map((output) => output.diagnostics.tokenTotal)),
+    avgTokensBaseline: avg(baselineOutputs.map((output) => output.diagnostics.tokenTotal)),
+    avgTokensDelta: avg(comparablePairs.map((pair) => pair.target.diagnostics.tokenTotal - pair.baseline.diagnostics.tokenTotal)),
+    avgDurationMsTarget: avg(targetOutputs.map((output) => output.durationMs)),
+    avgDurationMsBaseline: avg(baselineOutputs.map((output) => output.durationMs)),
+    avgDurationMsDelta: avg(comparablePairs.map((pair) => pair.target.durationMs - pair.baseline.durationMs)),
+    avgWorkspaceScoreTarget: avg(targetOutputs.map((output) => output.workspace.score)),
+    avgWorkspaceScoreBaseline: avg(baselineOutputs.map((output) => output.workspace.score)),
+    avgWorkspaceScoreDelta: avg(comparablePairs.map((pair) => pair.target.workspace.score - pair.baseline.workspace.score)),
+    passRateTarget: targetOutputs.length ? round(targetOutputs.filter(outputPass).length / targetOutputs.length, 3) : 0,
+    passRateBaseline: baselineOutputs.length ? round(baselineOutputs.filter(outputPass).length / baselineOutputs.length, 3) : 0,
+    caseSummaries: caseIds.map((caseId) => summarizeWorkflowSkillsAbCase(caseId, outputs, comparativeJudges)),
+  };
+}
+
+function pairedSkillsAbOutputs(outputs: readonly WorkflowRunOutput[], caseId?: string): Array<{ target: WorkflowRunOutput; baseline: WorkflowRunOutput }> {
+  const pairs: Array<{ target: WorkflowRunOutput; baseline: WorkflowRunOutput }> = [];
+  const targetOutputs = outputs.filter((output) => output.variant === skillsOnVariant && (!caseId || output.workspace.caseId === caseId));
+  for (const target of targetOutputs) {
+    const baseline = outputs.find((output) => output.variant === skillsOffVariant && output.workspace.caseId === target.workspace.caseId && output.runIndex === target.runIndex);
+    if (baseline) pairs.push({ target, baseline });
+  }
+  return pairs;
+}
+
+function summarizeWorkflowSkillsAbCase(caseId: string, outputs: readonly WorkflowRunOutput[], comparativeJudges: readonly WorkflowComparativeJudgeVerdict[]): WorkflowSkillsAbSummary["caseSummaries"][number] {
+  const pairs = pairedSkillsAbOutputs(outputs, caseId);
+  const judges = comparativeJudges.filter((judge) => !judge.skipped && judge.caseId === caseId && judge.target === skillsOnVariant);
+  const targetWins = judges.filter((judge) => judge.targetWins).length;
+  const baselineWins = judges.filter((judge) => judge.winnerVariant === skillsOffVariant).length;
+  return {
+    caseId,
+    runs: pairs.length,
+    targetWins,
+    baselineWins,
+    winRate: judges.length > 0 ? round(targetWins / judges.length, 3) : 0,
+    exactBinomialTwoSidedP: exactBinomialTwoSidedP(targetWins, judges.length),
+    avgTokensDelta: avg(pairs.map((pair) => pair.target.diagnostics.tokenTotal - pair.baseline.diagnostics.tokenTotal)),
+    avgDurationMsDelta: avg(pairs.map((pair) => pair.target.durationMs - pair.baseline.durationMs)),
+    avgWorkspaceScoreDelta: avg(pairs.map((pair) => pair.target.workspace.score - pair.baseline.workspace.score)),
+  };
+}
+
+function skillsAbInterpretation(targetWins: number, baselineWins: number, samples: number): WorkflowSkillsAbSummary["interpretation"] {
+  if (samples === 0) return "no-data";
+  if (targetWins === baselineWins) return "inconclusive";
+  if (targetWins > baselineWins) return "preliminary-positive";
+  return "preliminary-negative";
+}
+
 export function shouldRetainWorkflowFixture(output: Pick<WorkflowRunOutput, "workspace" | "trace" | "diagnostics" | "judge">, env: NodeJS.ProcessEnv = process.env): boolean {
   if (env.PI_CHALIN_WORKFLOW_KEEP_FIXTURE === "1") return true;
   if (env.PI_CHALIN_WORKFLOW_KEEP_FAILED_FIXTURE === "0") return false;
@@ -1054,6 +1202,8 @@ export function buildWorkflowJudgePrompt(output: Pick<WorkflowRunOutput, "varian
 function workflowEvalPass(outputs: WorkflowRunOutput[], grouped: Array<{ pass: boolean }>): boolean {
   const hasBothVariants = outputs.some((item) => item.variant === "simple") && outputs.some((item) => item.variant === "chalin");
   const hasHarnessComparison = outputs.some((item) => item.variant === "chalin") && outputs.some((item) => item.variant === "gentle");
+  const hasSkillsComparison = outputs.some((item) => item.variant === skillsOffVariant) && outputs.some((item) => item.variant === skillsOnVariant);
+  if (hasSkillsComparison) return outputs.filter((item) => item.variant === skillsOnVariant).every(outputPass) && grouped.every((item) => item.pass);
   if (hasHarnessComparison) return outputs.filter((item) => item.variant === "chalin").every(outputPass) && grouped.every((item) => item.pass);
   if (hasBothVariants) return outputs.filter((item) => item.variant === "chalin").every(outputPass) && grouped.every((item) => item.pass);
   return outputs.every(outputPass);
@@ -1090,7 +1240,7 @@ function outputContentPass(output: WorkflowRunOutput): boolean {
   const evalCase = typeof output.workspace.caseId === "string" ? getWorkflowEvalCase(output.workspace.caseId) : undefined;
   const requiresVerification = Boolean(evalCase?.expected.validation?.runTests);
   const orchestrationPass = !evalCase
-    || (output.variant === "chalin"
+    || (isChalinHarnessVariant(output.variant)
       ? !shouldRequireChalinRoute(evalCase) || (output.diagnostics.chalinRouteCalls ?? 0) > 0
       : output.variant === "gentle"
         ? !shouldRequireGentleSubagent(evalCase) || (output.diagnostics.subagentCalls ?? 0) > 0
@@ -1142,9 +1292,10 @@ export function summarizeComparison(outputs: WorkflowRunOutput[], comparativeJud
   return caseIds.map((caseId) => {
     const runsByVariant = Object.fromEntries(workflowVariants.map((variant) => [variant, runsForVariant(outputs, caseId, variant)])) as Record<WorkflowVariant, WorkflowRunOutput[]>;
     const variants = Object.fromEntries(workflowVariants.map((variant) => [variant, summarizeVariant(runsByVariant[variant])])) as Partial<Record<WorkflowVariant, VariantStats>>;
-    const targetInfraFailure = runsByVariant[targetVariant].find(blockingInfrastructureFailure)?.diagnostics.infrastructureFailure;
+    const targetName = targetVariantForOutputs(outputs.filter((item) => item.workspace.caseId === caseId));
+    const targetInfraFailure = runsByVariant[targetName].find(blockingInfrastructureFailure)?.diagnostics.infrastructureFailure;
     const caseComparativeJudges = comparativeJudges.filter((item) => item.caseId === caseId);
-    const comparisons = buildWorkflowComparisons(variants, { caseId, chalinRuns: runsByVariant.chalin, comparativeJudges: caseComparativeJudges });
+    const comparisons = buildWorkflowComparisons(variants, { caseId, targetName, targetRuns: runsByVariant[targetName], comparativeJudges: caseComparativeJudges });
     const comparativeJudgeReason = caseComparativeJudges.length
       ? `blind-judge ${caseComparativeJudges.map((item) => `run${item.runIndex}:winner=${item.winnerVariant ?? item.winnerLabel ?? "unknown"},targetRank=${item.targetRank ?? "n/a"}`).join(", ")}`
       : "";
@@ -1189,31 +1340,32 @@ function runsForVariant(outputs: WorkflowRunOutput[], caseId: string, variant: W
   return outputs.filter((item) => item.workspace.caseId === caseId && item.variant === variant);
 }
 
-function buildWorkflowComparisons(variants: Partial<Record<WorkflowVariant, VariantStats>>, options: { caseId: string; chalinRuns: WorkflowRunOutput[]; comparativeJudges: WorkflowComparativeJudgeVerdict[] }): WorkflowPairComparison[] {
-  const target = variants[targetVariant];
+function buildWorkflowComparisons(variants: Partial<Record<WorkflowVariant, VariantStats>>, options: { caseId: string; targetName: WorkflowVariant; targetRuns: WorkflowRunOutput[]; comparativeJudges: WorkflowComparativeJudgeVerdict[] }): WorkflowPairComparison[] {
+  const target = variants[options.targetName];
   if (!target) return [];
   const comparisons: WorkflowPairComparison[] = [];
-  const simple = variants[baselineVariant];
+  const baselineName = baselineVariantForTarget(options.targetName);
+  const simple = variants[baselineName];
   if (simple) {
     const evalCase = getWorkflowEvalCase(options.caseId);
-    const comparison = compareChalinToSimple(target, simple, options.chalinRuns, options.comparativeJudges, workflowCaseMaxDurationMs(options.caseId), isBoundedDirectWorkflowCase(evalCase));
-    comparisons.push({ kind: "baseline", target: targetVariant, baseline: baselineVariant, ...comparison });
+    const comparison = compareChalinToSimple(target, simple, options.targetRuns, options.comparativeJudges, options.targetName, baselineName, workflowCaseMaxDurationMs(options.caseId), isBoundedDirectWorkflowCase(evalCase));
+    comparisons.push({ kind: "baseline", target: options.targetName, baseline: baselineName, ...comparison });
   }
   for (const competitor of Object.keys(variants) as WorkflowVariant[]) {
-    if (competitor === targetVariant || competitor === baselineVariant) continue;
+    if (competitor === options.targetName || competitor === baselineName) continue;
     const stats = variants[competitor];
     if (!stats) continue;
-    const comparison = compareChalinToCompetitor(target, stats, competitor, options.chalinRuns, options.comparativeJudges);
-    comparisons.push({ kind: "competitor", target: targetVariant, baseline: competitor, ...comparison });
+    const comparison = compareChalinToCompetitor(target, stats, competitor, options.targetRuns, options.comparativeJudges, options.targetName);
+    comparisons.push({ kind: "competitor", target: options.targetName, baseline: competitor, ...comparison });
   }
   return comparisons;
 }
 
-function compareChalinToSimple(chalin: VariantStats, simple: VariantStats, chalinRuns: WorkflowRunOutput[], comparativeJudges: WorkflowComparativeJudgeVerdict[], caseMaxDurationMs?: number, boundedDirect = false): { pass: boolean; reason: string } {
+function compareChalinToSimple(chalin: VariantStats, simple: VariantStats, chalinRuns: WorkflowRunOutput[], comparativeJudges: WorkflowComparativeJudgeVerdict[], targetName = targetVariant, baselineName = baselineVariant, caseMaxDurationMs?: number, boundedDirect = false): { pass: boolean; reason: string } {
   const chalinReliabilityComparable = chalin.passRate >= simple.passRate;
   const chalinReliabilityDominates = chalin.passRate > simple.passRate;
-  const blindJudgeAvailable = hasBlindJudgeComparison(comparativeJudges, baselineVariant);
-  const blindJudgeQualityDominates = blindJudgeDominatesCompetitor(comparativeJudges, baselineVariant);
+  const blindJudgeAvailable = hasBlindJudgeComparison(comparativeJudges, baselineName, targetName);
+  const blindJudgeQualityDominates = blindJudgeDominatesCompetitor(comparativeJudges, baselineName, targetName);
   const qualityFloor = Math.max(90, simple.avgWorkspaceQualityScore - 5);
   const chalinQualityComparable = chalin.avgWorkspaceQualityScore >= qualityFloor
     || (chalin.passRate > 0 && blindJudgeQualityDominates);
@@ -1248,7 +1400,7 @@ function compareChalinToSimple(chalin: VariantStats, simple: VariantStats, chali
       && (blindJudgeAvailable ? blindJudgeQualityDominates : chalinQualityDominates)
       && boundedEfficiencyPass
       && (!boundedDirect || chalinTokenEfficient),
-    reason: `chalinAvg=${chalin.avgWorkspaceScore}, simpleAvg=${simple.avgWorkspaceScore}, chalinQuality=${chalin.avgWorkspaceQualityScore}, simpleQuality=${simple.avgWorkspaceQualityScore}, chalinPass=${chalin.passRate}, simplePass=${simple.passRate}, chalinP95=${chalin.p95DurationMs}ms, simpleP95=${simple.p95DurationMs}ms, chalinTokens=${chalin.avgTokens}, simpleTokens=${simple.avgTokens}, simpleTokenBudget=${tokenBudget}, boundedDirect:${boundedDirect ? "yes" : "no"}, qualityDominates:${chalinQualityDominates ? "yes" : "no"}, qualityGate:${blindJudgeAvailable ? "blind-judge" : chalinQualityDominates ? "dominates" : "required"}, blindJudgeQualityDominates:${blindJudgeQualityDominates ? "accepted" : blindJudgeAvailable ? "rejected" : "unavailable"}, reliabilityDominates:${chalinReliabilityDominates ? "yes" : "no"}, efficiencyGate:${chalinEfficiencyComparable ? chalinWithinCaseBudget && chalinReliabilityDominates && chalinQualityDominates && chalin.p95DurationMs > chalinEfficiencyBudget ? "case-budget-dominance" : "reasonable" : chalinReliabilityQualityDominates ? "skipped-reliability-dominates" : "exceeded"}, tokenGate:${tokenGateRequired ? chalinTokenEfficient ? "reasonable" : "exceeded" : "skipped-reliability-dominates"}, deterministicEfficiencyGate:${boundedDirect ? chalinReliabilityQualityDominates && !chalinEfficiencyComparable ? "skipped-reliability-dominates" : "blocking-for-bounded-direct" : "observed-only"}${chalinP95InflatedByRecoveredInfra ? ", chalinP95RecoveredInfra=true" : ""}`,
+    reason: `${targetName}Avg=${chalin.avgWorkspaceScore}, ${baselineName}Avg=${simple.avgWorkspaceScore}, ${targetName}Quality=${chalin.avgWorkspaceQualityScore}, ${baselineName}Quality=${simple.avgWorkspaceQualityScore}, ${targetName}Pass=${chalin.passRate}, ${baselineName}Pass=${simple.passRate}, ${targetName}P95=${chalin.p95DurationMs}ms, ${baselineName}P95=${simple.p95DurationMs}ms, ${targetName}Tokens=${chalin.avgTokens}, ${baselineName}Tokens=${simple.avgTokens}, ${baselineName}TokenBudget=${tokenBudget}, boundedDirect:${boundedDirect ? "yes" : "no"}, qualityDominates:${chalinQualityDominates ? "yes" : "no"}, qualityGate:${blindJudgeAvailable ? "blind-judge" : chalinQualityDominates ? "dominates" : "required"}, blindJudgeQualityDominates:${blindJudgeQualityDominates ? "accepted" : blindJudgeAvailable ? "rejected" : "unavailable"}, reliabilityDominates:${chalinReliabilityDominates ? "yes" : "no"}, efficiencyGate:${chalinEfficiencyComparable ? chalinWithinCaseBudget && chalinReliabilityDominates && chalinQualityDominates && chalin.p95DurationMs > chalinEfficiencyBudget ? "case-budget-dominance" : "reasonable" : chalinReliabilityQualityDominates ? "skipped-reliability-dominates" : "exceeded"}, tokenGate:${tokenGateRequired ? chalinTokenEfficient ? "reasonable" : "exceeded" : "skipped-reliability-dominates"}, deterministicEfficiencyGate:${boundedDirect ? chalinReliabilityQualityDominates && !chalinEfficiencyComparable ? "skipped-reliability-dominates" : "blocking-for-bounded-direct" : "observed-only"}${chalinP95InflatedByRecoveredInfra ? `, ${targetName}P95RecoveredInfra=true` : ""}`,
   };
 }
 
@@ -1260,7 +1412,7 @@ function workflowCaseMaxDurationMs(caseId: string): number | undefined {
   }
 }
 
-function compareChalinToCompetitor(chalin: VariantStats, competitor: VariantStats, competitorName: WorkflowVariant, chalinRuns: WorkflowRunOutput[], comparativeJudges: WorkflowComparativeJudgeVerdict[]): { pass: boolean; reason: string } {
+function compareChalinToCompetitor(chalin: VariantStats, competitor: VariantStats, competitorName: WorkflowVariant, chalinRuns: WorkflowRunOutput[], comparativeJudges: WorkflowComparativeJudgeVerdict[], targetName = targetVariant): { pass: boolean; reason: string } {
   const p95NoiseBudgetMs = p95ComparisonNoiseBudgetMs(competitor.p95DurationMs);
   const tokenNoiseBudget = tokenComparisonNoiseBudget(competitor.avgTokens);
   const requiresGentleTokenWin = competitorName === "gentle";
@@ -1271,8 +1423,8 @@ function compareChalinToCompetitor(chalin: VariantStats, competitor: VariantStat
   const p95Comparable = chalin.p95DurationMs <= competitor.p95DurationMs + p95NoiseBudgetMs || chalinP95InflatedByRecoveredInfra;
   const tokensComparable = chalin.avgTokens <= competitor.avgTokens + tokenNoiseBudget;
   const tokensStronglyBetter = chalin.avgTokens <= Math.round(competitor.avgTokens * 0.85) + tokenNoiseBudget;
-  const blindJudgeAvailable = hasBlindJudgeComparison(comparativeJudges, competitorName);
-  const blindJudgeQualityDominates = blindJudgeDominatesCompetitor(comparativeJudges, competitorName);
+  const blindJudgeAvailable = hasBlindJudgeComparison(comparativeJudges, competitorName, targetName);
+  const blindJudgeQualityDominates = blindJudgeDominatesCompetitor(comparativeJudges, competitorName, targetName);
   const workspaceBlindJudgeOverride = blindJudgeQualityDominates
     && chalin.avgWorkspaceQualityScore < competitor.avgWorkspaceQualityScore
     && chalin.passRate > 0
@@ -1326,7 +1478,7 @@ function compareChalinToCompetitor(chalin: VariantStats, competitor: VariantStat
   return {
     pass: qualityChecks.every(([, pass]) => pass)
       && (blindJudgeAvailable ? blindJudgeQualityDominates : chalinQualityDominates),
-    reason: `chalin-vs-${competitorName} ${[
+    reason: `${targetName}-vs-${competitorName} ${[
       ...qualityChecks.map(([name, , evidence]) => `${name}:${evidence}`),
       `blendedWorkspace:${chalin.avgWorkspaceScore}>=${competitor.avgWorkspaceScore}`,
       ...efficiencyChecks.map(([name, , evidence]) => `${name}:${evidence}`),
@@ -1349,19 +1501,20 @@ function compareChalinToCompetitor(chalin: VariantStats, competitor: VariantStat
   };
 }
 
-function hasBlindJudgeComparison(comparativeJudges: WorkflowComparativeJudgeVerdict[], competitorName: WorkflowVariant): boolean {
+function hasBlindJudgeComparison(comparativeJudges: WorkflowComparativeJudgeVerdict[], competitorName: WorkflowVariant, targetName = targetVariant): boolean {
   return comparativeJudges.some((judge) => !judge.skipped
-    && judge.target === targetVariant
+    && judge.target === targetName
     && judge.candidates.some((candidate) => candidate.variant === competitorName));
 }
 
-function blindJudgeDominatesCompetitor(comparativeJudges: WorkflowComparativeJudgeVerdict[], competitorName: WorkflowVariant): boolean {
+function blindJudgeDominatesCompetitor(comparativeJudges: WorkflowComparativeJudgeVerdict[], competitorName: WorkflowVariant, targetName = targetVariant): boolean {
   const relevant = comparativeJudges.filter((judge) => !judge.skipped
-    && judge.target === targetVariant
+    && judge.target === targetName
     && judge.candidates.some((candidate) => candidate.variant === competitorName));
   if (relevant.length === 0) return false;
   const wins = relevant.filter((judge) => judge.targetWins).length;
-  return wins / relevant.length >= 0.7;
+  const threshold = targetName === skillsOnVariant ? 0.5 : 0.7;
+  return wins / relevant.length > threshold;
 }
 
 function simpleBaselineTokenBudget(simpleAvgTokens: number): number {
@@ -1472,7 +1625,7 @@ function cloneWorkflowFixture(seedFixture: WorkflowFixture, variant: WorkflowVar
 
 function workflowVariantEnv(variant: WorkflowVariant, model: string | undefined): Record<string, string | undefined> {
   return {
-    PI_CHALIN_EVAL_AGENT_MODEL: variant === "chalin" ? model : undefined,
+    PI_CHALIN_EVAL_AGENT_MODEL: isChalinHarnessVariant(variant) ? model : undefined,
     PI_CHALIN_GENTLE_COMPANIONS_ROOT: undefined,
     PI_CHALIN_GENTLE_PI_ROOT: undefined,
   };
@@ -1482,6 +1635,7 @@ async function runSdkCase(evalCase: WorkflowEvalCase, variant: WorkflowVariant, 
   const fixture = fixtureOptions.seedFixture
     ? cloneWorkflowFixture(fixtureOptions.seedFixture, variant)
     : createWorkflowFixture(evalCase.id, { promptVariantIndex: workflowPromptVariantIndexForRun(runIndex) });
+  prepareWorkflowFixtureForVariant(fixture.cwd, variant);
   const initialFixtureFingerprint = fixtureOptions.initialFixtureFingerprint ?? workflowFixtureFingerprint(fixture.cwd);
   const started = Date.now();
   const args = [
@@ -1526,9 +1680,21 @@ async function runSdkCase(evalCase: WorkflowEvalCase, variant: WorkflowVariant, 
   return output;
 }
 
+function prepareWorkflowFixtureForVariant(cwd: string, variant: WorkflowVariant): void {
+  if (variant !== skillsOffVariant && variant !== skillsOnVariant) return;
+  const configDir = path.join(cwd, ".pi-chalin");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, "config.json"), `${JSON.stringify({
+    skills: {
+      enabled: variant === skillsOnVariant,
+      autoActivation: true,
+    },
+  }, null, 2)}\n`, "utf-8");
+}
+
 export function toolsForWorkflowVariant(variant: WorkflowVariant, evalCase: WorkflowEvalCase, options: Partial<Pick<WorkflowRunOptions, "gentleCompanionRoot">> = {}): string {
   const tools = "read,bash,grep,find,ls,edit,write";
-  if (variant === "chalin" && evalCase.kind === "review-only") {
+  if (isChalinHarnessVariant(variant) && evalCase.kind === "review-only") {
     return `${tools},chalin_project_discovery,chalin_project_snapshot,chalin_route`;
   }
   if (variant === "gentle") {
@@ -1539,11 +1705,11 @@ export function toolsForWorkflowVariant(variant: WorkflowVariant, evalCase: Work
     }
     if (companionRoot) return `${tools},${gentleCompanionTools.join(",")}`;
   }
-  return variant === "chalin" ? `${tools},chalin_project_discovery,chalin_project_snapshot,chalin_route` : tools;
+  return isChalinHarnessVariant(variant) ? `${tools},chalin_project_discovery,chalin_project_snapshot,chalin_route` : tools;
 }
 
 function extensionArgsForWorkflowVariant(variant: WorkflowVariant, options: Pick<WorkflowRunOptions, "gentleRoot" | "gentleCompanionRoot">): string[] {
-  if (variant === "chalin") return ["-e", extensionPath];
+  if (isChalinHarnessVariant(variant)) return ["-e", extensionPath];
   if (variant !== "gentle") return [];
   const root = resolveGentlePiRoot(options.gentleRoot);
   const args = [
@@ -1675,18 +1841,19 @@ async function runWorkflowComparativeJudges(outputs: WorkflowRunOutput[], option
     if (!caseId || !runIndexText) continue;
     const runIndex = Number(runIndexText);
     const candidates = outputs.filter((output) => output.workspace.caseId === caseId && output.runIndex === runIndex);
-    if (!candidates.some((output) => output.variant === targetVariant) || candidates.length < 2) continue;
+    const targetName = targetVariantForOutputs(candidates);
+    if (!candidates.some((output) => output.variant === targetName) || candidates.length < 2) continue;
     const prefix = judgeKind === "content-only" ? "content-only comparative judge" : "comparative judge";
     console.log(`${prefix}: ${caseId}#${runIndex} start candidates=${candidates.map((item) => item.variant).join(",")} model=${options.judgeModel ?? DEFAULT_JUDGE_MODEL}`);
-    const verdict = await runWorkflowComparativeJudge(getWorkflowEvalCase(caseId), runIndex, candidates, options, judgeKind);
+    const verdict = await runWorkflowComparativeJudge(getWorkflowEvalCase(caseId), runIndex, candidates, options, judgeKind, targetName);
     console.log(`${prefix}: ${caseId}#${runIndex} done winner=${verdict.winnerVariant ?? verdict.winnerLabel ?? "none"} targetWins=${verdict.targetWins}${verdict.skipped ? ` skipped=${verdict.reason ?? "unknown"}` : ""}`);
     verdicts.push(verdict);
   }
   return verdicts;
 }
 
-async function runWorkflowComparativeJudge(evalCase: WorkflowEvalCase, runIndex: number, candidates: WorkflowRunOutput[], options: Pick<WorkflowRunOptions, "judgeModel" | "judgeTimeoutMs">, judgeKind: WorkflowComparativeJudgeKind): Promise<WorkflowComparativeJudgeVerdict> {
-  const infrastructureSkip = buildWorkflowComparativeJudgeInfrastructureSkip(evalCase, runIndex, candidates, judgeKind);
+async function runWorkflowComparativeJudge(evalCase: WorkflowEvalCase, runIndex: number, candidates: WorkflowRunOutput[], options: Pick<WorkflowRunOptions, "judgeModel" | "judgeTimeoutMs">, judgeKind: WorkflowComparativeJudgeKind, targetName = targetVariant): Promise<WorkflowComparativeJudgeVerdict> {
+  const infrastructureSkip = buildWorkflowComparativeJudgeInfrastructureSkip(evalCase, runIndex, candidates, judgeKind, targetName);
   if (infrastructureSkip) return infrastructureSkip;
   const blockingCandidates = candidates.filter(blockingInfrastructureFailure);
   const infrastructureWarnings = blockingCandidates.map((output) => {
@@ -1715,20 +1882,20 @@ async function runWorkflowComparativeJudge(evalCase: WorkflowEvalCase, runIndex:
         throw new Error("judge output missing valid winner/ranking labels");
       }
       const winnerVariant = blinded.find((item) => item.label === winnerLabel)?.output.variant;
-      const targetLabel = blinded.find((item) => item.output.variant === targetVariant)?.label;
+      const targetLabel = blinded.find((item) => item.output.variant === targetName)?.label;
       const targetRank = targetLabel ? ranking.indexOf(targetLabel) + 1 : undefined;
       const scores = parseScoreMap(parsed.scores, allowedLabels);
       const verdict = {
         caseId: evalCase.id,
         runIndex,
-        target: targetVariant,
+        target: targetName,
         judgeKind,
         candidates: blinded.map((item) => candidateSummary(item)),
         winnerLabel,
         winnerVariant,
         ranking,
         scores,
-        targetWins: winnerVariant === targetVariant && (targetRank === undefined || targetRank === 1),
+        targetWins: winnerVariant === targetName && (targetRank === undefined || targetRank === 1),
         targetRank: targetRank && targetRank > 0 ? targetRank : undefined,
         verdict: typeof parsed.verdict === "string" ? parsed.verdict : "No verdict",
         critical: Array.isArray(parsed.critical) ? parsed.critical.filter((item): item is string => typeof item === "string") : [],
@@ -1744,7 +1911,7 @@ async function runWorkflowComparativeJudge(evalCase: WorkflowEvalCase, runIndex:
   return {
     caseId: evalCase.id,
     runIndex,
-    target: targetVariant,
+    target: targetName,
     judgeKind,
     candidates: blinded.map((item) => candidateSummary(item)),
     ranking: [],
@@ -1792,11 +1959,11 @@ export function enforceWorkflowImplementationComparativeWinner(evalCase: Pick<Wo
   };
 }
 
-export function buildWorkflowComparativeJudgeInfrastructureSkip(evalCase: WorkflowEvalCase, runIndex: number, candidates: WorkflowRunOutput[], judgeKind: WorkflowComparativeJudgeKind = "operational"): WorkflowComparativeJudgeVerdict | undefined {
+export function buildWorkflowComparativeJudgeInfrastructureSkip(evalCase: WorkflowEvalCase, runIndex: number, candidates: WorkflowRunOutput[], judgeKind: WorkflowComparativeJudgeKind = "operational", targetName = targetVariant): WorkflowComparativeJudgeVerdict | undefined {
   const blocking = candidates.filter(blockingInfrastructureFailure);
   if (blocking.length === 0) return undefined;
 
-  const targetBlocked = blocking.some((output) => output.variant === targetVariant);
+  const targetBlocked = blocking.some((output) => output.variant === targetName);
   const usableCandidates = candidates.filter((output) => !blockingInfrastructureFailure(output));
   if (!targetBlocked && usableCandidates.length >= 2) return undefined;
 
@@ -1809,7 +1976,7 @@ export function buildWorkflowComparativeJudgeInfrastructureSkip(evalCase: Workfl
   return {
     caseId: evalCase.id,
     runIndex,
-    target: targetVariant,
+    target: targetName,
     judgeKind,
     candidates: blinded.map((item) => candidateSummary(item)),
     ranking: [],
@@ -2824,7 +2991,7 @@ function shouldPersistMatrix(args: Record<string, string>): boolean {
   return args.persistMatrix !== "0" && process.env.PI_CHALIN_WORKFLOW_PERSIST_MATRIX !== "0";
 }
 
-function appendMatrixRows(matrixPath: string, report: { startedAt: string; finishedAt: string; mode: string; cases: string[]; variants: WorkflowVariant[]; runs: number; pass: boolean; grouped: WorkflowComparisonSummary[]; comparativeJudges?: WorkflowComparativeJudgeVerdict[]; contentComparativeJudges?: WorkflowComparativeJudgeVerdict[]; improvementSignals?: ReturnType<typeof summarizeWorkflowImprovementSignals>; git: object; model: string; judgeModel?: string; regressionGates: WorkflowRegressionGates; categorySummary?: unknown; failureUx?: unknown }, reportPath?: string): void {
+function appendMatrixRows(matrixPath: string, report: { startedAt: string; finishedAt: string; mode: string; cases: string[]; variants: WorkflowVariant[]; runs: number; pass: boolean; grouped: WorkflowComparisonSummary[]; comparativeJudges?: WorkflowComparativeJudgeVerdict[]; contentComparativeJudges?: WorkflowComparativeJudgeVerdict[]; improvementSignals?: ReturnType<typeof summarizeWorkflowImprovementSignals>; skillsAbSummary?: WorkflowSkillsAbSummary; git: object; model: string; judgeModel?: string; regressionGates: WorkflowRegressionGates; categorySummary?: unknown; failureUx?: unknown }, reportPath?: string): void {
   fs.mkdirSync(path.dirname(matrixPath), { recursive: true });
   const rows = report.grouped.map((group) => ({
     schemaVersion: 6,
@@ -2844,6 +3011,7 @@ function appendMatrixRows(matrixPath: string, report: { startedAt: string; finis
     contentComparativeJudges: report.contentComparativeJudges?.filter((judge) => judge.caseId === group.caseId),
     blindJudgeStability: summarizeWorkflowBlindJudgeStability(group.comparativeJudges),
     improvementSignals: filterWorkflowImprovementSummaryForCase(report.improvementSignals, group.caseId),
+    skillsAbSummary: report.skillsAbSummary,
     stats: group.variants,
     categorySummary: report.categorySummary,
     failureUx: report.failureUx,
@@ -3024,7 +3192,7 @@ export function extractFinalText(stdout: string): string {
 
 export function effectiveWorkflowFinalText(stdout: string, finalText: string, variant: WorkflowVariant): string {
   if (finalText.trim()) return finalText;
-  if (variant !== "chalin") return finalText;
+  if (!isChalinHarnessVariant(variant)) return finalText;
   return executableChalinRouteResult(stdout) ?? finalText;
 }
 
@@ -3344,6 +3512,44 @@ function percentile(sortedItems: number[], p: number): number {
 function round(value: number, places: number): number {
   const factor = 10 ** places;
   return Math.round(value * factor) / factor;
+}
+
+function wilsonInterval(successes: number, samples: number, z = 1.96): { low: number; high: number } {
+  if (samples <= 0) return { low: 0, high: 0 };
+  const p = successes / samples;
+  const z2 = z * z;
+  const denominator = 1 + z2 / samples;
+  const center = (p + z2 / (2 * samples)) / denominator;
+  const margin = (z * Math.sqrt((p * (1 - p) + z2 / (4 * samples)) / samples)) / denominator;
+  return {
+    low: round(Math.max(0, center - margin), 3),
+    high: round(Math.min(1, center + margin), 3),
+  };
+}
+
+function exactBinomialTwoSidedP(successes: number, samples: number): number {
+  if (samples <= 0) return 1;
+  const observedTail = Math.min(binomialCdf(successes, samples, 0.5), 1 - binomialCdf(successes - 1, samples, 0.5));
+  return round(Math.min(1, observedTail * 2), 4);
+}
+
+function binomialCdf(successes: number, samples: number, p: number): number {
+  if (successes < 0) return 0;
+  let total = 0;
+  for (let k = 0; k <= Math.min(successes, samples); k += 1) {
+    total += binomialCoefficient(samples, k) * (p ** k) * ((1 - p) ** (samples - k));
+  }
+  return total;
+}
+
+function binomialCoefficient(n: number, k: number): number {
+  if (k < 0 || k > n) return 0;
+  const effectiveK = Math.min(k, n - k);
+  let result = 1;
+  for (let index = 1; index <= effectiveK; index += 1) {
+    result = (result * (n - effectiveK + index)) / index;
+  }
+  return result;
 }
 
 function parseArgs(items: string[]): Record<string, string> {
