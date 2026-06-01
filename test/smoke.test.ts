@@ -9,7 +9,7 @@ import { resetAutorouteToolStateForTests, shouldUseCompactDirectOrchestrationPro
 import { getDirectToolEventsForTests, getLatestRun, resetRuntimeState, setLatestRun, setLiveStepSession } from "../src/runtime-state.ts";
 import { openAgentManager, openAgentModelPicker, openSkillManager } from "../src/ui-agents.ts";
 import { openMemoryReview, openMemoryReviewWithLoading, openSmartPanel, openWebFetchAuditPanel, summarizeRuntimeGuards } from "../src/ui.ts";
-import { finalAnswerMaterial } from "../src/route-format.ts";
+import { finalAnswerMaterial, formatRoute } from "../src/route-format.ts";
 import { formatChalinRoutePlanWidget, formatChalinRunWidget } from "../src/route-widget.ts";
 import { createRunState, persistRun } from "../src/runner-state.ts";
 import { chalinFooterText } from "../src/ui-status.ts";
@@ -3157,6 +3157,41 @@ test("observability lifecycle spans cover run stage review repair checkpoint int
   assert.doesNotMatch(JSON.stringify(spans), /sk-live-secret|api_key=abc/);
 });
 
+test("observability does not create lifecycle spans for DAG stages that never started", () => {
+  const startedAt = Date.now();
+  const route: RunState["route"] = {
+    kind: "multi-agent-dag",
+    agents: ["scout", "planner"],
+    risk: "low",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    reason: "Analyze and synthesize.",
+    plan: {
+      kind: "dag",
+      stages: [
+        { id: "evidence", tasks: [{ agent: "scout", task: "Map evidence." }] },
+        { id: "synthesis", tasks: [{ agent: "planner", task: "Synthesize." }] },
+      ],
+    },
+  };
+  const run = createRunState(route, tempDir("pi-chalin-observe-pending-stage-"));
+  run.status = "paused";
+  run.startedAt = new Date(startedAt).toISOString();
+  run.endedAt = new Date(startedAt + 120000).toISOString();
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.startedAt = new Date(startedAt).toISOString();
+  run.steps[0]!.endedAt = new Date(startedAt + 1000).toISOString();
+  run.steps[0]!.output = { agent: "scout", text: "mapped", handoff: "mapped", raw: "", memoryCandidates: [], warnings: [] };
+  run.steps[1]!.status = "pending";
+
+  const stageIds = buildRunLifecycleSpans(run)
+    .filter((span) => span.kind === "stage")
+    .map((span) => span.attributes?.stageId);
+
+  assert.deepEqual(stageIds, ["evidence"]);
+});
+
 test("finalAnswerMaterial preserves multi-agent analysis evidence instead of only last handoff", () => {
   const cwd = tempDir("pi-chalin-final-material-evidence-");
   const run = createRunState({
@@ -3245,6 +3280,44 @@ test("finalAnswerMaterial prefers final synthesis and keeps prior evidence compa
   assert.match(material, /Coverage Matrix/);
   assert.match(material, /Effect evidence/);
   assert.doesNotMatch(material, /raw scout crawl raw scout crawl raw scout crawl raw scout crawl raw scout crawl/);
+});
+
+test("paused DAGs do not expose partial evidence as final answer material", () => {
+  const route: RunState["route"] = {
+    kind: "multi-agent-dag",
+    agents: ["scout", "reviewer", "researcher", "planner"],
+    risk: "low",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    reason: "Deep project analysis.",
+    plan: {
+      kind: "dag",
+      stages: [
+        { id: "evidence", tasks: [{ agent: "scout", task: "Map repo." }, { agent: "reviewer", task: "Review maintainability." }, { agent: "researcher", task: "Research external context." }] },
+        { id: "synthesis", tasks: [{ agent: "planner", task: "Synthesize final plan." }] },
+      ],
+    },
+  };
+  const run = createRunState(route, tempDir("pi-chalin-paused-final-material-"));
+  run.status = "paused";
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.output = { agent: "scout", text: "Scout evidence.", handoff: "Scout evidence.", raw: "", memoryCandidates: [], warnings: [] };
+  run.steps[1]!.status = "complete";
+  run.steps[1]!.output = { agent: "reviewer", text: "Reviewer evidence.", handoff: "Reviewer evidence.", raw: "", memoryCandidates: [], warnings: [] };
+  run.steps[2]!.status = "paused";
+  run.steps[2]!.pauseReason = "idle-stall";
+  run.steps[2]!.error = "SDK runner idle stalled for researcher after 120000ms without activity";
+  run.steps[3]!.status = "pending";
+
+  const text = formatRoute(route, { route, approval: { action: "allow", reason: "test" }, run, memories: [], diagnostics: [] });
+
+  assert.equal(finalAnswerMaterial(run), undefined);
+  assert.match(text, /pi-chalin paused: scout → reviewer → researcher → planner/);
+  assert.doesNotMatch(text, /pi-chalin completed/);
+  assert.doesNotMatch(text, /Final answer material:/);
+  assert.match(text, /Supporting findings:/);
+  assert.match(text, /researcher: SDK runner idle stalled/);
 });
 
 test("finalAnswerMaterial uses structured claim evidence without heading-specific text", () => {
@@ -4619,6 +4692,35 @@ test("chalin_route failed DAG highlights the failed step and marks downstream pe
   assert.match(failed, /○ context-builder — skipped after failure/);
   assert.doesNotMatch(failed, /current: context-builder — Synthesize final answer/);
   assert.doesNotMatch(failed, /context-builder — working/);
+});
+
+test("chalin_route paused DAG shows pending downstream work as waiting for resume", () => {
+  const paused = formatChalinRunWidget({
+    id: "chalin-paused-dag",
+    route: { kind: "multi-agent-dag", agents: ["scout", "reviewer", "researcher", "planner"], risk: "low", ambiguity: "low", needsMemory: false, needsArtifacts: true, reason: "test" },
+    status: "paused",
+    startedAt: new Date().toISOString(),
+    warnings: ["SDK runner paused researcher: SDK runner idle stalled for researcher after 120000ms without activity."],
+    metrics: {
+      durationMs: 120000,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      toolCalls: 0,
+      toolCallsByName: {},
+    },
+    steps: [
+      { id: "evidence:scout", agent: "scout", task: "Map project.", status: "complete", output: { agent: "scout", text: "mapped", handoff: "mapped", memoryCandidates: [], raw: "mapped", warnings: [] } },
+      { id: "evidence:reviewer", agent: "reviewer", task: "Review project.", status: "complete", output: { agent: "reviewer", text: "reviewed", handoff: "reviewed", memoryCandidates: [], raw: "reviewed", warnings: [] } },
+      { id: "evidence:researcher", agent: "researcher", task: "Research context.", status: "paused", error: "SDK runner idle stalled for researcher after 120000ms without activity" },
+      { id: "synthesis:planner", agent: "planner", task: "Synthesize final answer.", status: "pending" },
+    ],
+  });
+
+  assert.match(paused, /pi-chalin · review · paused · 2\/4/);
+  assert.match(paused, /paused: researcher — SDK runner idle stalled/);
+  assert.match(paused, /■ researcher — SDK runner idle stalled/);
+  assert.match(paused, /○ planner — waiting for resume/);
+  assert.doesNotMatch(paused, /planner — working/);
+  assert.doesNotMatch(paused, /current: planner/);
 });
 
 

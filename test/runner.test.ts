@@ -9,7 +9,7 @@ import { chalinChildSessionDir, createChalinChildSessionManager, hideLegacyTopLe
 import { policyForStep } from "../src/budget.ts";
 import { resolveAgentModel, resolveAgentThinking, resolveInheritedModelFallback } from "../src/model-resolution.ts";
 import { buildSdkPrompt, childToolNames, resolveStepCompletionStatus, toolBudgetForStep } from "../src/runner-prompt.ts";
-import { DEFAULT_SDK_STEP_IDLE_STALL_MS, MockWorkerRunner, budgetPolicyForSdkStep, buildConflictResolverTask, extractAssistantRuntimeError, hasUnrecoverableFailedSteps, normalizeThinkingForBudget, parseAgentOutput, promptTokenomicsPhaseForStep, reviewerHandoffNeedsRepair, runWithIdleStallMonitor, sdkStepIdleStallMs, shouldStopAfterDagStage } from "../src/runner.ts";
+import { DEFAULT_SDK_STEP_IDLE_STALL_MS, MockWorkerRunner, budgetPolicyForSdkStep, buildConflictResolverTask, extractAssistantRuntimeError, hasUnrecoverableFailedSteps, normalizeThinkingForBudget, parseAgentOutput, promptTokenomicsPhaseForStep, recoverPausedReadOnlyDagStage, reviewerHandoffNeedsRepair, runWithIdleStallMonitor, sdkStepIdleStallMs, shouldStopAfterDagStage } from "../src/runner.ts";
 import { createRunState, loadResumableRunState, prepareRunForResume } from "../src/runner-state.ts";
 import type { AgentDefinition, RouteDecision, RunState, RunStepMetrics } from "../src/schemas.ts";
 
@@ -754,6 +754,67 @@ test("SDK DAG can continue synthesis after a partial read-only fan-out idle stal
   ], agents);
 
   assert.equal(shouldStop, false);
+});
+
+test("SDK DAG converts recoverable read-only idle pauses into coverage gaps before synthesis", () => {
+  const agents = new Map([
+    ["researcher", readOnlyAgent("researcher", "research")],
+    ["reviewer", readOnlyAgent("reviewer", "review")],
+  ]);
+  const stageSteps: RunState["steps"] = [
+    {
+      id: "evidence:researcher",
+      agent: "researcher",
+      task: "Research external context.",
+      status: "paused",
+      pauseReason: "idle-stall",
+      error: "SDK runner idle stalled for researcher after 120000ms without activity",
+    },
+    {
+      id: "evidence:reviewer",
+      agent: "reviewer",
+      task: "Review local evidence.",
+      status: "complete",
+      output: { agent: "reviewer", text: "Local evidence reviewed.", handoff: "Local evidence reviewed.", memoryCandidates: [], raw: "", warnings: [] },
+    },
+  ];
+
+  const recovered = recoverPausedReadOnlyDagStage(stageSteps, agents);
+
+  assert.equal(recovered, 1);
+  assert.equal(stageSteps[0]?.status, "failed");
+  assert.equal(stageSteps[0]?.pauseReason, undefined);
+  assert.equal(shouldStopAfterDagStage(stageSteps, agents), false);
+});
+
+test("SDK DAG keeps writer idle pauses resumable instead of synthesizing unsafe partial work", () => {
+  const agents = new Map([
+    ["worker", agent("worker", ["inspect-files", "edit-files"])],
+    ["reviewer", readOnlyAgent("reviewer", "review")],
+  ]);
+  const stageSteps: RunState["steps"] = [
+    {
+      id: "implementation:worker",
+      agent: "worker",
+      task: "Edit files.",
+      status: "paused",
+      pauseReason: "idle-stall",
+      error: "SDK runner idle stalled for worker after 120000ms without activity",
+    },
+    {
+      id: "implementation:reviewer",
+      agent: "reviewer",
+      task: "Review design.",
+      status: "complete",
+      output: { agent: "reviewer", text: "Review partial.", handoff: "Review partial.", memoryCandidates: [], raw: "", warnings: [] },
+    },
+  ];
+
+  const recovered = recoverPausedReadOnlyDagStage(stageSteps, agents);
+
+  assert.equal(recovered, 0);
+  assert.equal(stageSteps[0]?.status, "paused");
+  assert.equal(shouldStopAfterDagStage(stageSteps, agents), true);
 });
 
 test("SDK child idle guard is based on idle time, not total wall-clock while a tool is active", async () => {

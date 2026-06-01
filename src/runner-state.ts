@@ -38,6 +38,7 @@ export function prepareRunForResume(run: RunState): RunState {
     if (isUsableStepHandoff(step) || step.status === "failed") continue;
     step.status = "pending";
     step.error = undefined;
+    step.pauseReason = undefined;
     step.currentTool = undefined;
     step.endedAt = undefined;
   }

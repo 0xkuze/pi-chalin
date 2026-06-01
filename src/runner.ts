@@ -390,7 +390,20 @@ async function runSdkDag(
       break;
     }
     const stageSteps = run.steps.filter((step) => step.id.startsWith(`${stage.id}:`));
-    await runSdkStage(run, stage, stageSteps, context, extensionContext, previous);
+    const stageResult = await runSdkStage(run, stage, stageSteps, context, extensionContext, previous);
+    const recoveredPauses = recoverPausedReadOnlyDagStage(stageSteps, context.agents);
+    if (recoveredPauses > 0) {
+      run.warnings.push(`DAG stage ${stage.id} continued with partial fan-out results after ${recoveredPauses} read-only idle stall(s).`);
+      persistRun(run);
+      context.onUpdate?.(run);
+    }
+    if (stageResult.paused && stageSteps.some((step) => step.status === "paused")) {
+      run.warnings.push(stageResult.isolated
+        ? `DAG stage ${stage.id} paused after a child idle stall; isolated writer changes were not merged.`
+        : `DAG stage ${stage.id} paused after a child idle stall.`);
+      persistRun(run);
+      context.onUpdate?.(run);
+    }
     for (const step of stageSteps) maybeAppendImplementationReviewRepair(run, step);
     previous = aggregateStageHandoff(stageSteps);
     if (shouldStopAfterDagStage(stageSteps, context.agents)) break;
@@ -625,6 +638,21 @@ export function shouldStopAfterDagStage(stageSteps: Pick<RunStepState, "status" 
   return failedSteps.some((step) => isWriterAgent(agents.get(step.agent)));
 }
 
+export function recoverPausedReadOnlyDagStage(stageSteps: RunStepState[], agents: Map<string, AgentDefinition>): number {
+  if (!stageSteps.some((step) => isUsableStepStatus(step.status))) return 0;
+  let recovered = 0;
+  for (const step of stageSteps) {
+    if (step.status !== "paused") continue;
+    if (step.pauseReason !== "idle-stall") continue;
+    if (isWriterAgent(agents.get(step.agent))) continue;
+    step.status = "failed";
+    step.pauseReason = undefined;
+    step.error ??= "SDK runner idle stalled before producing a handoff.";
+    recovered += 1;
+  }
+  return recovered;
+}
+
 function isWriterAgent(agent?: AgentDefinition): boolean {
   if (!agent) return false;
   return agent.concern === "implementation"
@@ -640,10 +668,10 @@ async function runSdkStage(
   context: WorkerRunnerContext,
   extensionContext: ExtensionContext,
   previous: string,
-): Promise<void> {
+): Promise<{ paused: boolean; isolated: boolean }> {
   let isolation: WorktreeIsolationPlan | undefined;
   const runnableSteps = stageSteps.filter((step) => !isUsableStepHandoff(step));
-  if (runnableSteps.length === 0) return;
+  if (runnableSteps.length === 0) return { paused: false, isolated: false };
   if (needsWorktreeIsolation(stage.tasks, context.agents)) {
     isolation = prepareWorktreeIsolation({ cwd: context.cwd, runId: `${run.id}-${stage.id}`, steps: stage.tasks, agents: context.agents });
     run.warnings.push(...isolation.warnings);
@@ -657,7 +685,7 @@ async function runSdkStage(
       }
       persistRun(run);
       context.onUpdate?.(run);
-      return;
+      return { paused: false, isolated: Boolean(isolation.enabled) };
     }
     run.warnings.push(`DAG stage ${stage.id} worktree isolation active.`);
   }
@@ -673,15 +701,13 @@ async function runSdkStage(
       { concurrency: "unbounded" },
     ).pipe(Effect.withSpan(`runner.sdk.dag.${stage.id}`)));
     if (stageSteps.some((step) => step.status === "paused")) {
-      run.warnings.push(isolation?.enabled
-        ? `DAG stage ${stage.id} paused after a child idle stall; isolated writer changes were not merged.`
-        : `DAG stage ${stage.id} paused after a child idle stall.`);
       persistRun(run);
       context.onUpdate?.(run);
-      return;
+      return { paused: true, isolated: Boolean(isolation?.enabled) };
     }
 
     if (isolation?.enabled) await mergeIsolatedStage(run, context, extensionContext, isolation);
+    return { paused: false, isolated: Boolean(isolation?.enabled) };
   } finally {
     if (isolation?.enabled) run.warnings.push(...cleanupWorktrees({ cwd: context.cwd, plan: isolation }));
   }
@@ -699,6 +725,8 @@ async function runSdkStep(
     return { aborted: true };
   }
   step.status = "running";
+  step.error = undefined;
+  step.pauseReason = undefined;
   step.startedAt = new Date().toISOString();
   persistRun(run);
   context.onUpdate?.(run);
@@ -827,12 +855,14 @@ async function runSdkStep(
     if (isAbortError(error)) {
       step.status = "paused";
       step.error = errorMessage(error);
+      step.pauseReason = "aborted";
       markRunAborted(run, context, step.error);
       return { aborted: true };
     }
     if (isIdleStallError(error)) {
       step.status = "paused";
       step.error = error.message;
+      step.pauseReason = "idle-stall";
       run.warnings.push(`SDK runner paused ${step.agent}: ${step.error}. Resume can start a fresh child session.`);
       persistRun(run);
       context.onUpdate?.(run);

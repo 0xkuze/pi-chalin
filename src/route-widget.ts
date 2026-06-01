@@ -58,7 +58,7 @@ export function formatChalinRunWidgetFromDetails(details: ChalinRouteWidgetDetai
   const active = activeWidgetStep(run.status, steps);
   const title = route ? routeIntent(route) : "workflow";
   const displayStatus = statusLabel(run.status);
-  const activeLabel = run.status === "failed" ? "blocked" : "current";
+  const activeLabel = run.status === "failed" ? "blocked" : run.status === "paused" ? "paused" : "current";
   return [
     `pi-chalin · ${title} · ${displayStatus} · ${completed}/${steps.length || 1}`,
     active ? `${activeLabel}: ${active.agent} — ${active.error ? truncate(active.error, 86) : taskTitle(active.task ?? statusLabel(active.status ?? "pending"))}` : undefined,
@@ -70,6 +70,7 @@ export function formatChalinRunWidgetFromDetails(details: ChalinRouteWidgetDetai
 
 function activeWidgetStep(runStatus: RunStatus, steps: ChalinRouteWidgetStep[]): ChalinRouteWidgetStep | undefined {
   if (runStatus === "failed") return steps.find((step) => step.status === "failed");
+  if (runStatus === "paused") return steps.find((step) => step.status === "paused") ?? steps.find((step) => isCheckpointStepStatus(step.status));
   if (runStatus === "running" || runStatus === "pending") {
     return steps.find((step) => step.status === "running") ?? steps.find((step) => step.status === "pending");
   }
@@ -139,6 +140,8 @@ function formatWidgetStep(step: ChalinRouteWidgetStep, index: number, total: num
           ? taskTitle(step.task ?? step.error ?? "checkpoint saved")
           : step.status === "pending" && runStatus === "failed"
             ? "skipped after failure"
+          : step.status === "pending" && runStatus === "paused"
+            ? "waiting for resume"
           : taskTitle(step.task ?? "working");
   const suffix = isCheckpointStepStatus(step.status) ? ` · ${checkpointLabel(step.checkpoint).replace(/^checkpointed · /, "")}` : "";
   const skills = step.skills?.length ? ` · skills:${step.skills.join(",")}` : "";

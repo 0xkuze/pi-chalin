@@ -314,9 +314,10 @@ function timestampMs(value: string | undefined): number | undefined {
 function stageLifecycleSpans(runId: string, plan: RoutePlan | undefined, steps: RunStepState[], runStartedAt: number, runEndedAt: number): StructuredTraceSpan[] {
   if (!plan) return [];
   if (plan.kind === "dag") {
-    return plan.stages.map((stage) => {
+    return plan.stages.flatMap((stage) => {
       const stageSteps = steps.filter((step) => step.id.startsWith(`${stage.id}:`));
-      return createStructuredSpan({
+      if (!stageSteps.some(hasStartedLifecycleStep)) return [];
+      return [createStructuredSpan({
         id: `${runId}:stage:${stage.id}`,
         parentId: `${runId}:run`,
         name: ("name" in stage && typeof stage.name === "string" ? stage.name : stage.id),
@@ -324,7 +325,7 @@ function stageLifecycleSpans(runId: string, plan: RoutePlan | undefined, steps: 
         startedAt: minStepTime(stageSteps, "startedAt") ?? runStartedAt,
         endedAt: maxStepTime(stageSteps, "endedAt") ?? runEndedAt,
         attributes: { stageId: stage.id, tasks: stage.tasks.length },
-      });
+      })];
     });
   }
   return [createStructuredSpan({
@@ -336,6 +337,16 @@ function stageLifecycleSpans(runId: string, plan: RoutePlan | undefined, steps: 
     endedAt: maxStepTime(steps, "endedAt") ?? runEndedAt,
     attributes: { stageId: plan.kind, tasks: steps.length },
   })];
+}
+
+function hasStartedLifecycleStep(step: RunStepState): boolean {
+  if (step.startedAt || step.endedAt) return true;
+  if (step.status === "pending") return false;
+  return step.status === "running"
+    || step.status === "complete"
+    || step.status === "failed"
+    || step.status === "paused"
+    || isCheckpointStepStatus(step.status);
 }
 
 function minStepTime(steps: RunStepState[], field: "startedAt" | "endedAt"): number | undefined {

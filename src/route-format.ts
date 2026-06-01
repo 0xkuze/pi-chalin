@@ -19,11 +19,9 @@ export function formatRoute(route: RouteDecision, result: ChalinHandleResult | u
   const memoryMaterial = !finalMaterial && result.memories.length > 0 ? formatMemoryMaterial(result.memories) : undefined;
   const supportingFindings = finalMaterial ? undefined : supportingAgentFindings(result.run);
   const lines = [
-    `pi-chalin completed: ${route.agents.join(" → ") || route.kind}`,
+    routeResultHeadline(route, result),
     `status: ${result.run?.status ?? result.approval.action}`,
-    result.approval.action === "allow"
-      ? "Instruction for the primary Pi agent: answer the user now from the Final answer material below. Do not call more tools unless it explicitly says a critical gap remains."
-      : "Instruction for the primary Pi agent: pi-chalin did not execute because approval is required. Do not claim completion. If this is a safe explicit user-requested edit, continue directly with native tools; otherwise explain that approval is required.",
+    routeResultInstruction(result, finalMaterial),
     result.approval.action !== "allow" ? `Approval: ${result.approval.action} — ${result.approval.reason}` : undefined,
     result.memories.length > 0 ? `Memory used: ${result.memories.length}` : undefined,
     finalMaterial ? "\nFinal answer material:" : undefined,
@@ -48,6 +46,7 @@ function formatMemoryMaterial(memories: ChalinHandleResult["memories"]): string 
 
 export function finalAnswerMaterial(run: RunState | undefined): string | undefined {
   if (!run) return undefined;
+  if (run.status !== "complete") return undefined;
   const completeSteps = run.steps.filter((step) => isUsableStepStatus(step.status));
   const budget = finalAnswerMaterialBudget(run);
   if (shouldAggregateFinalMaterial(run, completeSteps)) {
@@ -63,6 +62,30 @@ export function finalAnswerMaterial(run: RunState | undefined): string | undefin
   const primary = completeSteps.at(-1) ?? run.steps.at(-1);
   const output = primary ? primaryFinalOutput(run, primary) : undefined;
   return output ? finalMaterialWithEvidence(run, output, budget) : undefined;
+}
+
+function routeResultHeadline(route: RouteDecision, result: ChalinHandleResult): string {
+  const agents = route.agents.join(" → ") || route.kind;
+  if (!result.run) return `pi-chalin ${result.approval.action}: ${agents}`;
+  return result.run.status === "complete"
+    ? `pi-chalin completed: ${agents}`
+    : `pi-chalin ${result.run.status}: ${agents}`;
+}
+
+function routeResultInstruction(result: ChalinHandleResult, finalMaterial: string | undefined): string {
+  if (result.approval.action !== "allow") {
+    return "Instruction for the primary Pi agent: pi-chalin did not execute because approval is required. Do not claim completion. If this is a safe explicit user-requested edit, continue directly with native tools; otherwise explain that approval is required.";
+  }
+  if (finalMaterial) {
+    return "Instruction for the primary Pi agent: answer the user now from the Final answer material below. Do not call more tools unless it explicitly says a critical gap remains.";
+  }
+  if (result.run?.status === "paused") {
+    return "Instruction for the primary Pi agent: pi-chalin paused before final synthesis. Treat the material below as partial context, do not claim the DAG completed, and resume only when the missing work is required.";
+  }
+  if (result.run?.status === "failed") {
+    return "Instruction for the primary Pi agent: pi-chalin failed before final synthesis. Use the material below only to explain the gap and next repair step.";
+  }
+  return "Instruction for the primary Pi agent: answer from the subagent handoff below and name any remaining gap explicitly.";
 }
 
 function finalMaterialWithEvidence(run: RunState, material: string, max: number): string {

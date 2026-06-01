@@ -177,6 +177,7 @@ export type RunStatus = "pending" | "running" | "complete" | "failed" | "paused"
 export type RunStepStatus = "pending" | "running" | "complete" | "failed" | "paused" | "checkpointed";
 export type LegacyRunStatus = RunStatus | "budget-capped";
 export type LegacyRunStepStatus = RunStepStatus | "budget-capped";
+export type RunStepPauseReason = "aborted" | "idle-stall";
 export type CheckpointKind = "budget-cap" | "needs-continuation" | "low-signal" | "awaiting-review" | "split-recommended";
 export type CheckpointContinuation = "continue" | "review" | "split" | "resume";
 
@@ -389,6 +390,7 @@ export interface RunStepState {
   thinkingLevel?: AgentThinkingLevel;
   output?: AgentOutput;
   error?: string;
+  pauseReason?: RunStepPauseReason;
   currentTool?: string;
   modelResolution?: ModelResolutionLog;
   metrics?: RunStepMetrics;
