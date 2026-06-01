@@ -8,7 +8,7 @@ import { loadEffectiveConfig } from "./config.ts";
 import { ChalinKernel, routeFromPlan } from "./kernel.ts";
 import { createMemoryCandidate } from "./memory.ts";
 import { createConfiguredMemoryStore } from "./memory-provider.ts";
-import { formatInterviewResult, runChalinInterview, type InterviewRequestInput } from "./interview.ts";
+import { formatInterviewResult, runChalinInterview, type InterviewRequestInput, type InterviewResult } from "./interview.ts";
 import { loadResumableRunState } from "./runner-state.ts";
 import { activateSkillForTurn, beginChalinRouteInvocation, disableSkillForTurn, finishChalinRouteInvocation, getSkillOverridesForTurn, setLatestRun } from "./runtime-state.ts";
 import { openSafetyApproval } from "./ui.ts";
@@ -357,6 +357,31 @@ export function registerChalinTools(pi: ExtensionAPI): void {
       const store = new ArtifactStore({ cwd: ctx.cwd });
       const result = await runChalinInterview(ctx, store, params);
       return textResult(formatInterviewResult(result), { interview: result });
+    },
+    renderCall(args, theme) {
+      const count = Array.isArray(args.questions) ? args.questions.length : 0;
+      const label = args.featureId || args.task || "interview";
+      return new Text([
+        theme.fg("toolTitle", theme.bold("chalin_interview")),
+        theme.fg("muted", ` ${count} question${count === 1 ? "" : "s"}`),
+        theme.fg("dim", ` · ${truncateForTool(label, 56)}`),
+      ].join(""), 0, 0);
+    },
+    renderResult(result, _options, theme) {
+      const details = result.details as { interview?: InterviewResult } | undefined;
+      const interview = details?.interview;
+      if (!interview) return new Text(result.content.find((part) => part.type === "text")?.text ?? "", 0, 0);
+      const statusColor = interview.status === "answered" ? "success" : interview.status === "cancelled" ? "warning" : "muted";
+      const lines = [
+        `${theme.fg(statusColor, interview.status)} · ${interview.answers.length} answer${interview.answers.length === 1 ? "" : "s"}`,
+        theme.fg("muted", `artifact: ${truncateForTool(interview.featureId, 64)}`),
+        ...interview.answers.map((answer) => {
+          const suffix = answer.custom ? " (custom)" : answer.recommended ? " (recommended)" : "";
+          return `- ${theme.fg("accent", answer.questionId)}: ${truncateForTool(answer.answer, 120)}${theme.fg("muted", suffix)}`;
+        }),
+        interview.status === "answered" ? theme.fg("dim", "next: continue with these answers") : theme.fg("warning", "next: ask before routing"),
+      ];
+      return new Text(lines.join("\n"), 0, 0);
     },
   });
 

@@ -3015,10 +3015,20 @@ test("chalin_interview asks TUI questions and persists artifact answers", async 
   );
 
   const text = result.content.map((part) => part.text).join("\n");
-  assert.match(text, /pi-chalin interview · answered/);
+  assert.match(text, /chalin_interview answered/);
   assert.deepEqual(result.details.interview?.answers.map((answer) => answer.answer), ["MVP slice", "Do not touch billing yet."]);
   assert.equal(result.details.interview?.answers[0]?.recommended, true);
   assert.equal(result.details.interview?.answers[1]?.custom, true);
+
+  const renderedResult = (tool as unknown as { renderResult: (...args: never[]) => { render(width: number): string[] } }).renderResult(
+    result as never,
+    {} as never,
+    { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text, bold: (text: string) => text } as never,
+    {} as never,
+  ).render(96).join("\n");
+  assert.match(renderedResult, /answered · 2 answers/);
+  assert.match(renderedResult, /scope: MVP slice/);
+  assert.doesNotMatch(renderedResult, /reason:/);
   assert.equal(titles.length, 2);
   assert.ok(optionsSeen[0]?.includes("MVP slice (RECOMMENDED)"));
   assert.ok(optionsSeen[0]?.includes("Custom answer…"));
@@ -3026,6 +3036,76 @@ test("chalin_interview asks TUI questions and persists artifact answers", async 
   const state = JSON.parse(fs.readFileSync(path.join(cwd, ".pi-chalin", "artifacts", "features", "ambiguous-feature", "state.json"), "utf-8"));
   assert.equal(state.interviewDecisions.length, 1);
   assert.match(JSON.stringify(state), /Do not touch billing yet/);
+});
+
+test("chalin_interview presents batched editable questions in a custom overlay", async () => {
+  const fake = createFakePi();
+  registerPiChalin(fake.api as never);
+  const tool = fake.tools.get("chalin_interview") as unknown as { execute: (...args: never[]) => Promise<{ content: Array<{ type: string; text: string }>; details: { interview?: { answers: Array<{ answer: string; custom: boolean; recommended: boolean }> } } }> };
+  const cwd = tempDir("pi-chalin-interview-overlay-");
+  const renders: string[] = [];
+  let customOptions: unknown;
+  let selectCalled = false;
+  let renderRequests = 0;
+  const plainTheme = {
+    fg: (_color: string, text: string) => text,
+    bg: (_color: string, text: string) => text,
+    bold: (text: string) => text,
+  };
+
+  const result = await tool.execute(
+    "tool-interview" as never,
+    {
+      featureId: "editable-feature",
+      task: "Implement the ambiguous feature.",
+      reason: "Scope and exclusions are unknown.",
+      questions: [
+        { id: "scope", question: "What scope should pi-chalin implement first?", choices: [{ label: "MVP slice", recommended: true }, { label: "Full migration" }] },
+        { id: "exclude", question: "Any area to exclude?", choices: [{ label: "No exclusions", recommended: true }, { label: "Auth only" }] },
+      ],
+    } as never,
+    undefined as never,
+    undefined as never,
+    {
+      cwd,
+      hasUI: true,
+      ui: {
+        select: async () => {
+          selectCalled = true;
+          return undefined;
+        },
+        input: async () => undefined,
+        notify: () => {},
+        custom: async (factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (result: unknown) => void) => { render(width: number): string[]; handleInput?(data: string): void }, options: unknown) => {
+          customOptions = options;
+          let overlayResult: unknown;
+          const component = factory({ requestRender: () => { renderRequests += 1; } }, plainTheme, {}, (value) => { overlayResult = value; });
+          renders.push(component.render(96).join("\n"));
+          component.handleInput?.("\x1b[B");
+          component.handleInput?.("\r");
+          component.handleInput?.("\x1b[B");
+          component.handleInput?.("\x1b[B");
+          component.handleInput?.("\r");
+          for (const char of "Do not touch billing yet.") component.handleInput?.(char);
+          component.handleInput?.("\r");
+          component.handleInput?.("\t");
+          component.handleInput?.("\x1b[A");
+          component.handleInput?.("\r");
+          component.handleInput?.("\r");
+          return overlayResult;
+        },
+      },
+    } as never,
+  );
+
+  assert.equal(selectCalled, false);
+  assert.match(JSON.stringify(customOptions), /"overlay":true/);
+  assert.match(renders[0] ?? "", /What scope should pi-chalin implement first\?/);
+  assert.match(renders[0] ?? "", /Any area to exclude\?/);
+  assert.ok(renderRequests > 0);
+  assert.deepEqual(result.details.interview?.answers.map((answer) => answer.answer), ["MVP slice", "Do not touch billing yet."]);
+  assert.equal(result.details.interview?.answers[0]?.recommended, true);
+  assert.equal(result.details.interview?.answers[1]?.custom, true);
 });
 
 test("chalin_route executes the workflow chosen by the primary Pi agent", async () => {
