@@ -38,5 +38,6 @@ version: 1
 - Read the exact target surface before editing.
 - Change the smallest behavior-preserving region that fixes the failure.
 - Add or update the nearest runner-discoverable regression test unless the user explicitly forbids test edits.
+- When tests are touched, cover the broken behavior plus the nearest meaningful boundary of the same contract.
 - Run the nearest verification command from repository evidence.
 - Final handoff cites implementation path, test or evidence path, and verification command.

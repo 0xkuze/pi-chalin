@@ -179,6 +179,7 @@ function evaluateBuiltInChildBenefit(catalog: SkillCatalog, worker: AgentDefinit
   const active = resolved.active.map((item) => item.skill.qualifiedName);
   const score = active.includes("built-in:bugfix-tight-loop")
     && activePrompt.includes("Read the exact target")
+    && activePrompt.includes("nearest meaningful boundary")
     && activePrompt.includes("Run nearest verification")
     && unrelated.active.length === 0
     ? 1
@@ -250,7 +251,7 @@ triggers:
   - failing test
 risk: low
 trust: trusted
-`, "## Rules\n- Read the exact target before editing.\n- Run nearest verification.\n");
+`, "## Rules\n- Read the exact target before editing.\n- Cover the broken behavior plus the nearest meaningful boundary of the same contract when tests are touched.\n- Run nearest verification.\n");
 
   writeSkill(path.join(packageRoot, "skills", "huge-inactive", "SKILL.md"), `
 name: huge-inactive
