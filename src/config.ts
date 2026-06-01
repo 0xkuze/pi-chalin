@@ -314,7 +314,7 @@ export function setAgentThinkingOverride(
 }
 
 export function approvalDecision(config: ChalinConfig, route: RouteDecision): ApprovalDecision {
-  if (route.kind === "bypass" || route.kind === "memory-only") return { action: "allow", reason: "No subagent execution required." };
+  if (route.kind === "bypass") return { action: "allow", reason: "No subagent execution required." };
   if (route.risk === "critical" && config.safety.blockCritical) {
     return { action: "block", reason: "Critical routes are blocked by default safety policy." };
   }

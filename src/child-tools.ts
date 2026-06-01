@@ -122,11 +122,9 @@ const DelegateStageParams = Type.Object({
 const ChalinDelegateParams = Type.Object({
   task: Type.String({ description: "Bounded objective for the nested subagent chain. Include current evidence and exact success criteria." }),
   topology: Type.Union([
-    Type.Literal("single"),
-    Type.Literal("chain"),
-    Type.Literal("parallel"),
+    Type.Literal("sequential"),
     Type.Literal("dag"),
-  ], { description: "Small nested workflow only. Use single/chain/parallel with steps; dag with stages." }),
+  ], { description: "Small nested workflow only. Use sequential with steps or dag with stages." }),
   steps: Type.Optional(Type.Array(DelegateStepParams)),
   stages: Type.Optional(Type.Array(DelegateStageParams)),
   reason: Type.String({ description: "Why this rare nested delegation is necessary instead of finishing in the current agent." }),
@@ -159,7 +157,7 @@ type ChalinMemoryReviseParamsShape = {
 
 export type ChalinDelegateParamsShape = {
   task: string;
-  topology: "single" | "chain" | "parallel" | "dag";
+  topology: "sequential" | "dag";
   steps?: Array<{ id?: string; agent: string; task: string; budget?: "tight" | "normal" | "deep" | "extended" }>;
   stages?: Array<{ id?: string; name?: string; tasks: Array<{ id?: string; agent: string; task: string; budget?: "tight" | "normal" | "deep" | "extended" }> }>;
   reason: string;
@@ -538,7 +536,7 @@ export function createProjectSnapshotTool(policy: ChildToolPolicy): ToolDefiniti
     name: "chalin_project_snapshot",
     label: "Chalin Project Snapshot",
     description: "Legacy alias that returns raw project inventory plus git metadata. It does not infer stack, entrypoints, tests, commands, or importance.",
-    promptSnippet: "chalin_project_snapshot: get raw project inventory plus git metadata before branch/diff reconnaissance.",
+    promptSnippet: "chalin_project_snapshot: get raw project inventory plus git metadata when change-set or repository-state facts are needed.",
     promptGuidelines: [
       "Prefer chalin_project_discovery unless git metadata is needed.",
       "Treat this as filesystem/git facts only; choose follow-up reads/searches with LLM judgment.",

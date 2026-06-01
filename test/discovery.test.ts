@@ -41,3 +41,23 @@ test("project discovery indexes unusual nested layouts without semantic hardcodi
   assert.doesNotMatch(text, /read the root instruction file/i);
   assert.match(text, /raw filesystem facts, non-semantic/i);
 });
+
+test("project discovery keeps generated shard noise compact", () => {
+  const dir = tempDir("pi-chalin-discovery-compact-");
+  fs.mkdirSync(path.join(dir, "src"), { recursive: true });
+  fs.mkdirSync(path.join(dir, "evals", "results", ".workflow-shards-2026-06-01T00-00-00-000Z-a"), { recursive: true });
+  fs.mkdirSync(path.join(dir, "evals", "results", ".workflow-shards-2026-06-01T00-00-00-000Z-b"), { recursive: true });
+  fs.mkdirSync(path.join(dir, "evals", "results", ".workflow-shards-2026-06-01T00-00-00-000Z-c"), { recursive: true });
+  fs.mkdirSync(path.join(dir, "evals", "results", ".workflow-shards-2026-06-01T00-00-00-000Z-d"), { recursive: true });
+  fs.mkdirSync(path.join(dir, "evals", "results", ".workflow-shards-2026-06-01T00-00-00-000Z-e"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "src", "index.ts"), "export const value = 1;\n");
+
+  const index = buildProjectDiscoveryIndex(dir, { maxDepth: 5, maxEntries: 100 });
+  const text = formatProjectDiscoveryIndex(index, { maxEntries: 20 });
+
+  assert.equal(index.entries.some((entry) => entry.path.includes(".workflow-shards")), false);
+  assert.ok(index.entries.some((entry) => entry.path === "src/index.ts"));
+  assert.match(text, /ignored dirs:/i);
+  assert.match(text, /\.\.\. 1 more/i);
+  assert.ok(text.length < 900, `compact discovery should stay small, got ${text.length}`);
+});

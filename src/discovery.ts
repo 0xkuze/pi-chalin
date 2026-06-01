@@ -28,6 +28,10 @@ export interface ProjectDiscoveryOptions {
   maxChildrenPerDir?: number;
 }
 
+export interface ProjectDiscoveryFormatOptions {
+  maxEntries?: number;
+}
+
 const DEFAULT_MAX_DEPTH = 4;
 const DEFAULT_MAX_ENTRIES = 450;
 const DEFAULT_MAX_CHILDREN_PER_DIR = 120;
@@ -76,7 +80,7 @@ export function buildProjectDiscoveryIndex(cwdInput: string, options: ProjectDis
       if (!stat) continue;
       const type = entryType(stat);
       const depth = current.depth + 1;
-      if (type === "dir" && IGNORED_DIRS.has(child)) {
+      if (type === "dir" && isIgnoredDirName(child)) {
         ignoredDirs.add(relativePath);
         continue;
       }
@@ -105,8 +109,15 @@ export function buildProjectDiscoveryIndex(cwdInput: string, options: ProjectDis
   };
 }
 
-export function formatProjectDiscoveryIndex(index: ProjectDiscoveryIndex): string {
-  const entries = index.entries.slice(0, 220).map(formatDiscoveryEntry);
+function isIgnoredDirName(name: string): boolean {
+  return IGNORED_DIRS.has(name) || name.startsWith(".workflow-shards-");
+}
+
+export function formatProjectDiscoveryIndex(index: ProjectDiscoveryIndex, options: ProjectDiscoveryFormatOptions = {}): string {
+  const maxEntries = options.maxEntries ?? 220;
+  const entries = index.entries.slice(0, maxEntries).map(formatDiscoveryEntry);
+  const hiddenEntries = Math.max(0, index.entries.length - entries.length);
+  const ignoredDirs = formatIgnoredDirs(index.ignoredDirs);
   const histogram = Object.entries(index.extensionHistogram)
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .slice(0, 18)
@@ -115,12 +126,20 @@ export function formatProjectDiscoveryIndex(index: ProjectDiscoveryIndex): strin
   return [
     "Project discovery inventory (raw filesystem facts, non-semantic):",
     `- cwd: ${index.cwd}`,
-    `- entries: ${index.entries.length}${index.truncated ? " (truncated)" : ""}`,
-    index.ignoredDirs.length ? `- ignored dirs: ${index.ignoredDirs.join(", ")}` : undefined,
+    `- entries: ${index.entries.length}${index.truncated ? " (scan truncated)" : ""}${hiddenEntries ? `; showing ${entries.length}, ${hiddenEntries} omitted` : ""}`,
+    ignoredDirs ? `- ignored dirs: ${ignoredDirs}` : undefined,
     histogram ? `- extension histogram: ${histogram}` : undefined,
-    entries.length ? "- entries:\n" + entries.map((entry) => `  - ${entry}`).join("\n") : undefined,
-    "Guidance: treat this as an inventory only. It does not infer stack, entrypoints, tests, commands, or importance. Use LLM judgment to choose follow-up reads/searches and verify claims from exact files.",
+    entries.length ? "- paths:\n" + entries.map((entry) => `  ${entry}`).join("\n") : undefined,
+    "Guidance: inventory only; no stack/entrypoint/test/command/importance inference. Verify claims from exact files.",
   ].filter((line): line is string => Boolean(line)).join("\n");
+}
+
+function formatIgnoredDirs(ignoredDirs: string[]): string {
+  if (ignoredDirs.length === 0) return "";
+  const previewCount = 4;
+  const preview = ignoredDirs.slice(0, previewCount).join(", ");
+  const omitted = ignoredDirs.length - previewCount;
+  return omitted > 0 ? `${preview}, ... ${omitted} more` : preview;
 }
 
 function safeReaddir(dir: string): string[] {
@@ -158,12 +177,11 @@ function extensionHistogram(files: DiscoveryEntry[]): Record<string, number> {
 }
 
 function formatDiscoveryEntry(entry: DiscoveryEntry): string {
-  const details = [
-    entry.type,
-    `depth=${entry.depth}`,
-    entry.type === "dir" && typeof entry.childCount === "number" ? `children=${entry.childCount}` : undefined,
-    entry.type === "file" && typeof entry.sizeBytes === "number" ? `bytes=${entry.sizeBytes}` : undefined,
-    entry.type === "file" && entry.ext ? `ext=${entry.ext}` : undefined,
-  ].filter((item): item is string => Boolean(item));
-  return `${entry.path} (${details.join(", ")})`;
+  const marker: Record<DiscoveryEntryType, string> = {
+    dir: "D",
+    file: "F",
+    symlink: "L",
+    other: "O",
+  };
+  return `${marker[entry.type]} ${entry.path}`;
 }

@@ -110,7 +110,7 @@ function baseRun(status: RunState["status"], steps: RunState["steps"]): RunState
     endedAt: new Date().toISOString(),
     warnings: [],
     route: {
-      kind: "multi-agent-chain",
+      kind: "multi-agent-sequential",
       agents: steps.map((item) => item.agent),
       risk: "medium",
       ambiguity: "low",

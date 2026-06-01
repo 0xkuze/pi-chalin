@@ -66,7 +66,7 @@ test("estimateBudgetPreflight classifies long autonomous work as resumable DAG/a
 
 test("evaluateBudgetUsage reports exhausted budgets as soft telemetry without stopping subagents", () => {
   const reviewer = agent("reviewer", "review");
-  const policy = policyForStep(reviewer, { agent: "reviewer", task: "Review project", budget: "tight" }, "multi-agent-chain");
+  const policy = policyForStep(reviewer, { agent: "reviewer", task: "Review project", budget: "tight" }, "multi-agent-sequential");
   const health = evaluateBudgetUsage(policy, {
     elapsedMs: policy.caps.maxSeconds * 1000 + 1,
     toolCalls: policy.caps.maxToolCalls,
@@ -90,7 +90,7 @@ test("budget-disabled harness mode suppresses continuation gates for ablation ev
   process.env.PI_CHALIN_DISABLE_BUDGET_GATES = "1";
   try {
     const reviewer = agent("reviewer", "review");
-    const policy = policyForStep(reviewer, { agent: "reviewer", task: "Review project", budget: "tight" }, "multi-agent-chain");
+    const policy = policyForStep(reviewer, { agent: "reviewer", task: "Review project", budget: "tight" }, "multi-agent-sequential");
     const health = evaluateBudgetUsage(policy, {
       toolCalls: policy.caps.maxToolCalls + 10,
       elapsedMs: (policy.caps.maxSeconds + 1) * 1000,
@@ -113,7 +113,7 @@ test("budget-disabled harness mode suppresses continuation gates for ablation ev
 
 test("tool-call budget alone remains a soft cap and never checkpoints the stage", () => {
   const scout = agent("scout", "recon");
-  const policy = policyForStep(scout, { agent: "scout", task: "Map project", budget: "normal" }, "multi-agent-chain");
+  const policy = policyForStep(scout, { agent: "scout", task: "Map project", budget: "normal" }, "multi-agent-sequential");
   const health = evaluateBudgetUsage(policy, {
     elapsedMs: 1000,
     toolCalls: policy.caps.maxToolCalls,
@@ -204,7 +204,7 @@ test("scoreProgress flags late first signal even when later findings exist", () 
 
 test("evaluateBudgetUsage records low-signal progress without checkpointing budget caps", () => {
   const scout = agent("scout", "recon");
-  const policy = policyForStep(scout, { agent: "scout", task: "Map project", budget: "normal" }, "multi-agent-chain");
+  const policy = policyForStep(scout, { agent: "scout", task: "Map project", budget: "normal" }, "multi-agent-sequential");
   const health = evaluateBudgetUsage(policy, {
     elapsedMs: 1000,
     toolCalls: policy.caps.maxToolCalls,

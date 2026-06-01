@@ -130,12 +130,12 @@ export function budgetCheckpointSchedule(): BudgetCheckpointSchedule {
 export function policyForStep(
   agent: AgentDefinition | undefined,
   step: Pick<RunStepState, "agent" | "task" | "budget">,
-  routeKind: RouteKind = "single-agent",
+  routeKind: RouteKind = "multi-agent-sequential",
   risk: RouteRisk = "low",
 ): BudgetPolicy {
   const profile = step.budget ?? inferredBudgetProfile(agent, step, routeKind);
   const taskKind = taskKindForStep(agent, { ...step, budget: profile }, routeKind);
-  const caps = scaleCaps(baseCapsForTask(taskKind, agent?.name ?? step.agent), profile, risk);
+  const caps = scaleCaps(baseCapsForTask(taskKind, agent), profile, risk);
   return {
     id: `${taskKind}:${profile}:${risk}`,
     taskKind,
@@ -303,8 +303,8 @@ function compare(caps: BudgetCapHit[], name: BudgetCapName, used: number, limit:
   });
 }
 
-function baseCapsForTask(taskKind: BudgetTaskKind, agentName: string): BudgetCaps {
-  const baseToolCalls = baseToolCallsFor(taskKind, agentName);
+function baseCapsForTask(taskKind: BudgetTaskKind, agent: AgentDefinition | undefined): BudgetCaps {
+  const baseToolCalls = baseToolCallsFor(taskKind, agent);
   const isLong = taskKind === "long-autonomous";
   const isWriteHeavy = taskKind === "implementation" || taskKind === "migration";
   const isSynthesis = taskKind === "synthesis" || taskKind === "planning";
@@ -320,12 +320,8 @@ function baseCapsForTask(taskKind: BudgetTaskKind, agentName: string): BudgetCap
   };
 }
 
-function baseToolCallsFor(taskKind: BudgetTaskKind, agentName: string): number {
-  if (agentName === "context-builder") return 60;
-  if (agentName === "scout") return 40;
-  if (agentName === "planner") return 25;
-  if (agentName === "reviewer") return 50;
-  if (agentName === "worker") return 80;
+function baseToolCallsFor(taskKind: BudgetTaskKind, agent: AgentDefinition | undefined): number {
+  if (agent?.budget?.baseToolCalls) return agent.budget.baseToolCalls;
   if (taskKind === "long-autonomous") return 160;
   if (taskKind === "migration") return 120;
   if (taskKind === "implementation") return 80;

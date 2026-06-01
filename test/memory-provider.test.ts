@@ -149,7 +149,8 @@ test("ChalinKernel uses Engram across a chained subagent route", async () => {
   }));
   const config = engramConfig(fake.url);
   const route = routeFromPlan({
-    topology: "chain",
+    topology: "sequential",
+    expectedEffects: ["read", "verify"],
     needsMemory: true,
     needsArtifacts: false,
     steps: [

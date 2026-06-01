@@ -71,7 +71,8 @@ test("ArtifactStore persists resumable feature state with checkpoints and valida
 test("ChalinKernel records run artifacts for long or artifact-aware workflows", async () => {
   const cwd = tempDir("pi-chalin-artifacts-kernel-");
   const route = routeFromPlan({
-    topology: "chain",
+    topology: "sequential",
+    expectedEffects: ["read", "verify"],
     steps: [
       { agent: "scout", task: "Map project context." },
       { agent: "reviewer", task: "Review findings." },
@@ -85,7 +86,7 @@ test("ChalinKernel records run artifacts for long or artifact-aware workflows", 
   const store = new ArtifactStore({ cwd });
   const summary = await store.loadRun(result.run!.id);
   assert.equal(summary?.runId, result.run!.id);
-  assert.equal(summary?.routeKind, "multi-agent-chain");
+  assert.equal(summary?.routeKind, "multi-agent-sequential");
   assert.deepEqual(summary?.agents, ["scout", "reviewer"]);
   assert.ok((summary?.handoffs.length ?? 0) >= 1);
 });

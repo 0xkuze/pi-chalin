@@ -75,11 +75,62 @@ export interface SkillTraceEvent {
   metadata?: Record<string, string | number | boolean>;
 }
 
+export type TrajectoryEventType =
+  | "routing.decision"
+  | "policy.decision"
+  | "policy.nudge"
+  | "verifier.result"
+  | "reviewer.verdict"
+  | "repair.decision";
+
+export interface TrajectoryEvent {
+  type: TrajectoryEventType;
+  at: string;
+  runId?: string;
+  stepId?: string;
+  agent?: string;
+  decision?: string;
+  reason?: string;
+  confidence?: number;
+  blockingGap?: boolean;
+  metadata?: Record<string, string | number | boolean>;
+}
+
 export function createSkillTraceEvent(input: Omit<SkillTraceEvent, "at"> & { at?: string }): SkillTraceEvent {
   return {
     ...input,
     at: input.at ?? new Date().toISOString(),
   };
+}
+
+export function createTrajectoryEvent(input: Omit<TrajectoryEvent, "at"> & { at?: string }): TrajectoryEvent {
+  return {
+    ...input,
+    at: input.at ?? new Date().toISOString(),
+    metadata: compactAttributes(input.metadata),
+  };
+}
+
+export function mergeTrajectoryEvents(...groups: Array<TrajectoryEvent[] | undefined>): TrajectoryEvent[] {
+  const merged: TrajectoryEvent[] = [];
+  const seen = new Set<string>();
+  for (const group of groups) {
+    for (const event of group ?? []) {
+      const key = [
+        event.type,
+        event.at,
+        event.runId ?? "",
+        event.stepId ?? "",
+        event.agent ?? "",
+        event.decision ?? "",
+        event.reason ?? "",
+      ].join("\0");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push({ ...event, metadata: compactAttributes(event.metadata) });
+    }
+  }
+  return merged.slice(0, 300);
 }
 
 export function buildPromptTokenomics(input: Partial<Record<TokenomicsPhase, string>>): TokenomicsSummary {

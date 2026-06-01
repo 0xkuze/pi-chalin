@@ -7,14 +7,14 @@ function run(overrides: Partial<RunState> = {}): RunState {
   return {
     id: "chalin-test",
     route: {
-      kind: "multi-agent-chain",
+      kind: "multi-agent-sequential",
       agents: ["scout", "worker", "reviewer"],
       risk: "medium",
       ambiguity: "low",
       needsMemory: true,
       needsArtifacts: true,
       reason: "test",
-      plan: { kind: "chain", steps: [{ agent: "scout", task: "scan" }, { agent: "worker", task: "edit" }, { agent: "reviewer", task: "verify" }] },
+      plan: { kind: "sequential", steps: [{ agent: "scout", task: "scan" }, { agent: "worker", task: "edit" }, { agent: "reviewer", task: "verify" }] },
     },
     status: "complete",
     startedAt: new Date().toISOString(),

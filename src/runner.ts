@@ -1,18 +1,18 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { Context, Effect, Layer } from "effect";
-import type { AgentDefinition, AgentThinkingLevel } from "./schemas.ts";
+import type { AgentDefinition, AgentHandoff, AgentThinkingLevel, ReviewerVerdict } from "./schemas.ts";
 import { evaluateBudgetUsage, policyForStep, recordBudgetCheckpoint, scoreProgress, summarizeToolUtility } from "./budget.ts";
 import { candidateMatchesTransientClaim, claimsNeedingAudit, claimsRequireAudit, isTransientVerificationStateClaim, parseClaimLedger } from "./evidence-claims.ts";
 import type { ChalinPathsOptions } from "./paths.ts";
 import { createMemoryCandidate } from "./memory.ts";
 import { createConfiguredMemoryStore } from "./memory-provider.ts";
-import type { AgentOutput, AgentStep, BudgetCapHit, EvidenceClaim, MemoryCandidate, RouteDecision, RoutePlan, RunState, RunStepMetrics, RunStepState, TokenUsageSummary, ToolBudgetProfile } from "./schemas.ts";
+import type { AgentOutput, AgentStep, BudgetCapHit, EvidenceClaim, MemoryCandidate, RouteDecision, RouteExpectedEffect, RoutePlan, RunState, RunStepMetrics, RunStepState, TokenUsageSummary, ToolBudgetProfile } from "./schemas.ts";
 import { createChildToolPolicy, createChildTools, type ChalinDelegateParamsShape, type ChildToolActivity, type ChildToolPolicy } from "./child-tools.ts";
 import { createChalinChildSessionManager } from "./child-sessions.ts";
 import { buildProjectSnapshot, formatProjectSnapshot } from "./snapshot.ts";
 import { ArtifactStore } from "./artifacts.ts";
-import { buildPromptTokenomics, buildRunLifecycleSpans, buildToolOutputTokenomics, createSkillTraceEvent, createStructuredSpan, mergeTraceSpans, type SkillTraceEvent, type StructuredTraceSpan, type StructuredTraceSpanKind, type TokenomicsSummary } from "./observability.ts";
+import { buildPromptTokenomics, buildRunLifecycleSpans, buildToolOutputTokenomics, createSkillTraceEvent, createStructuredSpan, createTrajectoryEvent, mergeTraceSpans, mergeTrajectoryEvents, type SkillTraceEvent, type StructuredTraceSpan, type StructuredTraceSpanKind, type TokenomicsSummary, type TrajectoryEvent } from "./observability.ts";
 import { resolveAgentModel, resolveAgentThinking, resolveInheritedModelFallback, type ResolvedAgentModel } from "./model-resolution.ts";
 import { buildSdkPrompt, childToolNames, handoffReviewToolCallLimit, isHandoffGapReadMode, resolveStepCompletionStatus, synthesisCrossStepDuplicateReadLimit, synthesisGapReadLimit, synthesisToolCallLimit, type SdkPromptOptions } from "./runner-prompt.ts";
 import { createRunState, isUsableStepHandoff, persistRun, prepareRunForResume } from "./runner-state.ts";
@@ -21,6 +21,7 @@ import { cleanupWorktrees, mergeWorktreeChanges, needsWorktreeIsolation, prepare
 import { DEFAULT_CONFIG, type ChalinConfig } from "./config.ts";
 import { SkillCatalog, effectiveSkillToolNames, resolveSkillsForStep } from "./skills.ts";
 import { checkpointSummary, isUsableStepStatus } from "./status.ts";
+import { normalizeRouteForExecution } from "./route-guards.ts";
 
 export interface WorkerRunnerContext extends ChalinPathsOptions {
   agents: Map<string, AgentDefinition>;
@@ -99,8 +100,9 @@ export class MockWorkerRunner implements WorkerRunner {
     context.onUpdate?.(run);
     const plan = route.plan;
     if (!plan) return completeRun(run, context);
-    if (plan.kind === "parallel" && needsWorktreeIsolation(plan.tasks, context.agents)) {
-      const isolation = prepareWorktreeIsolation({ cwd: context.cwd, runId: run.id, steps: plan.tasks, agents: context.agents });
+    const dagSteps = plan.kind === "dag" ? plan.stages.flatMap((stage) => stage.tasks) : [];
+    if (plan.kind === "dag" && needsWorktreeIsolation(dagSteps, context.agents)) {
+      const isolation = prepareWorktreeIsolation({ cwd: context.cwd, runId: run.id, steps: dagSteps, agents: context.agents });
       run.warnings.push(...isolation.warnings);
       if (isolation.enabled) {
         run.warnings.push("Parallel writer worktree isolation active; mock run cleaned isolated worktrees after completion.");
@@ -128,12 +130,8 @@ export class MockWorkerRunner implements WorkerRunner {
 function runMockPlan(run: RunState, plan: RoutePlan, context: WorkerRunnerContext): Promise<void> {
   return Effect.runPromise(Effect.gen(function* () {
     yield* checkAbortEffect(context.signal);
-    if (plan.kind === "single") {
-      yield* runChainEffect(run, [run.steps[0]!], context, {});
-    } else if (plan.kind === "chain") {
+    if (plan.kind === "sequential") {
       yield* runChainEffect(run, run.steps, context, {});
-    } else if (plan.kind === "parallel") {
-      yield* runParallelEffect(run.steps, context, undefined, run, "runner.mock.parallel");
     } else {
       yield* runnerTryPromise(() => runMockDag(run, plan.stages, context));
     }
@@ -148,10 +146,8 @@ function runMockPlan(run: RunState, plan: RoutePlan, context: WorkerRunnerContex
 function resumeMockPlan(run: RunState, plan: RoutePlan, context: WorkerRunnerContext): Promise<void> {
   return Effect.runPromise(Effect.gen(function* () {
     yield* checkAbortEffect(context.signal);
-    if (plan.kind === "single" || plan.kind === "chain") {
+    if (plan.kind === "sequential") {
       yield* runChainEffect(run, run.steps, context, { resume: true, initialPrevious: aggregateCompletedHandoffBefore(run.steps, run.steps.length) });
-    } else if (plan.kind === "parallel") {
-      yield* runParallelEffect(run.steps.filter((step) => !isUsableStepHandoff(step)), context, undefined, run, "runner.mock.resumeParallel");
     } else {
       yield* runnerTryPromise(() => resumeMockDag(run, plan.stages, context));
     }
@@ -184,9 +180,7 @@ export class SdkWorkerRunner implements WorkerRunner {
     context.onUpdate?.(run);
     const plan = route.plan;
     if (!plan) return completeRun(run, context);
-    if (plan.kind === "parallel") {
-      await runSdkParallelSteps(run, plan.tasks, context, extensionContext);
-    } else if (plan.kind === "dag") {
+    if (plan.kind === "dag") {
       await runSdkDag(run, plan.stages, context, extensionContext);
     } else {
       let previous = "";
@@ -217,9 +211,7 @@ export class SdkWorkerRunner implements WorkerRunner {
     context.onUpdate?.(run);
     const plan = run.route.plan;
     if (!plan) return completeRun(run, context);
-    if (plan.kind === "parallel") {
-      await runSdkParallelSteps(run, plan.tasks, context, extensionContext);
-    } else if (plan.kind === "dag") {
+    if (plan.kind === "dag") {
       await runSdkDag(run, plan.stages, context, extensionContext);
     } else {
       let previous = "";
@@ -430,7 +422,7 @@ function maybeAppendImplementationReviewRepair(run: RunState, step: RunStepState
   if (stepIndex < 0 || hasLaterImplementationRepair(run, stepIndex)) return false;
   const workerIndex = findLastIndex(run.steps, (candidate, index) => index < stepIndex && candidate.agent === "worker" && isUsableStepHandoff(candidate));
   if (workerIndex < 0) return false;
-  const reviewerGap = reviewerHandoffNeedsRepair(step);
+  const reviewerGap = reviewerHandoffNeedsRepair(step, { expectsReviewedContent: true, expectsVerify: routeExpectedEffects(run).has("verify") });
   const permanentTestGap = !reviewerGap && implementationPassNeedsPermanentTestRepair(run, workerIndex, stepIndex);
   if (!reviewerGap && !permanentTestGap) return false;
   const existingRepairCycles = implementationReviewRepairCycleCount(run);
@@ -537,16 +529,92 @@ function normalizeMetricFilePath(filePath: string): string {
   return filePath.replace(/\\/g, "/").replace(/^\.\//, "").trim();
 }
 
-export function reviewerHandoffNeedsRepair(step: Pick<RunStepState, "agent" | "status" | "output">): boolean {
+export function reviewerHandoffNeedsRepair(step: Pick<RunStepState, "agent" | "status" | "output">, options: { expectsReviewedContent?: boolean; expectsVerify?: boolean } = {}): boolean {
   if (step.agent !== "reviewer" || !isUsableStepHandoff(step)) return false;
-  const text = (step.output?.handoff?.trim() ? step.output.handoff : step.output?.text ?? "").trim();
-  if (!text) return false;
-  const explicitVerdict = /\bverdict\s*:\s*(PASS|FAIL|GAP|BLOCKER|BLOCKING)\b/i.exec(text)?.[1]?.toUpperCase();
-  const signalText = stripNonBlockingReviewerPhrases(text);
-  const blockingSignal = /\b(?:blocking\s+gap|bugs?\s+found|coverage\s+is\s+insufficient|tests?\s+miss|does\s+not\s+exercise|verification\s+blind\s+spot|bug remains|does not meet|missing acceptance|missing\s+tests?\s+for|insufficient tests|skipped scope|test\s+coverage\s+gap|permanent\s+test\s+suite\s+could\s+be\s+expanded|untested\s+in\s+the\s+permanent\s+suite|permanent\s+coverage\s+missing|ad[- ]hoc\s+(?:tests?|checks?|verification)[^.\n]{0,80}(?:not\s+a\s+substitute|only|instead|replace)|must fix|required[^.\n]{0,80}missing|no cumple|falta(?:n)?[^.\n]{0,80}(?:criteri|test|cobertura|validaci[oó]n|implementaci[oó]n|alcance|aceptaci[oó]n|required|coverage|verification|scope))\b/i.test(signalText);
-  if (explicitVerdict === "PASS" && !blockingSignal) return false;
-  if (explicitVerdict && explicitVerdict !== "PASS") return true;
-  return blockingSignal || /\b(?:FAIL|BLOCKER|BLOCKING)\b/i.test(signalText) || /^\s*[-*]?\s*GAP\b/im.test(signalText);
+  const verdict = step.output?.reviewerVerdict;
+  if (!verdict) return true;
+  if (verdict.verdict === "pass" && options.expectsReviewedContent && !hasReviewedContentEvidence(verdict.evidence)) {
+    const warning = "Structured Reviewer Verdict pass lacks real evidence of reviewed files or content.";
+    step.output!.warnings = appendUnique(step.output!.warnings, warning);
+    return true;
+  }
+  if (verdict.verdict === "pass" && options.expectsVerify && !hasRealVerificationEvidence(verdict.evidence)) {
+    const warning = "Structured Reviewer Verdict pass lacks real verification evidence for a route that expects verify.";
+    step.output!.warnings = appendUnique(step.output!.warnings, warning);
+    return true;
+  }
+  return verdict.verdict !== "pass"
+    || verdict.blockingFindings.length > 0
+    || verdict.missingCoverage.length > 0
+    || Boolean(verdict.requiredRepair?.trim());
+}
+
+function hasRealVerificationEvidence(evidence: string[]): boolean {
+  return evidence.some((item) => isRealVerificationEvidence(item));
+}
+
+function hasReviewedContentEvidence(evidence: string[]): boolean {
+  return evidence.some((item) => isReviewedContentEvidence(item));
+}
+
+function isReviewedContentEvidence(value: string): boolean {
+  const text = value.trim();
+  if (!text || isWeakReviewedContentEvidenceText(text) || isCommandOnlyVerificationEvidence(text)) return false;
+  return evidenceTokens(text).some((token) => looksLikeReviewedFileToken(token));
+}
+
+function isWeakReviewedContentEvidenceText(text: string): boolean {
+  return /\b(?:handoff|claimed?|claims?|reported|says?|said|assumed|assumption|summary only|not rechecked|not reviewed)\b/i.test(text);
+}
+
+function isCommandOnlyVerificationEvidence(text: string): boolean {
+  if (!isRealVerificationEvidence(text)) return false;
+  if (/\b(?:read|re-read|review(?:ed)?|inspect(?:ed)?|open(?:ed)?|check(?:ed)?|diff|changed content|implementation file|test file)\b/i.test(text)) return false;
+  return true;
+}
+
+function evidenceTokens(text: string): string[] {
+  return text
+    .split(/[\s,;()[\]{}]+/)
+    .map((token) => token.replace(/^[`'"]+|[`'".:]+$/g, ""))
+    .filter(Boolean);
+}
+
+function looksLikeReviewedFileToken(token: string): boolean {
+  const normalized = token
+    .replace(/\\/g, "/")
+    .replace(/^\.?\//, "")
+    .replace(/:\d+(?::\d+)?$/, "")
+    .replace(/#L\d+(?:-L\d+)?$/i, "");
+  const basename = normalized.split("/").at(-1)?.toLowerCase() ?? "";
+  if (REVIEWED_CONTENT_BASENAMES.has(basename)) return true;
+  return normalized.includes("/") && /\.[a-z0-9][a-z0-9_-]*$/i.test(basename);
+}
+
+const REVIEWED_CONTENT_BASENAMES = new Set([
+  "dockerfile",
+  "makefile",
+  "package.json",
+  "bun.lock",
+  "bun.lockb",
+  "tsconfig.json",
+  "jsconfig.json",
+  "vite.config.ts",
+  "vitest.config.ts",
+  "jest.config.js",
+]);
+
+function isRealVerificationEvidence(value: string): boolean {
+  const text = value.trim();
+  if (!text || isWeakVerificationEvidenceText(text)) return false;
+  if (/\b(?:handoff|claimed?|claims?|reported|says?|said)\b/i.test(text)) return false;
+  return /\b(?:bun|npm|pnpm|yarn|make|cargo|pytest|vitest|jest|mocha|deno|go\s+test|python\s+-m|uv\s+run|mvn|gradle|dotnet|swift\s+test|xcodebuild|zig|ctest|rspec|bundle\s+exec)\b[\s\S]*\b(?:test|tests|check|build|lint|typecheck|verify|verification)\b/i.test(text)
+    || /\b(?:test|tests|suite|build|lint|typecheck|verification)\b[\s\S]*\b(?:pass(?:ed|es)?|green|success(?:ful)?|succeeded|exit(?:ed)?\s+0|0\s+failures?)\b/i.test(text)
+    || /\b(?:exit(?:ed)?\s+0|0\s+failures?)\b/i.test(text);
+}
+
+function isWeakVerificationEvidenceText(text: string): boolean {
+  return /\b(?:dry[- ]?run|preview|inventory|grep count|partial logs?|logs? parciales?|not executed|unexecuted|no ejecutad[oa]s?|would run|no corrid[oa]s?)\b/i.test(text);
 }
 
 function appendImplementationReviewRepair(run: RunState, cycle: number, repairWorker: RunStepState, repairReviewer: RunStepState, reason: string): void {
@@ -573,22 +641,18 @@ function appendImplementationReviewRepair(run: RunState, cycle: number, repairWo
     return;
   }
 
-  const existingPlanSteps: AgentStep[] = run.route.plan?.kind === "single"
-    ? [{ agent: run.route.plan.agent, task: run.route.plan.task, budget: run.route.plan.budget }]
-    : run.route.plan?.kind === "chain"
-      ? run.route.plan.steps
-      : run.route.plan?.kind === "parallel"
-        ? run.route.plan.tasks
-        : run.steps.map((candidate) => ({ agent: candidate.agent, task: candidate.task, budget: candidate.budget }));
+  const existingPlanSteps: AgentStep[] = run.route.plan?.kind === "sequential"
+    ? run.route.plan.steps
+    : run.steps.map((candidate) => ({ agent: candidate.agent, task: candidate.task, budget: candidate.budget }));
   run.steps.push(repairWorker, repairReviewer);
   run.route = {
     ...run.route,
-    kind: "multi-agent-chain",
+    kind: "multi-agent-sequential",
     agents: [...run.route.agents, "worker", "reviewer"],
     needsArtifacts: true,
     reason: routeReason,
     plan: {
-      kind: "chain",
+      kind: "sequential",
       steps: [...existingPlanSteps, workerPlanStep, reviewerPlanStep],
     },
   };
@@ -617,16 +681,6 @@ function maxImplementationReviewRepairCycles(): number {
   const parsed = Number(process.env.PI_CHALIN_IMPLEMENTATION_REVIEW_REPAIR_CYCLES);
   if (!Number.isFinite(parsed)) return 2;
   return Math.max(0, Math.min(4, Math.floor(parsed)));
-}
-
-function stripNonBlockingReviewerPhrases(text: string): string {
-  return text
-    .replace(/\bno\s+bugs?\s+found\b/gi, "")
-    .replace(/\bno\s+(?:blocking\s+)?gaps?\s+(?:remain|remaining|found)?\b/gi, "")
-    .replace(/\bno\s+remaining\s+(?:gaps?|blockers?|issues?)\b/gi, "")
-    .replace(/\bno\s+missing\s+(?:acceptance|criteria|coverage|tests?|verification|scope)[^.\n]*/gi, "")
-    .replace(/[^.\n]*(?:not required by (?:the )?(?:user )?goal|not required by (?:the )?(?:original )?request)[^.\n]*/gi, "")
-    .replace(/\bno\s+falta(?:n)?[^.\n]*/gi, "");
 }
 
 export function shouldStopAfterDagStage(stageSteps: Pick<RunStepState, "status" | "agent" | "output" | "error">[], agents: Map<string, AgentDefinition>): boolean {
@@ -659,6 +713,129 @@ function isWriterAgent(agent?: AgentDefinition): boolean {
     || agent.concern === "conflict-resolution"
     || agent.capabilities.includes("edit-files")
     || agent.capabilities.includes("write-new-files");
+}
+
+type StructuredHandoffContractAction = "accept" | "warn" | "checkpoint" | "fail";
+
+export function applyStructuredHandoffContract(run: RunState | undefined, step: RunStepState, agent?: AgentDefinition): StructuredHandoffContractAction {
+  const output = step.output;
+  if (!output) return "accept";
+  if (output.structuredHandoff) {
+    const fieldGaps = structuredHandoffFieldGaps(run, step, agent);
+    if (fieldGaps.length === 0) return "accept";
+    const action = structuredHandoffContractAction(run, step, agent);
+    const reason = structuredHandoffFieldGapReason(step, fieldGaps);
+    output.warnings = appendUnique(output.warnings, reason);
+    if (run) pushUniqueWarnings(run, [reason]);
+    if (action === "warn") return "warn";
+    if (action === "fail") {
+      step.status = "failed";
+      step.error = reason;
+      return "fail";
+    }
+    if (step.status === "complete") {
+      step.status = "checkpointed";
+      step.checkpoint = {
+        kind: "handoff-contract",
+        continuation: "review",
+        reason,
+      };
+    }
+    return "checkpoint";
+  }
+  const action = structuredHandoffContractAction(run, step, agent);
+  if (action === "accept") return "accept";
+
+  const reason = structuredHandoffContractReason(step, output.handoffContract ?? "missing");
+  output.warnings = appendUnique(output.warnings, reason);
+  if (run) pushUniqueWarnings(run, [reason]);
+
+  if (action === "warn") return "warn";
+  if (action === "fail") {
+    step.status = "failed";
+    step.error = reason;
+    return "fail";
+  }
+
+  if (step.status === "complete") {
+    step.status = "checkpointed";
+    step.checkpoint = {
+      kind: "handoff-contract",
+      continuation: "review",
+      reason,
+    };
+  }
+  return "checkpoint";
+}
+
+function structuredHandoffContractAction(run: RunState | undefined, step: RunStepState, agent?: AgentDefinition): StructuredHandoffContractAction {
+  if (step.status !== "complete") return "warn";
+  const expectedEffects = routeExpectedEffects(run);
+  if (isWriterAgent(agent) || (expectedEffects.has("write") && isWriteResponsibleStep(step, agent))) return "fail";
+  if (requiresContractualHandoff(run, step, agent)) return "checkpoint";
+  return "warn";
+}
+
+function requiresContractualHandoff(run: RunState | undefined, step: RunStepState, agent?: AgentDefinition): boolean {
+  const concern = agent?.concern;
+  if (concern === "planning" || concern === "context-building" || concern === "review" || concern === "decision-consistency" || concern === "conflict-resolution") return true;
+  const expectedEffects = routeExpectedEffects(run);
+  if (expectedEffects.has("write") || expectedEffects.has("verify")) return true;
+  if (run?.route.plan?.kind === "dag") return true;
+  const feedsAnotherStep = run ? run.steps.indexOf(step) >= 0 && run.steps.indexOf(step) < run.steps.length - 1 : false;
+  if (feedsAnotherStep && concern !== "recon" && concern !== "research") return true;
+  return false;
+}
+
+function structuredHandoffFieldGaps(run: RunState | undefined, step: RunStepState, agent?: AgentDefinition): string[] {
+  const handoff = step.output?.structuredHandoff;
+  if (!handoff) return [];
+  const expectedEffects = routeExpectedEffects(run);
+  const gaps: string[] = [];
+  if (requiresChangedFilesInStructuredHandoff(expectedEffects, step, agent) && handoff.changedFiles.length === 0) {
+    gaps.push("changedFiles is required for writer/write handoffs");
+  }
+  if (requiresVerificationInStructuredHandoff(expectedEffects, step, agent) && handoff.verification.length === 0) {
+    gaps.push("verification is required for verify handoffs");
+  }
+  return gaps;
+}
+
+function requiresChangedFilesInStructuredHandoff(expectedEffects: Set<RouteExpectedEffect>, step: RunStepState, agent?: AgentDefinition): boolean {
+  return isWriterAgent(agent) || (expectedEffects.has("write") && isWriteResponsibleStep(step, agent));
+}
+
+function requiresVerificationInStructuredHandoff(expectedEffects: Set<RouteExpectedEffect>, step: RunStepState, agent?: AgentDefinition): boolean {
+  if (!expectedEffects.has("verify")) return false;
+  return isWriteResponsibleStep(step, agent) || isVerificationResponsibleStep(step, agent);
+}
+
+function isWriteResponsibleStep(step: RunStepState, agent?: AgentDefinition): boolean {
+  return isWriterAgent(agent) || /^(?:worker|writer|implementer|conflict-resolver)$/i.test(step.agent);
+}
+
+function isVerificationResponsibleStep(step: RunStepState, agent?: AgentDefinition): boolean {
+  if (agent?.concern === "review" || agent?.concern === "conflict-resolution" || agent?.capabilities.includes("validate")) return true;
+  return /^(?:reviewer|verifier|validator|qa)$/i.test(step.agent) || /\b(?:verify|validate|review|test)\b/i.test(step.task);
+}
+
+function routeExpectedEffects(run: RunState | undefined): Set<RouteExpectedEffect> {
+  return new Set(run?.route.expectedEffects ?? ["read"]);
+}
+
+function structuredHandoffContractReason(step: RunStepState, contract: NonNullable<AgentOutput["handoffContract"]>): string {
+  const mode = contract === "legacy-degraded"
+    ? "fell back to legacy ## Handoff text"
+    : "did not provide a usable handoff";
+  return `${step.agent}/${step.id} ${mode}; structured ## Agent Handoff is required before treating this step as a contractual multi-agent result.`;
+}
+
+function structuredHandoffFieldGapReason(step: RunStepState, gaps: string[]): string {
+  return `${step.agent}/${step.id} structured ## Agent Handoff is missing required contract field(s): ${gaps.join("; ")}.`;
+}
+
+function appendUnique<T>(items: T[], item: T): T[] {
+  return items.includes(item) ? items : [...items, item];
 }
 
 async function runSdkStage(
@@ -844,9 +1021,10 @@ async function runSdkStep(
       break;
     }
     step.status = resolveStepCompletionStatus(step);
+    applyStructuredHandoffContract(run, step, agent);
     if (step.status === "checkpointed") {
       run.warnings.push(`${step.agent} checkpointed partial handoff for ${step.checkpoint?.continuation ?? "continuation"}.`);
-      await recordBudgetCheckpoint(new ArtifactStore({ cwd: context.cwd }), run.id, step, "Budget cap reached during SDK child execution.");
+      await recordBudgetCheckpoint(new ArtifactStore({ cwd: context.cwd }), run.id, step, step.checkpoint?.reason ?? "Budget cap reached during SDK child execution.");
     }
     persistRun(run);
     context.onUpdate?.(run);
@@ -1030,10 +1208,14 @@ async function runNestedDelegation(params: ChalinDelegateParamsShape, input: {
   extensionContext: ExtensionContext;
   cwd: string;
 }): Promise<{ text: string; details?: unknown }> {
-  const route = routeFromNestedDelegationPlan(params);
+  let route = routeFromNestedDelegationPlan(params);
   if (!route.plan) {
     return { text: `Nested delegation rejected: ${route.reason}` };
   }
+  route = normalizeRouteForExecution(route, {
+    requiresWorkspaceMutation: Boolean(params.requiresWorkspaceMutation || route.expectedEffects?.includes("write")),
+    task: params.task,
+  });
   const missing = route.agents.filter((agent) => !input.context.agents.has(agent));
   if (missing.length > 0) {
     return { text: `Nested delegation rejected: unknown agent(s): ${missing.join(", ")}.` };
@@ -1064,10 +1246,11 @@ async function runNestedDelegation(params: ChalinDelegateParamsShape, input: {
 
 function routeFromNestedDelegationPlan(input: ChalinDelegateParamsShape): RouteDecision {
   const steps = sanitizeNestedSteps(input.steps ?? []);
+  const expectedEffects = nestedExpectedEffects(input);
   if (input.topology === "dag") {
     const stages = sanitizeNestedStages(input.stages ?? []);
     if (stages.length === 0) {
-      return { kind: "ask-user", agents: [], risk: "low", ambiguity: "high", needsMemory: false, needsArtifacts: false, reason: "Nested dag requires at least one stage with tasks." };
+      return { kind: "ask-user", agents: [], risk: "low", ambiguity: "high", needsMemory: false, needsArtifacts: false, expectedEffects: ["read"], reason: "Nested dag requires at least one stage with tasks." };
     }
     const agents = stages.flatMap((stage) => stage.tasks.map((step) => step.agent));
     return {
@@ -1077,29 +1260,28 @@ function routeFromNestedDelegationPlan(input: ChalinDelegateParamsShape): RouteD
       ambiguity: "low",
       needsMemory: false,
       needsArtifacts: true,
+      expectedEffects,
       reason: input.reason.trim() || "Subagent selected a rare nested DAG because the current task was no longer bounded.",
       plan: { kind: "dag", stages },
     };
   }
-  if (steps.length === 0) {
-    return { kind: "ask-user", agents: [], risk: "low", ambiguity: "high", needsMemory: false, needsArtifacts: false, reason: "Nested single/chain/parallel delegation requires steps." };
-  }
+  if (steps.length === 0) return { kind: "ask-user", agents: [], risk: "low", ambiguity: "high", needsMemory: false, needsArtifacts: false, expectedEffects: ["read"], reason: "Nested sequential delegation requires steps." };
   const agents = steps.map((step) => step.agent);
-  const plan: RoutePlan = input.topology === "parallel"
-    ? { kind: "parallel", tasks: steps }
-    : input.topology === "chain" || steps.length > 1
-    ? { kind: "chain", steps }
-    : { kind: "single", agent: steps[0]!.agent, task: steps[0]!.task, budget: steps[0]!.budget };
   return {
-    kind: input.topology === "parallel" ? "multi-agent-parallel" : input.topology === "chain" || steps.length > 1 ? "multi-agent-chain" : "single-agent",
+    kind: "multi-agent-sequential",
     agents,
     risk: input.requiresWorkspaceMutation ? "medium" : "low",
     ambiguity: "low",
     needsMemory: false,
     needsArtifacts: true,
+    expectedEffects,
     reason: input.reason.trim() || "Subagent selected rare nested delegation because the current task was no longer bounded.",
-    plan,
+    plan: { kind: "sequential", steps },
   };
+}
+
+function nestedExpectedEffects(input: ChalinDelegateParamsShape): RouteExpectedEffect[] {
+  return input.requiresWorkspaceMutation ? ["read", "write", "verify"] : ["read"];
 }
 
 function sanitizeNestedSteps(steps: NonNullable<ChalinDelegateParamsShape["steps"]>): AgentStep[] {
@@ -1269,12 +1451,16 @@ export function parseAgentOutput(agent: string, raw: string): AgentOutput {
   const warnings: string[] = [];
   const claimLedger = parseClaimLedger(raw, agent);
   warnings.push(...claimLedger.warnings);
-  let handoff: string | undefined;
-  const handoffMatch = raw.match(/##\s*Handoff\s*\n([\s\S]*?)(?:\n##\s|$)/i);
-  if (handoffMatch?.[1]) handoff = truncateText(handoffMatch[1].trim(), handoffBudgetChars(agent));
+  const structuredHandoff = parseStructuredAgentHandoff(raw, claimLedger.claims, warnings);
+  const reviewerVerdict = agent === "reviewer" ? parseStructuredReviewerVerdict(raw, warnings) : undefined;
+  if (agent === "reviewer" && !reviewerVerdict) warnings.push("Reviewer output did not include a structured Reviewer Verdict.");
+  let handoff = structuredHandoff ? formatAgentHandoffForLegacy(structuredHandoff) : undefined;
+  const handoffBlock = extractMarkdownSection(raw, "Handoff");
+  if (!handoff && handoffBlock) handoff = truncateText(handoffBlock.trim(), handoffBudgetChars(agent));
+  const handoffContract = structuredHandoff ? "structured" : handoff ? "legacy-degraded" : "missing";
 
   const candidates: MemoryCandidate[] = [];
-  const memoryBlock = raw.match(/##\s*Memory Candidates?\s*\n([\s\S]*?)(?:\n##\s|$)/i)?.[1];
+  const memoryBlock = extractMarkdownSection(raw, "Memory Candidates") ?? extractMarkdownSection(raw, "Memory Candidate");
   if (memoryBlock) {
     for (const line of memoryBlock.split("\n")) {
       const parsed = parseMemoryCandidateLine(line);
@@ -1291,7 +1477,156 @@ export function parseAgentOutput(agent: string, raw: string): AgentOutput {
 
   if (raw.includes("## Memory Candidate") && candidates.length === 0) warnings.push("Memory candidate block was present but no valid bullet candidates were parsed.");
   const compactRaw = truncateText(raw.trim(), rawOutputBudgetChars());
-  return { agent, text: compactRaw, handoff, memoryCandidates: candidates.slice(0, memoryCandidateBudget()), claims: claimLedger.claims, raw: compactRaw, warnings };
+  return { agent, text: compactRaw, handoff, structuredHandoff, handoffContract, reviewerVerdict, memoryCandidates: candidates.slice(0, memoryCandidateBudget()), claims: claimLedger.claims, raw: compactRaw, warnings };
+}
+
+function parseStructuredAgentHandoff(raw: string, claims: EvidenceClaim[], warnings: string[]): AgentHandoff | undefined {
+  const value = parseJsonSection(raw, ["Agent Handoff", "Structured Handoff"], warnings);
+  if (!isRecord(value)) return undefined;
+  const summary = stringField(value, "summary");
+  if (!summary) {
+    warnings.push("Structured Agent Handoff omitted summary.");
+    return undefined;
+  }
+  return {
+    summary,
+    changedFiles: stringArrayField(value, "changedFiles"),
+    verification: stringArrayField(value, "verification"),
+    evidenceClaims: evidenceClaimsField(value, claims),
+    risks: stringArrayField(value, "risks"),
+    nextActions: stringArrayField(value, "nextActions"),
+  };
+}
+
+function parseStructuredReviewerVerdict(raw: string, warnings: string[]): ReviewerVerdict | undefined {
+  const value = parseJsonSection(raw, ["Reviewer Verdict"], warnings);
+  if (!isRecord(value)) return undefined;
+  const rawVerdict = stringField(value, "verdict").toLowerCase();
+  if (rawVerdict !== "pass" && rawVerdict !== "fail" && rawVerdict !== "gap") {
+    warnings.push(`Structured Reviewer Verdict has invalid verdict '${rawVerdict || "missing"}'.`);
+    return undefined;
+  }
+  const requiredRepair = stringField(value, "requiredRepair");
+  const evidence = stringArrayField(value, "evidence");
+  if (rawVerdict === "pass" && evidence.length === 0) {
+    warnings.push("Structured Reviewer Verdict pass omitted evidence; pass requires real evidence.");
+    return undefined;
+  }
+  return {
+    verdict: rawVerdict,
+    blockingFindings: stringArrayField(value, "blockingFindings"),
+    missingCoverage: stringArrayField(value, "missingCoverage"),
+    evidence,
+    ...(requiredRepair ? { requiredRepair } : {}),
+  };
+}
+
+function parseJsonSection(raw: string, names: string[], warnings: string[]): unknown {
+  for (const name of names) {
+    const section = extractMarkdownSection(raw, name);
+    if (!section) continue;
+    const jsonText = stripFencedJson(section);
+    try {
+      return JSON.parse(jsonText);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      warnings.push(`${name} JSON could not be parsed: ${message}`);
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+function extractMarkdownSection(raw: string, heading: string): string | undefined {
+  const wanted = normalizeHeading(heading);
+  const lines = raw.replace(/\r\n/g, "\n").split("\n");
+  let start = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    const normalized = normalizeHeadingLine(lines[index] ?? "");
+    if (normalized !== wanted) continue;
+    start = index + 1;
+    break;
+  }
+  if (start < 0) return undefined;
+  let end = lines.length;
+  for (let index = start; index < lines.length; index += 1) {
+    if (isMarkdownHeading(lines[index] ?? "")) {
+      end = index;
+      break;
+    }
+  }
+  return lines.slice(start, end).join("\n").trim();
+}
+
+function normalizeHeadingLine(line: string): string {
+  let index = 0;
+  while (line[index] === "#") index += 1;
+  if (index === 0 || line[index] !== " ") return "";
+  return normalizeHeading(line.slice(index + 1));
+}
+
+function normalizeHeading(value: string): string {
+  return value.trim().toLowerCase().replaceAll(":", "");
+}
+
+function isMarkdownHeading(line: string): boolean {
+  if (!line.startsWith("#")) return false;
+  let index = 0;
+  while (line[index] === "#") index += 1;
+  return index > 0 && line[index] === " ";
+}
+
+function stripFencedJson(section: string): string {
+  const lines = section.trim().split("\n");
+  if (lines[0]?.trim().startsWith("```")) lines.shift();
+  if (lines.at(-1)?.trim().startsWith("```")) lines.pop();
+  return lines.join("\n").trim();
+}
+
+function stringField(record: Record<string, unknown>, key: string): string {
+  const value = record[key];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function stringArrayField(record: Record<string, unknown>, key: string): string[] {
+  const value = record[key];
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean).slice(0, 20);
+}
+
+function evidenceClaimsField(record: Record<string, unknown>, fallback: EvidenceClaim[]): EvidenceClaim[] {
+  const value = record.evidenceClaims;
+  if (!Array.isArray(value)) return fallback;
+  const parsed = value.flatMap((item) => normalizeEvidenceClaim(item));
+  return parsed.length > 0 ? parsed.slice(0, 20) : fallback;
+}
+
+function normalizeEvidenceClaim(value: unknown): EvidenceClaim[] {
+  if (!isRecord(value)) return [];
+  const kind = stringField(value, "kind");
+  if (!["stable-fact", "transient-status", "negative-claim", "unknown", "contradiction"].includes(kind)) return [];
+  const subject = stringField(value, "subject");
+  const summary = stringField(value, "summary");
+  if (!subject || !summary) return [];
+  const confidence = Number(value.confidence);
+  return [{
+    kind: kind as EvidenceClaim["kind"],
+    subject,
+    summary,
+    evidence: stringArrayField(value, "evidence"),
+    confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0.7,
+  }];
+}
+
+function formatAgentHandoffForLegacy(handoff: AgentHandoff): string {
+  const lines = [
+    `Summary: ${handoff.summary}`,
+    handoff.changedFiles.length ? `Changed: ${handoff.changedFiles.join(", ")}` : undefined,
+    handoff.verification.length ? `Verification: ${handoff.verification.join("; ")}` : undefined,
+    handoff.risks.length ? `Risks: ${handoff.risks.join("; ")}` : undefined,
+    handoff.nextActions.length ? `Next: ${handoff.nextActions.join("; ")}` : undefined,
+  ].filter((line): line is string => Boolean(line));
+  return truncateText(lines.join("\n"), handoffBudgetChars());
 }
 
 
@@ -1397,6 +1732,7 @@ function runStepEffect(step: RunStepState, context: WorkerRunnerContext, previou
     const output = parseAgentOutput(step.agent, raw);
     step.output = output;
     step.status = "complete";
+    applyStructuredHandoffContract(run, step, agent);
     step.endedAt = new Date().toISOString();
     if (run) persistRun(run);
     context.onUpdate?.(run ?? { ...createRunState({ kind: "bypass", agents: [], risk: "low", ambiguity: "low", needsMemory: false, needsArtifacts: false, reason: "update" }, context.cwd), steps: [step] });
@@ -1411,6 +1747,8 @@ function buildMockOutput(step: RunStepState, context: WorkerRunnerContext, previ
   const projectFiles = snapshot.entries.filter((entry) => entry.type === "file").map((entry) => entry.path).slice(0, 8);
   const findings = mockFindings(step, summary, gitSummary, projectFiles, previous);
   const handoff = mockHandoff(step, summary, gitSummary, projectFiles, previous);
+  const structuredHandoff = mockStructuredHandoff(step, handoff);
+  const reviewerVerdict = step.agent === "reviewer" ? mockReviewerVerdict(previous) : undefined;
   const memories = mockMemoryCandidates(step, summary);
   return [
     `## ${step.agent} result`,
@@ -1424,9 +1762,39 @@ function buildMockOutput(step: RunStepState, context: WorkerRunnerContext, previ
     "## Handoff",
     ...handoff.map((line) => `- ${line}`),
     "",
+    "## Agent Handoff",
+    JSON.stringify(structuredHandoff),
+    "",
+    reviewerVerdict ? "## Reviewer Verdict" : undefined,
+    reviewerVerdict ? JSON.stringify(reviewerVerdict) : undefined,
+    reviewerVerdict ? "" : undefined,
     "## Memory Candidates",
     ...(memories.length ? memories.map((memory) => `- ${memory}`) : ["- None."]),
   ].filter((line): line is string => line !== undefined).join("\n");
+}
+
+function mockStructuredHandoff(step: RunStepState, handoff: string[]): AgentHandoff {
+  const mockWriter = /^worker(?:$|-)/i.test(step.agent);
+  return {
+    summary: handoff[0] ?? `Completed ${step.agent} task.`,
+    changedFiles: mockWriter ? ["mock-change"] : [],
+    verification: mockWriter || step.agent === "reviewer" ? ["mock verification evidence"] : [],
+    evidenceClaims: [],
+    risks: step.agent === "reviewer" ? ["mock review risk inventory"] : [],
+    nextActions: handoff.slice(1, 4),
+  };
+}
+
+function mockReviewerVerdict(previous: string | undefined): ReviewerVerdict {
+  return {
+    verdict: "pass",
+    blockingFindings: [],
+    missingCoverage: [],
+    evidence: [
+      previous ? "mock reviewed changed content in src/mock-reviewed.ts" : "mock reviewed src/mock-reviewed.ts",
+      "mock test command exited 0",
+    ],
+  };
 }
 
 function mockFindings(step: RunStepState, snapshotSummary: string, gitSummary: string, projectFiles: string[], previous: string | undefined): string[] {
@@ -1879,6 +2247,7 @@ function mergeAttemptMetrics(previous: RunStepMetrics | undefined, next: RunStep
     retriesByTool: { ...(previous.retriesByTool ?? {}), ...(next.retriesByTool ?? {}) },
     tokenomics: mergeTokenomics(previous.tokenomics, next.tokenomics),
     spans: mergeTraceSpans(previous.spans, next.spans),
+    trajectoryEvents: mergeTrajectoryEvents(previous.trajectoryEvents, next.trajectoryEvents),
   };
 }
 
@@ -1916,6 +2285,7 @@ function mergePolicyMetrics(metrics: RunStepMetrics, policy: ChildToolPolicy): R
     ...(postMutationShellCommands > 0 ? { postMutationShellCommands } : {}),
     ...(successfulPostMutationShellCommands > 0 ? { successfulPostMutationShellCommands } : {}),
     retriesByTool: { ...(metrics.retriesByTool ?? {}), ...policyMetrics.retriesByTool },
+    trajectoryEvents: metrics.trajectoryEvents,
   };
 }
 
@@ -1994,11 +2364,13 @@ function finalizeStepMetrics(metrics: RunStepMetrics, step: RunStepState, budget
     ...(step.skillTraceEvents ?? []),
     ...skillEventsForStep(step, utility),
   ]);
+  const trajectoryEvents = mergeTrajectoryEvents(metrics.trajectoryEvents, trajectoryEventsForStep(step, metrics, progress, health.next));
   return {
     ...metrics,
     utility,
     progress,
     ...(step.activeSkills?.length ? { skills: step.activeSkills.map((item) => item.skill.qualifiedName) } : {}),
+    ...(trajectoryEvents.length ? { trajectoryEvents } : {}),
     ...(skillEvents.length ? { skillEvents } : {}),
     ...(budgetCapHits.length ? { budgetCapHits } : {}),
     ...(crossStepDuplicateReads.length ? {
@@ -2009,9 +2381,58 @@ function finalizeStepMetrics(metrics: RunStepMetrics, step: RunStepState, budget
   };
 }
 
+function trajectoryEventsForStep(step: RunStepState, metrics: RunStepMetrics, progress: NonNullable<RunStepMetrics["progress"]>, budgetNext: string): TrajectoryEvent[] {
+  const events = [
+    createTrajectoryEvent({
+      type: "policy.decision",
+      stepId: step.id,
+      agent: step.agent,
+      decision: progress.gate,
+      confidence: progress.level === "high" ? 0.85 : progress.level === "medium" ? 0.65 : 0.45,
+      blockingGap: progress.gate !== "continue",
+      reason: [...progress.positiveSignals, ...progress.negativeSignals].join(", ") || "no progress signals",
+      metadata: { score: progress.score, budgetNext },
+    }),
+  ];
+  if (step.output?.reviewerVerdict) {
+    const verdict = step.output.reviewerVerdict;
+    events.push(createTrajectoryEvent({
+      type: "reviewer.verdict",
+      stepId: step.id,
+      agent: step.agent,
+      decision: verdict.verdict,
+      confidence: verdict.evidence.length > 0 ? 0.85 : 0.6,
+      blockingGap: verdict.verdict !== "pass" || verdict.blockingFindings.length > 0 || verdict.missingCoverage.length > 0,
+      reason: verdict.requiredRepair || verdict.blockingFindings[0] || verdict.missingCoverage[0] || "structured reviewer verdict",
+      metadata: {
+        blockingFindings: verdict.blockingFindings.length,
+        missingCoverage: verdict.missingCoverage.length,
+        evidence: verdict.evidence.length,
+      },
+    }));
+  }
+  if ((metrics.postMutationShellCommands ?? 0) > 0 || (metrics.successfulPostMutationShellCommands ?? 0) > 0) {
+    const success = (metrics.successfulPostMutationShellCommands ?? 0) > 0;
+    events.push(createTrajectoryEvent({
+      type: "verifier.result",
+      stepId: step.id,
+      agent: step.agent,
+      decision: success ? "pass" : "attempted",
+      confidence: success ? 0.82 : 0.55,
+      blockingGap: !success,
+      reason: success ? "post-mutation verification command succeeded" : "post-mutation verification was attempted without recorded success",
+      metadata: {
+        postMutationShellCommands: metrics.postMutationShellCommands ?? 0,
+        successfulPostMutationShellCommands: metrics.successfulPostMutationShellCommands ?? 0,
+      },
+    }));
+  }
+  return events;
+}
+
 function skillEventsForStep(step: RunStepState, utility: RunStepMetrics["utility"]): SkillTraceEvent[] {
-  const reviewerPass = step.agent === "reviewer"
-    ? /(?:^|\b)(pass|passed|aprobado|ok)(?:\b|$)/i.test(step.output?.text ?? "")
+  const reviewerPass = step.agent === "reviewer" && step.output?.reviewerVerdict
+    ? step.output.reviewerVerdict.verdict === "pass"
     : undefined;
   const retries = Object.values(step.metrics?.retriesByTool ?? {}).reduce((total, count) => total + count, 0);
   return [
@@ -2166,6 +2587,7 @@ function summarizeRunMetrics(run: RunState): RunState["metrics"] {
   const crossStepDuplicateReads: string[] = [];
   const spans: StructuredTraceSpan[] = [];
   const skillEvents: SkillTraceEvent[] = [];
+  const trajectoryEvents: TrajectoryEvent[] = runLifecycleTrajectoryEvents(run);
   let tokenomics: TokenomicsSummary | undefined;
   let toolCalls = 0;
   let duplicateReadCount = 0;
@@ -2184,6 +2606,7 @@ function summarizeRunMetrics(run: RunState): RunState["metrics"] {
     crossStepDuplicateReads.push(...(step.metrics.crossStepDuplicateReads ?? []));
     spans.push(...(step.metrics.spans ?? []));
     skillEvents.push(...(step.metrics.skillEvents ?? []));
+    trajectoryEvents.push(...(step.metrics.trajectoryEvents ?? []));
     tokenomics = mergeTokenomics(tokenomics, step.metrics.tokenomics);
     for (const [name, count] of Object.entries(step.metrics.toolCallsByName)) {
       toolCallsByName[name] = (toolCallsByName[name] ?? 0) + count;
@@ -2202,9 +2625,42 @@ function summarizeRunMetrics(run: RunState): RunState["metrics"] {
     ...(filesRead.length ? { filesRead: [...new Set(filesRead)].slice(0, 50) } : {}),
     ...(tokenomics ? { tokenomics } : {}),
     ...(spans.length ? { spans: mergeTraceSpans(buildRunLifecycleSpans(run), spans) } : {}),
+    ...(trajectoryEvents.length ? { trajectoryEvents: mergeTrajectoryEvents(trajectoryEvents) } : {}),
     ...(skillEvents.length ? { skillEvents: skillEvents.slice(0, 200) } : {}),
     ...(checkpointSummary(run.steps) ? { checkpoints: checkpointSummary(run.steps) } : {}),
   };
+}
+
+function runLifecycleTrajectoryEvents(run: RunState): TrajectoryEvent[] {
+  const events: TrajectoryEvent[] = [
+    createTrajectoryEvent({
+      type: "routing.decision",
+      runId: run.id,
+      decision: run.route.kind,
+      confidence: run.route.ambiguity === "low" ? 0.82 : run.route.ambiguity === "medium" ? 0.62 : 0.42,
+      blockingGap: false,
+      reason: run.route.reason,
+      metadata: {
+        risk: run.route.risk,
+        agents: run.route.agents.length,
+        expectedEffects: run.route.expectedEffects?.join(",") ?? "unspecified",
+      },
+    }),
+  ];
+  for (const step of run.steps) {
+    if (!step.id.includes("review-repair")) continue;
+    events.push(createTrajectoryEvent({
+      type: "repair.decision",
+      runId: run.id,
+      stepId: step.id,
+      agent: step.agent,
+      decision: step.status,
+      confidence: 0.78,
+      blockingGap: step.status === "failed" || step.status === "paused",
+      reason: step.task.slice(0, 240),
+    }));
+  }
+  return events;
 }
 
 function mergeTokenomics(previous: TokenomicsSummary | undefined, next: TokenomicsSummary | undefined): TokenomicsSummary | undefined {

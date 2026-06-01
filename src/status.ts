@@ -14,6 +14,7 @@ export function checkpointLabel(checkpoint: CheckpointInfo | undefined): string 
   if (checkpoint.kind === "low-signal") return "checkpointed · low signal";
   if (checkpoint.kind === "awaiting-review") return "checkpointed · awaiting review";
   if (checkpoint.kind === "split-recommended") return "checkpointed · split recommended";
+  if (checkpoint.kind === "handoff-contract") return "checkpointed · handoff contract";
   return "checkpointed · needs continuation";
 }
 

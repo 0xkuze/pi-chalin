@@ -100,13 +100,10 @@ function planSteps(plan: RoutePlan): RunStepState[] {
       status: "pending" as const,
     })));
   }
-  const rawSteps = plan.kind === "single" ? [{ agent: plan.agent, task: plan.task, budget: plan.budget }] : plan.kind === "chain" ? plan.steps : plan.tasks;
-  return rawSteps.map((step, index) => ({ id: `step-${index + 1}`, agent: step.agent, task: step.task, budget: step.budget, status: "pending" }));
+  return plan.steps.map((step, index) => ({ id: `step-${index + 1}`, agent: step.agent, task: step.task, budget: step.budget, status: "pending" }));
 }
 
 function planAgentSteps(plan: RoutePlan): AgentStep[] {
-  if (plan.kind === "single") return [{ agent: plan.agent, task: plan.task, budget: plan.budget }];
-  if (plan.kind === "chain") return plan.steps;
-  if (plan.kind === "parallel") return plan.tasks;
+  if (plan.kind === "sequential") return plan.steps;
   return plan.stages.flatMap((stage) => stage.tasks);
 }
