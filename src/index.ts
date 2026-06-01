@@ -56,5 +56,6 @@ export { MemoryStore, createMemoryCandidate } from "./memory.ts";
 export { EngramMemoryStore, createConfiguredMemoryStore, resolveMemoryBackendStatus } from "./memory-provider.ts";
 export { MockWorkerRunner, SdkWorkerRunner, parseAgentOutput } from "./runner.ts";
 export { resolveChalinPaths } from "./paths.ts";
-export type { AgentDefinition, AgentMemoryPolicy, AgentThinkingLevel, RouteDecision, RoutePlan, RunState, MemoryCandidate, MemoryRecord } from "./schemas.ts";
+export { SkillCatalog, SkillMetricsStore, auditSkill, loadSkillBody, reconcileSkillLifecyclesEffect, recordSkillMetricsEffect, resolveSkillsForStep } from "./skills.ts";
+export type { AgentDefinition, AgentMemoryPolicy, AgentThinkingLevel, RouteDecision, RoutePlan, RunState, MemoryCandidate, MemoryRecord, SkillDefinition, ResolvedSkill, RejectedSkill } from "./schemas.ts";
 export type { MemoryProvider } from "./config.ts";

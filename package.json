@@ -18,6 +18,7 @@
   "files": [
     "src/**/*.ts",
     "agents/**/*.md",
+    "skills/**/SKILL.md",
     "assets/**/*.png",
     "README.md",
     "LICENSE"
@@ -28,13 +29,14 @@
     "typecheck:stable": "bun tsc --noEmit --stableTypeOrdering",
     "eval:orchestration": "bun evals/orchestration.eval.ts",
     "eval": "bun run eval:orchestration",
+    "eval:skills": "bun evals/skills.eval.ts",
     "eval:orchestration:sdk": "bun evals/orchestration.eval.ts --runner=sdk --limit=1",
     "eval:sdk": "bun run eval:orchestration:sdk",
     "eval:memory": "bun evals/memory.eval.ts",
     "eval:resume-session": "bun evals/resume-session.eval.ts",
     "eval:quality": "bun evals/quality-ab.eval.ts",
     "eval:quality:sdk": "bun evals/quality-ab.eval.ts --mode=sdk",
-    "eval:all": "bun run eval:orchestration && bun run eval:memory && bun run eval:mutation && bun run eval:trajectory && bun run eval:long",
+    "eval:all": "bun run eval:orchestration && bun run eval:skills && bun run eval:memory && bun run eval:mutation && bun run eval:trajectory && bun run eval:long",
     "eval:mutation": "bun evals/mutation.eval.ts",
     "eval:trajectory": "bun evals/trajectory.eval.ts",
     "eval:trace": "bun evals/trace-quality.eval.ts",

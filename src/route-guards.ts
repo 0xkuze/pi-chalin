@@ -1,4 +1,22 @@
+import { Effect } from "effect";
 import type { AgentStep, RouteDecision } from "./schemas.ts";
+
+interface RouteNormalizationOptions {
+  requiresWorkspaceMutation: boolean;
+  task: string;
+}
+
+export function normalizeRouteForExecution(route: RouteDecision, options: RouteNormalizationOptions): RouteDecision {
+  return Effect.runSync(normalizeRouteForExecutionEffect(route, options));
+}
+
+export function normalizeRouteForExecutionEffect(route: RouteDecision, options: RouteNormalizationOptions): Effect.Effect<RouteDecision> {
+  return Effect.succeed(route).pipe(
+    Effect.map((current) => ensureMutationRouteHasWorkerAndReviewer(current, options.requiresWorkspaceMutation, options.task)),
+    Effect.map((current) => collapseReadOnlyScoutContextRoute(current, options.requiresWorkspaceMutation)),
+    Effect.withSpan("route-guards.normalizeRouteForExecution"),
+  );
+}
 
 export function ensureMutationRouteHasWorker(route: RouteDecision, requiresWorkspaceMutation: boolean, task: string): RouteDecision {
   return ensureMutationRouteHasWorkerAndReviewer(route, requiresWorkspaceMutation, task);
@@ -7,9 +25,17 @@ export function ensureMutationRouteHasWorker(route: RouteDecision, requiresWorks
 export function inferRouteRequiresWorkspaceMutation(route: RouteDecision, task: string): boolean {
   if (route.kind === "memory-only" || route.kind === "ask-user") return false;
   if (route.agents.includes("worker")) return true;
-  const text = `${task}\n${route.reason}`.toLowerCase();
+  const text = `${task}\n${route.reason}\n${routeStepTasks(route).join("\n")}`.toLowerCase();
   if (/\b(read[- ]?only|no[- ]?code|sin modificar|no modificar|do not modify|analysis only|solo analizar|s[oó]lo analizar)\b/.test(text)) return false;
   return /\b(fix|bugfix|implement|refactor|change|update|add|write|create|patch|repair|corrige|arregla|implementa|refactoriza|cambia|modifica|actualiza|agrega|añade|escribe|crea|parchea|repara)\b|\b(?:make|cargo|go|bun|npm|pnpm|yarn|pytest|python|node)\s+test\b|\btests?\s+must\s+pass\b|\bdebe(?:n)?\s+pasar\b/.test(text);
+}
+
+function routeStepTasks(route: RouteDecision): string[] {
+  if (!route.plan) return [];
+  if (route.plan.kind === "single") return [route.plan.task];
+  if (route.plan.kind === "parallel") return route.plan.tasks.map((step) => step.task);
+  if (route.plan.kind === "chain") return route.plan.steps.map((step) => step.task);
+  return route.plan.stages.flatMap((stage) => stage.tasks.map((step) => step.task));
 }
 
 export function ensureMutationRouteHasWorkerAndReviewer(route: RouteDecision, requiresWorkspaceMutation: boolean, task: string): RouteDecision {
@@ -40,8 +66,7 @@ export function ensureMutationRouteHasWorkerAndReviewer(route: RouteDecision, re
 
   if (route.plan.kind === "dag") {
     const result = ensureDagHasImplementationReview(route.plan.stages, workerStep, reviewerStep);
-    if (!result.changed) return route;
-    return {
+    const withReview = result.changed ? {
       ...route,
       agents: result.stages.flatMap((stage) => stage.tasks.map((step) => step.agent)),
       needsArtifacts: true,
@@ -50,22 +75,23 @@ export function ensureMutationRouteHasWorkerAndReviewer(route: RouteDecision, re
         kind: "dag",
         stages: result.stages,
       },
-    };
+    } satisfies RouteDecision : route;
+    return withReview;
   }
 
   const existingSteps = route.plan.kind === "single"
     ? [{ id: "existing", agent: route.plan.agent, task: route.plan.task, budget: route.plan.budget }]
     : route.plan.kind === "chain" ? route.plan.steps : route.plan.tasks;
   const result = ensureStepsHaveImplementationReview(existingSteps, workerStep, reviewerStep);
-  if (!result.changed) return route;
-  return {
+  const withReview = result.changed ? {
     ...route,
     kind: "multi-agent-chain",
     agents: result.steps.map((step) => step.agent),
     needsArtifacts: true,
     reason: implementationReviewReason(route.reason, result.addedWorker, result.addedReviewer),
     plan: { kind: "chain", steps: result.steps },
-  };
+  } satisfies RouteDecision : route;
+  return withReview;
 }
 
 export function collapseReadOnlyScoutContextRoute(route: RouteDecision, requiresWorkspaceMutation: boolean): RouteDecision {

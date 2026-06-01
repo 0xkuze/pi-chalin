@@ -1,15 +1,17 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Effect } from "effect";
 import { sessionModelOverrides, sessionThinkingOverrides } from "./agent-overrides.ts";
 import { AgentCatalog } from "./agents.ts";
 import { ArtifactStore } from "./artifacts.ts";
 import { loadEffectiveConfig, writeProjectConfig, type ApprovalRiskThreshold, type AutonomyLevel, type ChalinConfig, type MemoryProvider } from "./config.ts";
 import { createConfiguredMemoryStore, resolveMemoryBackendStatus, type MemoryBackendStatus } from "./memory-provider.ts";
 import { resolveChalinPaths } from "./paths.ts";
-import { getActiveRun, getLatestRun } from "./runtime-state.ts";
+import { activateSkillForTurn, disableSkillForTurn, getActiveRun, getLatestRun } from "./runtime-state.ts";
 import type { AgentDefinition, RunState } from "./schemas.ts";
-import { openAgentManager } from "./ui-agents.ts";
+import { SkillCatalog, SkillMetricsStore, auditSkill, formatSkillList, formatSkillSearch, formatSkillShow, promoteSkill, reconcileSkillLifecyclesEffect, retireSkill, summarizeSkillMetrics } from "./skills.ts";
+import { openAgentManager, openSkillManager } from "./ui-agents.ts";
 import {
   openMemoryReviewWithLoading,
   openArtifactPanel,
@@ -24,7 +26,7 @@ export function registerChalinCommands(pi: ExtensionAPI): void {
   pi.registerCommand("chalin", {
     description: "Open Smart Panel or toggle autonomous routing with: /chalin on|off",
     getArgumentCompletions: (prefix) => {
-      const values = ["on", "off", "agents", "memory", "artifacts", "activity", "web", "settings", "status"];
+      const values = ["on", "off", "agents", "skills", "memory", "artifacts", "activity", "web", "settings", "status"];
       const filtered = values.filter((value) => value.startsWith(prefix.trim()));
       return filtered.length > 0 ? filtered.map((value) => ({ value, label: value })) : null;
     },
@@ -46,12 +48,19 @@ export function registerChalinCommands(pi: ExtensionAPI): void {
       const memory = createConfiguredMemoryStore({ cwd: ctx.cwd }, loaded.config);
       const artifacts = new ArtifactStore({ cwd: ctx.cwd });
       const agents = catalog.list();
+      const skills = SkillCatalog.load({ cwd: ctx.cwd, config: loaded.config });
       const diagnostics = [...loaded.diagnostics, ...catalog.diagnostics.warnings, ...catalog.diagnostics.errors];
       const activeRun = getActiveRun();
       const lastRun = getLatestRun();
 
       if (command === "agents") {
         await openAgentManager(ctx, agents, sessionModelOverrides, sessionThinkingOverrides, loaded.config.agents.modelOverrides, loaded.config.agents.thinkingOverrides);
+        return;
+      }
+
+      if (command === "skills") {
+        if (rest.length === 0) await openSkillManager(ctx, skills);
+        else await handleSkillsCommand(ctx, skills, rest);
         return;
       }
 
@@ -81,6 +90,7 @@ export function registerChalinCommands(pi: ExtensionAPI): void {
           agents,
           diagnostics,
           onSelectAgents: () => openAgentManager(ctx, agents, sessionModelOverrides, sessionThinkingOverrides, loaded.config.agents.modelOverrides, loaded.config.agents.thinkingOverrides),
+          onSelectSkills: () => openSkillManager(ctx, skills),
         });
         return;
       }
@@ -118,6 +128,7 @@ export function registerChalinCommands(pi: ExtensionAPI): void {
             `memory: ${memoryStatus.summary}`,
             ...(memoryStatus.detail ? [`memory detail: ${memoryStatus.detail}`] : []),
             `agents: ${agents.length}`,
+            `skills: ${skills.list().length}${loaded.config.skills.enabled ? "" : " (disabled)"}`,
             `pending memory: ${pendingMemoryCount}`,
             `last activity: ${lastRun?.id ?? "none"}`,
             lastRun ? `guards: ${lastRun.metrics?.policyViolations?.length ?? 0} policy violations · ${formatCommandBudgetSummary(lastRun.metrics)}` : "guards: no run yet",
@@ -173,6 +184,7 @@ export function registerChalinCommands(pi: ExtensionAPI): void {
           agents,
           diagnostics,
           onSelectAgents: () => openAgentManager(ctx, agents, sessionModelOverrides, sessionThinkingOverrides, loaded.config.agents.modelOverrides, loaded.config.agents.thinkingOverrides),
+          onSelectSkills: () => openSkillManager(ctx, skills),
         }),
       });
     },
@@ -187,10 +199,93 @@ function formatCommandBudgetSummary(metrics: RunState["metrics"] | undefined): s
   return `${soft} budget warnings · ${hard} budget stops`;
 }
 
+async function handleSkillsCommand(ctx: ExtensionContext, catalog: SkillCatalog, args: string[]): Promise<void> {
+  const [subcommand = "list", ...rest] = args;
+  if (subcommand === "list") {
+    ctx.ui.notify(formatSkillList(catalog), "info");
+    return;
+  }
+  if (subcommand === "metrics") {
+    ctx.ui.notify(summarizeSkillMetrics(new SkillMetricsStore({ cwd: ctx.cwd }).snapshot()), "info");
+    return;
+  }
+  if (subcommand === "reconcile") {
+    const result = await Effect.runPromise(reconcileSkillLifecyclesEffect({ cwd: ctx.cwd }));
+    ctx.ui.notify(`skill lifecycle reconcile: ${result.updated.length} updated${result.updated.length ? `\n${result.updated.map((skill) => `- ${skill.qualifiedName}: ${skill.lifecycle}`).join("\n")}` : ""}`, "info");
+    return;
+  }
+  if (subcommand === "search" || subcommand === "use") {
+    const task = rest.join(" ").trim();
+    if (!task) {
+      ctx.ui.notify(`/chalin skills ${subcommand} requires a task or skill name.`, "warning");
+      return;
+    }
+    if (subcommand === "use") {
+      const resolved = catalog.resolve(task);
+      if (!resolved.skill) {
+        ctx.ui.notify(resolved.error ?? `Skill '${task}' not found.`, "warning");
+        return;
+      }
+      const audit = auditSkill(resolved.skill);
+      if (audit.status === "blocked") {
+        ctx.ui.notify(`Skill '${resolved.skill.qualifiedName}' failed audit: ${audit.findings.map((finding) => finding.code).join(", ")}`, "warning");
+        return;
+      }
+      activateSkillForTurn(resolved.skill.qualifiedName);
+      ctx.ui.notify(`skill activated for this turn: ${resolved.skill.qualifiedName}\n\n${formatSkillSearch(task, catalog.search(task, { explicitSkills: [resolved.skill.qualifiedName] }))}`, "info");
+      return;
+    }
+    ctx.ui.notify(formatSkillSearch(task, catalog.search(task)), "info");
+    return;
+  }
+  const reference = rest[0];
+  if (!reference) {
+    ctx.ui.notify(`/chalin skills ${subcommand} requires a skill reference.`, "warning");
+    return;
+  }
+  const resolved = catalog.resolve(reference);
+  if (!resolved.skill) {
+    ctx.ui.notify(resolved.error ?? `Skill '${reference}' not found.`, "warning");
+    return;
+  }
+  if (subcommand === "show") {
+    ctx.ui.notify(formatSkillShow(resolved.skill), "info");
+    return;
+  }
+  if (subcommand === "audit") {
+    const audit = auditSkill(resolved.skill);
+    ctx.ui.notify(formatSkillShow(resolved.skill, audit), audit.status === "blocked" ? "warning" : "info");
+    return;
+  }
+  if (subcommand === "promote") {
+    const target = rest[1] === "user" ? "user" : "project";
+    try {
+      const result = promoteSkill({ cwd: ctx.cwd, reference, targetScope: target, reviewedBy: "slash-command" });
+      ctx.ui.notify(`skill promoted: ${result.skill.qualifiedName}\npath: ${result.path}\naudit: ${result.audit.status}`, "info");
+    } catch (error) {
+      ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+    }
+    return;
+  }
+  if (subcommand === "disable") {
+    disableSkillForTurn(resolved.skill.qualifiedName);
+    ctx.ui.notify(`skill disabled for this turn: ${resolved.skill.qualifiedName}`, "info");
+    return;
+  }
+  if (subcommand === "retire") {
+    const lifecycle = rest[1] === "expired" ? "expired" : rest[1] === "blocked" ? "blocked" : "stale";
+    const result = retireSkill({ cwd: ctx.cwd, reference, lifecycle, actor: "slash-command" });
+    ctx.ui.notify(`skill retired: ${result.skill.qualifiedName} -> ${result.skill.lifecycle}\npath: ${result.path}`, "info");
+    return;
+  }
+  ctx.ui.notify("Unknown skills command. Use list, show, search, use, audit, promote, retire, disable, metrics, or reconcile.", "warning");
+}
+
 interface ChalinSettingsOptions {
   agents: AgentDefinition[];
   diagnostics: string[];
   onSelectAgents?: () => Promise<void>;
+  onSelectSkills?: () => Promise<void>;
 }
 
 async function openChalinSettings(ctx: ExtensionContext, config: ChalinConfig, options: ChalinSettingsOptions): Promise<void> {
@@ -207,6 +302,7 @@ async function openChalinSettings(ctx: ExtensionContext, config: ChalinConfig, o
     `Safety · approvals ${labelForApprovalRiskThreshold(threshold)}`,
     `Memory provider · ${labelForMemoryProvider(current)}`,
     `Agents · ${options.agents.length} · ${agentOverrideCount} override${agentOverrideCount === 1 ? "" : "s"}`,
+    `Skills · ${config.skills.enabled ? "on" : "off"}`,
     "Maintenance",
     `Diagnostics · ${options.diagnostics.length}`,
     "Close",
@@ -229,6 +325,11 @@ async function openChalinSettings(ctx: ExtensionContext, config: ChalinConfig, o
 
   if (selected?.startsWith("Agents")) {
     await openAgentSettings(ctx, config, options);
+    return;
+  }
+
+  if (selected?.startsWith("Skills")) {
+    await openSkillSettings(ctx, config, options);
     return;
   }
 
@@ -318,6 +419,23 @@ async function openAgentSettings(ctx: ExtensionContext, config: ChalinConfig, op
   if (selected === "Open Agent Manager") return options.onSelectAgents?.();
   if (selected === "Override summary") {
     ctx.ui.notify(formatAgentOverrideSummary(config, options.agents), "info");
+  }
+}
+
+async function openSkillSettings(ctx: ExtensionContext, config: ChalinConfig, options: ChalinSettingsOptions): Promise<void> {
+  const selected = await ctx.ui.select("Skills", [
+    "Open Skill Manager",
+    `Feature · ${config.skills.enabled ? "on" : "off"}`,
+    `Project skills · ${config.skills.allowProjectSkills ? "on" : "off"}`,
+    `User skills · ${config.skills.allowUserSkills ? "on" : "off"}`,
+    `On-demand skills · ${config.skills.allowOnDemandSkills ? "on" : "off"}`,
+    `Skill scripts · ${config.skills.allowSkillScripts ? "on" : "off"}`,
+    "Policy summary",
+    "Close",
+  ]);
+  if (selected === "Open Skill Manager") return options.onSelectSkills?.();
+  if (selected === "Policy summary") {
+    ctx.ui.notify(formatSkillPolicySummary(config), "info");
   }
 }
 
@@ -422,7 +540,27 @@ function formatSettingsSummary(
     `memory provider: ${labelForMemoryProvider(provider)}`,
     `agents: ${options.agents.length}`,
     `agent overrides: ${overrideCount}`,
+    `skills: ${config.skills.enabled ? "on" : "off"}`,
+    `skill scopes: project=${enabledLabel(config.skills.allowProjectSkills)}, user=${enabledLabel(config.skills.allowUserSkills)}, on-demand=${enabledLabel(config.skills.allowOnDemandSkills)}`,
     `diagnostics: ${options.diagnostics.length}`,
+  ].join("\n");
+}
+
+function formatSkillPolicySummary(config: ChalinConfig): string {
+  return [
+    "Skill policy",
+    `feature: ${enabledLabel(config.skills.enabled)}`,
+    `auto activation: ${enabledLabel(config.skills.autoActivation)}`,
+    `max active direct: ${config.skills.maxActiveDirect}`,
+    `max active per step: ${config.skills.maxActivePerStep}`,
+    `project skills: ${enabledLabel(config.skills.allowProjectSkills)}`,
+    `user skills: ${enabledLabel(config.skills.allowUserSkills)}`,
+    `on-demand skills: ${enabledLabel(config.skills.allowOnDemandSkills)}`,
+    `skill scripts: ${enabledLabel(config.skills.allowSkillScripts)}`,
+    `stale after: ${config.skills.staleAfterDays} days`,
+    `project audit required: ${enabledLabel(config.skills.requireAuditForProjectSkills)}`,
+    `user audit required: ${enabledLabel(config.skills.requireAuditForUserSkills)}`,
+    `telemetry: ${enabledLabel(config.skills.telemetry)}`,
   ].join("\n");
 }
 

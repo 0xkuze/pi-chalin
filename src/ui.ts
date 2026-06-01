@@ -1953,6 +1953,8 @@ function emptyUsage() {
 function formatStepDiagnostics(step: RunStepState): string {
   return [
     step.modelResolution ? `model: ${step.modelResolution.selected}\nthinking: ${step.thinkingLevel ?? "inherit"}\n${step.modelResolution.attempts.map((attempt) => `- ${attempt.source}: ${attempt.ref ?? "inherit"} -> ${attempt.status}${attempt.reason ? ` (${attempt.reason})` : ""}`).join("\n")}` : undefined,
+    step.activeSkills?.length ? `active skills:\n${step.activeSkills.map((item) => `- ${item.skill.qualifiedName}: ${item.reason}`).join("\n")}` : undefined,
+    step.suggestedSkills?.length ? `suggested skills:\n${step.suggestedSkills.map((item) => `- ${item.skill.qualifiedName}: ${item.reason}`).join("\n")}` : undefined,
     step.metrics ? `tools: ${step.metrics.toolCalls}/${step.maxToolCalls ?? "?"}\npolicy violations: ${step.metrics.policyViolations?.length ?? 0}\nbudget: ${summarizeBudgetHealth(step.metrics.budgetCapHits, step.metrics.budgetStopCount ?? 0)}\nfiles read: ${step.metrics.filesRead?.join(", ") ?? "none"}` : undefined,
     step.error ? `error: ${step.error}` : undefined,
   ].filter(Boolean).join("\n\n");

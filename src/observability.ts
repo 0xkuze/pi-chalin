@@ -43,6 +43,38 @@ export interface StructuredTraceSpan {
   attributes?: Record<string, string | number | boolean>;
 }
 
+export type SkillEventType =
+  | "skill.catalog.loaded"
+  | "skill.match.started"
+  | "skill.match.result"
+  | "skill.activation.applied"
+  | "skill.activation.rejected"
+  | "skill.audit.result"
+  | "skill.lifecycle.changed"
+  | "skill.outcome.recorded"
+  | "skill.stale.detected"
+  | "skill.promoted";
+
+export interface SkillTraceEvent {
+  type: SkillEventType;
+  at: string;
+  skill?: string;
+  scope?: string;
+  trust?: string;
+  policy?: string;
+  stepId?: string;
+  agent?: string;
+  reason?: string;
+  metadata?: Record<string, string | number | boolean>;
+}
+
+export function createSkillTraceEvent(input: Omit<SkillTraceEvent, "at"> & { at?: string }): SkillTraceEvent {
+  return {
+    ...input,
+    at: input.at ?? new Date().toISOString(),
+  };
+}
+
 export function buildPromptTokenomics(input: Partial<Record<TokenomicsPhase, string>>): TokenomicsSummary {
   const phases = Object.fromEntries(tokenomicsPhases.map((phase) => {
     const text = input[phase] ?? "";

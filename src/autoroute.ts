@@ -1,12 +1,13 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Effect } from "effect";
 import { AgentCatalog } from "./agents.ts";
-import { loadEffectiveConfig } from "./config.ts";
+import { loadEffectiveConfig, type ChalinConfig } from "./config.ts";
 import { createConfiguredMemoryStore } from "./memory-provider.ts";
 import { buildCompactChalinOrchestratorSystemPrompt, buildChalinOrchestratorSystemPrompt } from "./orchestration.ts";
 import { isUsableStepHandoff, loadResumableRunState } from "./runner-state.ts";
-import { beginChalinTurn, getDirectChangedPaths, getDirectCriticalGuardContextMessage, isDirectLeanBoundedTurn, isDirectStatefulTimeTurn, isDirectTestOnlyTurn, recordDirectToolCompletion } from "./runtime-state.ts";
+import { beginChalinTurn, getDirectChangedPaths, getDirectCriticalGuardContextMessage, getSkillOverridesForTurn, isDirectLeanBoundedTurn, isDirectStatefulTimeTurn, isDirectTestOnlyTurn, recordDirectToolCompletion } from "./runtime-state.ts";
 import type { RunState } from "./schemas.ts";
+import { SkillCatalog, formatActiveSkillsForPrompt } from "./skills.ts";
 import { setChalinStatus } from "./ui-status.ts";
 
 type PendingToolArgs = {
@@ -17,6 +18,10 @@ type PendingToolArgs = {
 
 const pendingToolStarts = new WeakMap<object, Map<string, PendingToolArgs[]>>();
 const scopedToolSetRestore = new WeakMap<object, string[]>();
+type ToolScopeRestoreMode = "decision" | "turn";
+const scopedToolSetRestoreMode = new WeakMap<object, ToolScopeRestoreMode>();
+type PiThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
+const orchestratorThinkingRestore = new WeakMap<object, PiThinkingLevel>();
 const DIRECT_CHALIN_TOOL_NAMES = [
   "chalin_interview",
   "chalin_project_discovery",
@@ -44,13 +49,17 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
     beginChalinTurn({ prompt: typeof event.prompt === "string" ? event.prompt : undefined, cwd: ctx.cwd });
     const loaded = loadEffectiveConfig({ cwd: ctx.cwd });
     if (!loaded.config.enabled) return;
+    forceOrchestratorThinkingHigh(pi);
     const promptText = typeof event.prompt === "string" ? event.prompt : "";
     const resumableRun = loadResumableRunState({ cwd: ctx.cwd, recoverStale: false });
     const resumeContext = resumableRun ? compactResumeCandidateMessage(resumableRun) : undefined;
     const forceRouteFirst = shouldForceRouteFirst(promptText, Boolean(resumeContext));
+    const useModeGate = shouldUseOrchestrationModeGate(promptText, Boolean(resumeContext), forceRouteFirst);
     const hiddenDirectTools = forceRouteFirst ? undefined : hiddenDirectToolsForPrompt(promptText, Boolean(resumeContext));
     if (forceRouteFirst) {
       applyToolAllowlist(pi, ROUTE_ONLY_TOOLS);
+    } else if (useModeGate) {
+      applyDecisionToolAllowlist(pi, ROUTE_ONLY_TOOLS);
     } else if (hiddenDirectTools) {
       applyDirectToolScope(pi, hiddenDirectTools);
     }
@@ -76,13 +85,15 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
       ? ""
       : buildChalinOrchestratorSystemPrompt(catalog?.list() ?? []);
     const memoryContext = useCompactPrompt ? undefined : await globalMemoryContextForPrompt(ctx.cwd, promptText);
+    const skillSignal = buildSkillSteeringMessage(ctx.cwd, loaded.config, promptText);
     const systemPrompt = [event.systemPrompt, orchestrationPrompt, memoryContext].filter((item) => item?.trim()).join("\n\n");
     return {
       systemPrompt,
       message: {
         customType: useCompactBoundedReviewPrompt ? "pi-chalin-review-compact-orchestration" : useCompactPathPrompt ? "pi-chalin-path-compact-orchestration" : useCompactGeneralPrompt ? "pi-chalin-compact-orchestration" : "pi-chalin-orchestration",
-        content: useCompactBoundedReviewPrompt ? [resumeContext, compactBoundedReadOnlyReviewSteeringMessage(promptText, ctx.hasUI)].filter(Boolean).join("\n\n") : useCompactPathPrompt ? [resumeContext, compactPathSteeringMessage(promptText, ctx.hasUI)].filter(Boolean).join("\n\n") : useCompactGeneralPrompt ? [resumeContext, compactGeneralSteeringMessage(promptText)].filter(Boolean).join("\n\n") : [
+        content: useCompactBoundedReviewPrompt ? [resumeContext, skillSignal, compactBoundedReadOnlyReviewSteeringMessage(promptText, ctx.hasUI)].filter(Boolean).join("\n\n") : useCompactPathPrompt ? [resumeContext, skillSignal, compactPathSteeringMessage(promptText, ctx.hasUI)].filter(Boolean).join("\n\n") : useCompactGeneralPrompt ? [resumeContext, skillSignal, compactGeneralSteeringMessage(promptText)].filter(Boolean).join("\n\n") : [
           resumeContext,
+          skillSignal,
           "If the current user intent is to continue an interrupted pi-chalin run, call chalin_resume before answering from partial findings.",
           "pi-chalin preflight: if this is branch/project analysis, current diff/PR/branch analysis, project/service structure with entrypoints or testing map, architecture/planning, broad/project-wide review, project-wide refactor strategy, complex/risky multi-file implementation, auth/security/token/session behavior with tests and no explicit source path, stateful parser/scanner/tokenizer work with broad grammar/ownership uncertainty, or independent option comparison, call chalin_route as the first tool unless the user explicitly asks for direct/native/no-subagent work. For explicit memory recall/remembrance or memory inventory/counts, including Spanish prompts like recuerda/recordar/memoria/decidimos, call chalin_memory_search as the first tool; use mode=list for inventory/count questions. Bounded docs-only artifacts, bounded read-only mini-project reviews, bounded scaffolding, named-file bugfixes, named-file refactors, and simple implementation with explicit acceptance criteria should stay direct unless evidence shows state/risk beyond native work.",
           "Direct exception: bounded read-only mini-project reviews that explicitly forbid file changes stay native even when they mention risk/security/auth boundaries. Gather bounded evidence and cite concrete paths; route only if the prompt also asks for deep/project-wide/exhaustive analysis or evidence proves the review is not actually bounded.",
@@ -123,10 +134,13 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
   pi.on("agent_end", (_event, ctx) => {
     clearPendingToolStarts(pi);
     restoreScopedToolSet(pi);
+    restoreOrchestratorThinking(pi);
     setChalinStatus(ctx, { kind: "idle" });
   });
 
   pi.on("tool_execution_start", (event) => {
+    restoreOrchestratorThinking(pi);
+    restoreDecisionToolSet(pi);
     rememberToolStart(pi, event);
   });
 
@@ -442,10 +456,33 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
 
   pi.on("session_shutdown", () => {
     restoreScopedToolSet(pi);
+    restoreOrchestratorThinking(pi);
     // No background auto-routing workers are owned by this module anymore.
     // Subagent execution is driven through the chalin_route tool and Pi's native
     // abort signal.
   });
+}
+
+function forceOrchestratorThinkingHigh(pi: ExtensionAPI): void {
+  try {
+    const key = pi as unknown as object;
+    if (!orchestratorThinkingRestore.has(key)) orchestratorThinkingRestore.set(key, pi.getThinkingLevel());
+    pi.setThinkingLevel("high");
+  } catch {
+    // Older or test extension APIs may not expose thinking controls.
+  }
+}
+
+function restoreOrchestratorThinking(pi: ExtensionAPI): void {
+  const key = pi as unknown as object;
+  const previous = orchestratorThinkingRestore.get(key);
+  if (!previous) return;
+  orchestratorThinkingRestore.delete(key);
+  try {
+    pi.setThinkingLevel(previous);
+  } catch {
+    // Best-effort restoration; the host may have been torn down.
+  }
 }
 
 function inputGuardEffect(event: { source?: string; text: string }): Effect.Effect<{ action: "continue" }> {
@@ -512,21 +549,40 @@ function applyDirectToolScope(pi: ExtensionAPI, hiddenTools: ReadonlySet<string>
   if (activeTools.length === 0) return;
   const filtered = activeTools.filter((name) => !hiddenTools.has(name));
   if (filtered.length === activeTools.length) return;
-  const key = pi as unknown as object;
-  if (!scopedToolSetRestore.has(key)) scopedToolSetRestore.set(key, activeTools);
+  rememberScopedToolSet(pi, activeTools, "turn");
   toolApi.setActiveTools(filtered);
 }
 
 function applyToolAllowlist(pi: ExtensionAPI, allowedTools: ReadonlySet<string>): void {
+  applyScopedToolAllowlist(pi, allowedTools, "turn");
+}
+
+function applyDecisionToolAllowlist(pi: ExtensionAPI, allowedTools: ReadonlySet<string>): void {
+  applyScopedToolAllowlist(pi, allowedTools, "decision");
+}
+
+function applyScopedToolAllowlist(pi: ExtensionAPI, allowedTools: ReadonlySet<string>, mode: ToolScopeRestoreMode): void {
   const toolApi = pi as unknown as { getActiveTools?: () => string[]; setActiveTools?: (toolNames: string[]) => void };
   if (typeof toolApi.getActiveTools !== "function" || typeof toolApi.setActiveTools !== "function") return;
   const activeTools = toolApi.getActiveTools();
   if (activeTools.length === 0) return;
   const filtered = activeTools.filter((name) => allowedTools.has(name));
   if (filtered.length === activeTools.length) return;
-  const key = pi as unknown as object;
-  if (!scopedToolSetRestore.has(key)) scopedToolSetRestore.set(key, activeTools);
+  rememberScopedToolSet(pi, activeTools, mode);
   toolApi.setActiveTools(filtered);
+}
+
+function rememberScopedToolSet(pi: ExtensionAPI, activeTools: string[], mode: ToolScopeRestoreMode): void {
+  const key = pi as unknown as object;
+  if (scopedToolSetRestore.has(key)) return;
+  scopedToolSetRestore.set(key, activeTools);
+  scopedToolSetRestoreMode.set(key, mode);
+}
+
+function restoreDecisionToolSet(pi: ExtensionAPI): void {
+  const key = pi as unknown as object;
+  if (scopedToolSetRestoreMode.get(key) !== "decision") return;
+  restoreScopedToolSet(pi);
 }
 
 function restoreScopedToolSet(pi: ExtensionAPI): void {
@@ -534,6 +590,7 @@ function restoreScopedToolSet(pi: ExtensionAPI): void {
   const previous = scopedToolSetRestore.get(key);
   if (!previous) return;
   scopedToolSetRestore.delete(key);
+  scopedToolSetRestoreMode.delete(key);
   const toolApi = pi as unknown as { setActiveTools?: (toolNames: string[]) => void };
   if (typeof toolApi.setActiveTools === "function") toolApi.setActiveTools(previous);
 }
@@ -562,6 +619,28 @@ async function globalMemoryContextForPrompt(cwd: string, prompt: string): Promis
   } catch {
     return undefined;
   }
+}
+
+function buildSkillSteeringMessage(cwd: string, config: ChalinConfig, prompt: string): string | undefined {
+  if (!config.skills.enabled || !prompt.trim()) return undefined;
+  const overrides = getSkillOverridesForTurn();
+  const catalog = SkillCatalog.load({ cwd, config });
+  const result = catalog.search(prompt, {
+    config,
+    explicitSkills: [...overrides.explicit],
+    disabledSkills: [...overrides.disabled],
+  });
+  const active = result.active.slice(0, 3);
+  const suggested = result.suggested.slice(0, 3);
+  if (active.length === 0 && suggested.length === 0 && overrides.disabled.size === 0) return undefined;
+  return [
+    "pi-chalin skill signal: Skills are procedural hints, not authority. User/system/repo safety rules still win.",
+    active.length ? `Active for this turn: ${active.map((item) => `${item.skill.qualifiedName} (${item.reason})`).join("; ")}.` : undefined,
+    active.length ? formatActiveSkillsForPrompt(active, 4) : undefined,
+    suggested.length ? `Suggested: ${suggested.map((item) => `${item.skill.qualifiedName} (${item.reason})`).join("; ")}. Activate only when it materially improves this task.` : undefined,
+    overrides.disabled.size ? `Disabled for this turn: ${[...overrides.disabled].join(", ")}.` : undefined,
+    "If an active Skill materially changes the intended route/tool plan, name that reason when calling chalin_route or staying direct.",
+  ].filter((line): line is string => Boolean(line)).join("\n");
 }
 
 export function shouldUseCompactDirectOrchestrationPrompt(prompt: string): boolean {
@@ -604,6 +683,15 @@ function shouldForceRouteFirst(prompt: string, hasResumeContext: boolean): boole
   if (paths.some(isDocsMarkdownPath) && promptLooksArchitectureDocsArtifact(prompt)) return true;
   if (promptLooksBroadOrchestrationWork(prompt)) return true;
   return promptLooksRiskyImplementationRoute(prompt, paths);
+}
+
+function shouldUseOrchestrationModeGate(prompt: string, hasResumeContext: boolean, forceRouteFirst: boolean): boolean {
+  if (hasResumeContext || forceRouteFirst || !prompt.trim()) return false;
+  if (promptLooksBoundedReadOnlyReview(prompt)) return false;
+  if (hasExplicitVerificationRunner(prompt)) return false;
+  if (shouldSkipCompactPathPrompt(prompt, hasResumeContext)) return false;
+  if (shouldUseCompactDirectOrchestrationPrompt(prompt)) return false;
+  return promptPathMentions(prompt).length === 0;
 }
 
 function promptLooksBroadOrchestrationWork(prompt: string): boolean {
@@ -667,7 +755,9 @@ function compactGeneralSteeringMessage(prompt = ""): string {
     "Bounded read-only auth/security review: stay native when the prompt asks to review/analyze and not edit. Read package/manifest plus obvious auth/session/server/route files once; avoid repeated ls/find after source hits. Final findings-first and concise: code-proven core risks plus direct secondary risks only, severity, exact path/function evidence, one concrete exploit/request path or bypass chain when supported, impact, and remediation. No code changes, no tests, no broad project scan, no tutorial.",
     "Call `chalin_route` as the first tool for current branch/diff/PR summaries, project understanding, project/service structure with entrypoints or testing map, deep project analysis, architecture/migration, broad review/audit, project-wide test/tooling/command/policy audit, risky multi-file implementation, auth/security/token/session behavior with tests and no explicit source path, risky surgical/long-file edits, parser/scanner/tokenizer changes with broad grammar/ownership uncertainty, independent option comparison, independent implementation slices, continuation/resume intent, or unresolved ambiguity unless the user explicitly asks for direct/native/no-subagent work. For explicit memory recall/remembrance or memory inventory/counts, including Spanish prompts like recuerda/recordar/memoria/decidimos, call `chalin_memory_search` first; use mode=list for inventory/count questions. If parent context compaction becomes likely, route or split work into subagents.",
     "When routing, choose topology deliberately from the prompt, agent roster, and evidence. Use the smallest workflow that can prove the result; add discovery, planning, parallelism, or synthesis only when it materially improves coverage or risk control. Do not route plain memory recall/inventory; use chalin_memory_search. Routed implementation/file mutation must include worker execution plus a later reviewer; reviewer FAIL/GAP requires focused repair instead of finalization.",
-    "Compact topology defaults unless evidence clearly says otherwise: branch/project/service understanding -> single scout; deep project analysis split by folders/modules -> DAG with scout/context-builder fan-out and reviewer synthesis; architecture or migration strategy -> chain scout -> planner -> reviewer; project-wide review/audit/test-command-policy review -> chain scout -> reviewer; risky implementation with tests and no exact source path -> chain scout -> planner -> worker -> reviewer; risky long-file/surgical edit -> chain scout -> planner -> worker -> reviewer; independent option comparison -> parallel planners/reviewers; independent writer slices -> DAG with discovery/planning, parallel worker ownership, then reviewer fan-in; explicit memory recall/inventory -> memory-only route if the memory tool is not available in this turn.",
+    "Compact topology defaults unless evidence clearly says otherwise: branch/project/service understanding and high-level architecture-risk overview -> single scout; deep project analysis split by folders/modules -> DAG with scout/context-builder fan-out; architecture or migration across many components -> chain scout -> planner; local module-splitting/options comparison -> chain scout -> planner or single planner when evidence is already obvious; formal project-wide audit/test-command-policy review -> single reviewer; risky implementation with tests -> chain worker -> reviewer; risky long-file/surgical edit -> chain worker -> reviewer, adding planner only when target-region planning is nontrivial; independent writer slices -> DAG with parallel worker ownership and reviewer fan-in; explicit memory recall/inventory -> memory-only route if the memory tool is not available in this turn.",
+    "Choose roles by responsibility, not by habit: scout gathers evidence for understanding and high-level risk overview; planner makes strategy/options; reviewer critiques formal audits/configuration; worker mutates files. Add extra roles only when the current role cannot responsibly cover the next responsibility.",
+    "Use DAG only for independent slices that can run concurrently, such as folder fan-out or independent writers. Do not use DAG merely because the question is broad; use one planner/reviewer when one role can inspect evidence directly.",
     "Stay native for simple chat, one obvious command, bounded read-only mini-reviews that explicitly forbid file modification, tiny isolated edits, named-file bugfixes/refactors, a specific function/symbol/API plus local verification, and one small package/module/class/function implementation with tests and no prompt paths. Quality-equivalent bounded direct work should prefer lower cost/time/tool count over orchestration.",
     "For small bounded package/class/function work without prompt paths, do not guess directories from identifiers. Use evidence-backed direct candidates only: read a manifest/config or exact local convention when already evident; otherwise use one targeted find/rg by identifier, then read exact source+tests from the result. Existing module names and starter test imports win over function names: if a starter test imports `module_name`, edit `module_name.<ext>` and its matching runner-discovered test; creating a new `<function_name>.<ext>` module or test sibling is a parallel-module bug. If the repo is not explicitly empty/greenfield, a first mutation before source/test surface evidence is invalid: stop, read the starter import/stub/test surface, then patch that surface. Edit source+tests/docs together when requested or implied, then verify. Parser/scanner/tokenizer is not a routing keyword; route only after evidence proves broad grammar ownership, unsafe transition coupling, repeated local verification failure, or parent context pressure.",
     "Parser/scanner/tokenizer direct work: after source+test evidence, cover token boundaries, adjacency before/after protected spans, comments/markers inside protected text, escaped delimiters, and EOF termination. For SQL/SQLite-like single-quoted strings, doubled single quotes (`''`) are part of the string token, not the closing quote; `--` inside such strings is data, while `--` outside strings comments through newline or EOF.",
@@ -1171,7 +1261,7 @@ function isPromptPathMention(value: string): boolean {
   const segments = normalized.split("/");
   if (segments.some((segment) => segment.length === 0)) return false;
   const fileName = segments.at(-1) ?? "";
-  if (!normalized.includes("/")) return looksLikeFileBasename(fileName);
+  if (!normalized.includes("/")) return looksLikeFileBasename(fileName) || isRootExactPathBasename(fileName);
   return fileName.includes(".");
 }
 
@@ -1185,7 +1275,7 @@ function isExactPromptPathMention(value: string): boolean {
 }
 
 function isRootExactPathBasename(value: string): boolean {
-  return /^(?:AGENTS\.md|CHANGELOG\.md|README\.md|bun\.lock|bun\.lockb|Cargo\.lock|Cargo\.toml|composer\.json|deno\.jsonc?|go\.mod|go\.sum|package-lock\.json|package\.json|pnpm-lock\.yaml|pyproject\.toml|requirements(?:-[A-Za-z0-9_.-]+)?\.txt|tsconfig(?:\.[A-Za-z0-9_-]+)?\.json|uv\.lock|yarn\.lock)$/i.test(value);
+  return /^(?:AGENTS\.md|CHANGELOG\.md|README(?:\.md)?|bun\.lock|bun\.lockb|Cargo\.lock|Cargo\.toml|composer\.json|deno\.jsonc?|go\.mod|go\.sum|package-lock\.json|package\.json|pnpm-lock\.yaml|pyproject\.toml|requirements(?:-[A-Za-z0-9_.-]+)?\.txt|tsconfig(?:\.[A-Za-z0-9_-]+)?\.json|uv\.lock|yarn\.lock)$/i.test(value);
 }
 
 function looksLikeFileBasename(fileName: string): boolean {

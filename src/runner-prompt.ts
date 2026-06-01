@@ -1,13 +1,17 @@
-import type { AgentCapability, AgentDefinition, RouteKind, ToolBudgetProfile } from "./schemas.ts";
+import type { AgentCapability, AgentDefinition, ResolvedSkill, RouteKind, ToolBudgetProfile } from "./schemas.ts";
 import { policyForStep } from "./budget.ts";
 import { buildProjectDiscoveryIndex, formatProjectDiscoveryIndex } from "./discovery.ts";
 import type { RunStepState } from "./schemas.ts";
+import { formatActiveSkillsForPrompt } from "./skills.ts";
 
 export interface SdkPromptOptions {
   rootTask?: string;
   priorFilesRead?: string[];
   synthesisGapReadLimit?: number;
   memoryContext?: string;
+  activeSkills?: ResolvedSkill[];
+  suggestedSkills?: ResolvedSkill[];
+  rejectedSkills?: Array<{ skill: { qualifiedName: string }; reason: string }>;
 }
 
 export interface ChildToolOptions {
@@ -62,6 +66,8 @@ export function buildSdkPrompt(
     "- chalin_project_discovery/snapshot are raw inventory only; read exact evidence before claims.",
     "- Bash is full shell access when this role has the capability; use judgment and purposeful commands.",
     "",
+    formatActiveSkillsForPrompt(options.activeSkills ?? []),
+    options.activeSkills?.length ? "" : undefined,
     "## pi-chalin runtime budget",
     `- Profile: ${profile}. Max tools: ${maxTools}.`,
     `- Caps: ${budgetPolicy.caps.maxSeconds}s, $${budgetPolicy.caps.maxUsd}, ${budgetPolicy.caps.maxTurns} turns, ${budgetPolicy.caps.maxFilesTouched} files, ${budgetPolicy.caps.maxRetriesPerTool} retries/tool.`,
@@ -164,7 +170,7 @@ function implementationReviewText(text: string): boolean {
   return /\b(implement|implementation|changed|worker|verification|tests?|edit|mutation|mutaci[oó]n|fix|bugfix|refactor|feature|scaffold|code|c[oó]digo|build|update|actualiza|modifica)\b/i.test(text);
 }
 
-export function childToolNames(agent: AgentDefinition | undefined, _task = "", needsArtifacts = false, hasPrevious = false, options: ChildToolOptions = {}): string[] {
+export function childToolNames(agent: AgentDefinition | undefined, task = "", needsArtifacts = false, hasPrevious = false, options: ChildToolOptions = {}): string[] {
   const deepHandoff = options.budgetProfile === "deep" || options.budgetProfile === "extended" || options.routeKind === "multi-agent-dag";
   if (hasPrevious && shouldUseHandoffOnlyMode(agent, deepHandoff)) return [];
   if (!agent?.capabilities.length) {
@@ -185,6 +191,7 @@ export function childToolNames(agent: AgentDefinition | undefined, _task = "", n
   if (hasAnyCapability(agent, ["edit-files"])) names.add("edit");
   if (hasAnyCapability(agent, ["write-new-files"])) names.add("write");
   if (hasAnyCapability(agent, ["external-context"]) && taskNeedsExternalContext(agent)) names.add("chalin_web_search");
+  if (hasAnyCapability(agent, ["inspect-files", "validate"]) && taskNeedsSkillInspection(task)) names.add("chalin_skill");
   if (shouldExposeArtifactWrite(agent, needsArtifacts, options)) names.add("chalin_artifact_write");
   const memoryEnabled = options.memoryEnabled ?? true;
   if (memoryEnabled && agent?.memory.read !== false && hasAnyCapability(agent, ["memory-read"])) names.add("chalin_memory_search");
@@ -200,6 +207,10 @@ export function childToolNames(agent: AgentDefinition | undefined, _task = "", n
   names.add("chalin_project_discovery");
   if (agent.concern === "recon") names.add("chalin_project_snapshot");
   return [...names];
+}
+
+function taskNeedsSkillInspection(task: string): boolean {
+  return /\b(SKILL\.md|skill governance|skill audit|promote skill|untrusted skill|generated skill|reusable procedure)\b/i.test(task);
 }
 
 function shouldExposeArtifactWrite(agent: AgentDefinition, needsArtifacts: boolean, options: ChildToolOptions): boolean {

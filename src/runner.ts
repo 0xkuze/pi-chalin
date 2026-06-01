@@ -11,21 +11,26 @@ import { createChildToolPolicy, createChildTools, type ChalinDelegateParamsShape
 import { createChalinChildSessionManager } from "./child-sessions.ts";
 import { buildProjectSnapshot, formatProjectSnapshot } from "./snapshot.ts";
 import { ArtifactStore } from "./artifacts.ts";
-import { buildPromptTokenomics, createStructuredSpan, mergeTraceSpans, type StructuredTraceSpan, type TokenomicsSummary } from "./observability.ts";
+import { buildPromptTokenomics, createSkillTraceEvent, createStructuredSpan, mergeTraceSpans, type SkillTraceEvent, type StructuredTraceSpan, type TokenomicsSummary } from "./observability.ts";
 import { resolveAgentModel, resolveAgentThinking, resolveInheritedModelFallback, type ResolvedAgentModel } from "./model-resolution.ts";
 import { buildSdkPrompt, childToolNames, handoffReviewToolCallLimit, isHandoffGapReadMode, resolveStepCompletionStatus, synthesisCrossStepDuplicateReadLimit, synthesisGapReadLimit, synthesisToolCallLimit, type SdkPromptOptions } from "./runner-prompt.ts";
 import { createRunState, isUsableStepHandoff, persistRun, prepareRunForResume } from "./runner-state.ts";
 import { clearLiveStepSession, setLiveStepSession, type LiveStepSessionRef } from "./runtime-state.ts";
 import { cleanupWorktrees, mergeWorktreeChanges, needsWorktreeIsolation, prepareWorktreeIsolation, type WorktreeIsolationPlan } from "./worktrees.ts";
+import { DEFAULT_CONFIG, type ChalinConfig } from "./config.ts";
+import { SkillCatalog, effectiveSkillToolNames, resolveSkillsForStep } from "./skills.ts";
 
 export interface WorkerRunnerContext extends ChalinPathsOptions {
   agents: Map<string, AgentDefinition>;
+  config?: ChalinConfig;
   rootTask?: string;
   modelOverrides?: Record<string, string>;
   thinkingOverrides?: Record<string, AgentThinkingLevel>;
   parentRunId?: string;
   parentStepId?: string;
   delegationDepth?: number;
+  explicitSkills?: string[];
+  disabledSkills?: string[];
   extensionContext?: ExtensionContext;
   signal?: AbortSignal;
   onUpdate?: (run: RunState) => void;
@@ -705,16 +710,35 @@ async function runSdkStep(
     const budgetPolicy = budgetPolicyForSdkStep(policyForStep(agent, step, run.route.kind, run.route.risk), agent, options.previous);
     const promptOptions = buildPromptOptionsForStep(run, step, agent, budgetPolicy, options.previous);
     promptOptions.memoryContext = run.route.needsMemory ? await compactMemoryContextForStep(options.cwd, step, agent, options.previous) : undefined;
+    const skillCatalog = SkillCatalog.load({ cwd: options.cwd, config: context.config ?? DEFAULT_CONFIG });
+    const skillResolution = resolveSkillsForStep({
+      catalog: skillCatalog,
+      config: context.config ?? DEFAULT_CONFIG,
+      agent,
+      task: [step.task, run.rootTask].filter(Boolean).join("\n"),
+      routeKind: run.route.kind,
+      risk: run.route.risk,
+      explicitSkills: context.explicitSkills,
+      disabledSkills: context.disabledSkills,
+    });
+    step.activeSkills = skillResolution.active;
+    step.suggestedSkills = skillResolution.suggested;
+    step.rejectedSkills = skillResolution.rejected.slice(0, 20);
+    step.skillTraceEvents = [...skillCatalog.events, ...skillResolution.events];
+    promptOptions.activeSkills = skillResolution.active;
+    promptOptions.suggestedSkills = skillResolution.suggested;
+    promptOptions.rejectedSkills = skillResolution.rejected;
     const maxToolCalls = budgetPolicy.caps.maxToolCalls;
     step.budget = budgetPolicy.profile;
     step.maxToolCalls = maxToolCalls;
-    const allowedTools = childToolNames(agent, step.task, run.route.needsArtifacts, Boolean(options.previous), {
+    const baseAllowedTools = childToolNames(agent, step.task, run.route.needsArtifacts, Boolean(options.previous), {
       budgetProfile: budgetPolicy.profile,
       routeKind: run.route.kind,
       memoryEnabled: run.route.needsMemory,
       delegationDepth: currentSubagentDepth(run),
       maxDelegationDepth: maxSubagentDepth(),
     });
+    const allowedTools = effectiveSkillToolNames(baseAllowedTools, skillResolution.active.map((item) => item.skill));
     const prompt = buildSdkPrompt(agent, step.task, options.cwd, options.previous, budgetPolicy, "normal", promptOptions);
     const tokenomics = buildPromptTokenomics({
       childPrompt: prompt,
@@ -1853,10 +1877,16 @@ function finalizeStepMetrics(metrics: RunStepMetrics, step: RunStepState, budget
   const crossStepDuplicateReads = [...new Set((metrics.filesRead ?? []).filter((file) => prior.has(file)))];
   const budgetCapHits = mergeBudgetCapHits(metrics.budgetCapHits, health.caps);
   const budgetStopCount = Math.max(metrics.budgetStopCount ?? 0, countHardBudgetHits(budgetCapHits));
+  const skillEvents = mergeSkillTraceEvents([
+    ...(step.skillTraceEvents ?? []),
+    ...skillEventsForStep(step, utility),
+  ]);
   return {
     ...metrics,
     utility,
     progress,
+    ...(step.activeSkills?.length ? { skills: step.activeSkills.map((item) => item.skill.qualifiedName) } : {}),
+    ...(skillEvents.length ? { skillEvents } : {}),
     ...(budgetCapHits.length ? { budgetCapHits } : {}),
     ...(crossStepDuplicateReads.length ? {
       crossStepDuplicateReadCount: crossStepDuplicateReads.length,
@@ -1864,6 +1894,77 @@ function finalizeStepMetrics(metrics: RunStepMetrics, step: RunStepState, budget
     } : {}),
     ...(budgetStopCount > 0 ? { budgetStopCount } : {}),
   };
+}
+
+function skillEventsForStep(step: RunStepState, utility: RunStepMetrics["utility"]): SkillTraceEvent[] {
+  const reviewerPass = step.agent === "reviewer"
+    ? /(?:^|\b)(pass|passed|aprobado|ok)(?:\b|$)/i.test(step.output?.text ?? "")
+    : undefined;
+  const retries = Object.values(step.metrics?.retriesByTool ?? {}).reduce((total, count) => total + count, 0);
+  return [
+    ...(step.activeSkills ?? []).map((item) => createSkillTraceEvent({
+      type: "skill.activation.applied",
+      skill: item.skill.qualifiedName,
+      scope: item.skill.scope,
+      trust: item.skill.trust,
+      stepId: step.id,
+      agent: step.agent,
+      reason: item.reason,
+    })),
+    ...(step.activeSkills ?? []).map((item) => createSkillTraceEvent({
+      type: "skill.outcome.recorded",
+      skill: item.skill.qualifiedName,
+      scope: item.skill.scope,
+      trust: item.skill.trust,
+      stepId: step.id,
+      agent: step.agent,
+      reason: step.status,
+      metadata: {
+        verification: utility?.verificationDone === true ? "observed" : "unknown",
+        reviewerPass: reviewerPass === undefined ? "unknown" : reviewerPass ? "true" : "false",
+        retries,
+      },
+    })),
+    ...(step.suggestedSkills ?? []).map((item) => createSkillTraceEvent({
+      type: "skill.match.result",
+      skill: item.skill.qualifiedName,
+      scope: item.skill.scope,
+      trust: item.skill.trust,
+      stepId: step.id,
+      agent: step.agent,
+      reason: `suggested: ${item.reason}`,
+    })),
+    ...(step.rejectedSkills ?? []).slice(0, 20).map((item) => createSkillTraceEvent({
+      type: "skill.activation.rejected",
+      skill: item.skill.qualifiedName,
+      scope: item.skill.scope,
+      trust: item.skill.trust,
+      stepId: step.id,
+      agent: step.agent,
+      reason: item.reason,
+    })),
+  ];
+}
+
+function mergeSkillTraceEvents(events: SkillTraceEvent[]): SkillTraceEvent[] {
+  const seen = new Set<string>();
+  const merged: SkillTraceEvent[] = [];
+  for (const event of events) {
+    const key = [
+      event.type,
+      event.skill ?? "",
+      event.scope ?? "",
+      event.agent ?? "",
+      event.stepId ?? "",
+      event.policy ?? "",
+      event.reason ?? "",
+      JSON.stringify(event.metadata ?? {}),
+    ].join("\u0000");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(event);
+  }
+  return merged.slice(0, 80);
 }
 
 function baseStepSpans(
@@ -1948,6 +2049,7 @@ function summarizeRunMetrics(run: RunState): RunState["metrics"] {
   const filesRead: string[] = [];
   const crossStepDuplicateReads: string[] = [];
   const spans: StructuredTraceSpan[] = [];
+  const skillEvents: SkillTraceEvent[] = [];
   let tokenomics: TokenomicsSummary | undefined;
   let toolCalls = 0;
   let duplicateReadCount = 0;
@@ -1965,6 +2067,7 @@ function summarizeRunMetrics(run: RunState): RunState["metrics"] {
     filesRead.push(...(step.metrics.filesRead ?? []));
     crossStepDuplicateReads.push(...(step.metrics.crossStepDuplicateReads ?? []));
     spans.push(...(step.metrics.spans ?? []));
+    skillEvents.push(...(step.metrics.skillEvents ?? []));
     tokenomics = mergeTokenomics(tokenomics, step.metrics.tokenomics);
     for (const [name, count] of Object.entries(step.metrics.toolCallsByName)) {
       toolCallsByName[name] = (toolCallsByName[name] ?? 0) + count;
@@ -1983,6 +2086,7 @@ function summarizeRunMetrics(run: RunState): RunState["metrics"] {
     ...(filesRead.length ? { filesRead: [...new Set(filesRead)].slice(0, 50) } : {}),
     ...(tokenomics ? { tokenomics } : {}),
     ...(spans.length ? { spans: mergeTraceSpans(spans) } : {}),
+    ...(skillEvents.length ? { skillEvents: skillEvents.slice(0, 200) } : {}),
   };
 }
 

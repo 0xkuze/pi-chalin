@@ -80,6 +80,12 @@ interface RuntimeStateServiceShape {
   readonly liveStepSessions: Ref.Ref<Map<string, LiveStepSessionRef>>;
   readonly routeInvocations: Ref.Ref<ChalinRouteInvocation[]>;
   readonly directCompletion: Ref.Ref<DirectCompletionState>;
+  readonly skillOverrides: Ref.Ref<SkillOverrideState>;
+}
+
+interface SkillOverrideState {
+  explicit: Set<string>;
+  disabled: Set<string>;
 }
 
 class RuntimeStateService extends Context.Tag("pi-chalin/RuntimeState")<RuntimeStateService, RuntimeStateServiceShape>() {}
@@ -90,6 +96,7 @@ const RuntimeStateLayer = Layer.effect(RuntimeStateService, Effect.gen(function*
     liveStepSessions: yield* Ref.make(new Map<string, LiveStepSessionRef>()),
     routeInvocations: yield* Ref.make<ChalinRouteInvocation[]>([]),
     directCompletion: yield* Ref.make(freshDirectCompletionState()),
+    skillOverrides: yield* Ref.make<SkillOverrideState>(freshSkillOverrideState()),
   };
 }));
 
@@ -101,6 +108,7 @@ const lastRunRef = runtimeState.lastRun;
 const liveStepSessions = refBackedMap(runtimeState.liveStepSessions);
 const routeInvocations = refBackedArray(runtimeState.routeInvocations);
 const directCompletion = refBackedObject(runtimeState.directCompletion);
+const skillOverridesRef = runtimeState.skillOverrides;
 
 function getRef<T>(ref: Ref.Ref<T>): T {
   return Effect.runSync(Ref.get(ref));
@@ -189,9 +197,36 @@ export function clearLiveStepSession(runId: string, stepId: string, ref?: LiveSt
   liveStepSessions.delete(key);
 }
 
+export function activateSkillForTurn(reference: string): SkillOverrideState {
+  const current = getRef(skillOverridesRef);
+  const next: SkillOverrideState = { explicit: new Set(current.explicit), disabled: new Set(current.disabled) };
+  next.explicit.add(reference);
+  next.disabled.delete(reference);
+  setRef(skillOverridesRef, next);
+  return cloneSkillOverrideState(next);
+}
+
+export function disableSkillForTurn(reference: string): SkillOverrideState {
+  const current = getRef(skillOverridesRef);
+  const next: SkillOverrideState = { explicit: new Set(current.explicit), disabled: new Set(current.disabled) };
+  next.explicit.delete(reference);
+  next.disabled.add(reference);
+  setRef(skillOverridesRef, next);
+  return cloneSkillOverrideState(next);
+}
+
+export function getSkillOverridesForTurn(): SkillOverrideState {
+  return cloneSkillOverrideState(getRef(skillOverridesRef));
+}
+
+export function clearSkillOverridesForTurn(): void {
+  setRef(skillOverridesRef, freshSkillOverrideState());
+}
+
 export function beginChalinTurn(options: { prompt?: string; cwd?: string } = {}): void {
   resetRefBackedArray(routeInvocations);
   replaceRefBackedObject(directCompletion, freshDirectCompletionState());
+  clearSkillOverridesForTurn();
   directCompletion.cwd = options.cwd;
   directCompletion.directModeKind = classifyDirectModeKind(options.prompt ?? "");
   directCompletion.promptCodePaths = new Set(promptPathTokens(options.prompt ?? "").filter(isCodeLikePath).map(normalizeWorkflowPath));
@@ -610,6 +645,7 @@ export function resetRuntimeState(): void {
   liveStepSessions.clear();
   resetRefBackedArray(routeInvocations);
   replaceRefBackedObject(directCompletion, freshDirectCompletionState());
+  clearSkillOverridesForTurn();
 }
 
 function liveStepKey(runId: string, stepId: string): string {
@@ -671,6 +707,14 @@ function freshDirectCompletionState(): DirectCompletionState {
     postFailureEvidenceNudgeSent: false,
     nudgeSent: false,
   };
+}
+
+function freshSkillOverrideState(): SkillOverrideState {
+  return { explicit: new Set(), disabled: new Set() };
+}
+
+function cloneSkillOverrideState(state: SkillOverrideState): SkillOverrideState {
+  return { explicit: new Set(state.explicit), disabled: new Set(state.disabled) };
 }
 
 function isPostVerificationExplorationTool(toolName: string): boolean {

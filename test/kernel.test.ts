@@ -5,9 +5,11 @@ import * as path from "node:path";
 import { afterEach, test } from "bun:test";
 import { ChalinKernel, routeFromPlan } from "../src/kernel.ts";
 import { createMemoryCandidate, MemoryStore } from "../src/memory.ts";
+import { createSkillTraceEvent } from "../src/observability.ts";
 import type { WorkerRunner, WorkerRunnerContext } from "../src/runner.ts";
 import { createRunState } from "../src/runner-state.ts";
 import type { RouteDecision, RunState } from "../src/schemas.ts";
+import { SkillMetricsStore } from "../src/skills.ts";
 
 const tempDirs: string[] = [];
 afterEach(() => { while (tempDirs.length > 0) fs.rmSync(tempDirs.pop()!, { recursive: true, force: true }); });
@@ -104,6 +106,38 @@ test("ChalinKernel executes an LLM-planned mock route", async () => {
   assert.equal(result.approval.action, "allow");
   assert.equal(result.run?.status, "complete");
   assert.equal(result.run?.steps[0]?.agent, "reviewer");
+});
+
+test("ChalinKernel records skill metrics even when the run does not need artifacts", async () => {
+  const cwd = tempDir("pi-chalin-kernel-skill-metrics-");
+  const route = routeFromPlan({ topology: "single", steps: [{ agent: "worker", task: "Fix bugfix regression." }] });
+  const runner: WorkerRunner = {
+    async run(inputRoute: RouteDecision): Promise<RunState> {
+      const run = createRunState(inputRoute, cwd);
+      run.status = "complete";
+      run.endedAt = new Date().toISOString();
+      run.steps[0]!.status = "complete";
+      run.steps[0]!.metrics = {
+        durationMs: 1,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        toolCalls: 0,
+        toolCallsByName: {},
+        skillEvents: [
+          createSkillTraceEvent({ type: "skill.activation.applied", skill: "built-in:bugfix-tight-loop", scope: "built-in", trust: "trusted" }),
+          createSkillTraceEvent({ type: "skill.outcome.recorded", skill: "built-in:bugfix-tight-loop", scope: "built-in", trust: "trusted", metadata: { verification: "observed", reviewerPass: "unknown", retries: 0 } }),
+        ],
+      };
+      run.steps[0]!.output = { agent: "worker", text: "Done.", handoff: "Done.", memoryCandidates: [], raw: "Done.", warnings: [] };
+      return run;
+    },
+  };
+
+  await new ChalinKernel({ cwd, runner }).handleRoute(route, "bugfix regression", { cwd });
+  const record = new SkillMetricsStore({ cwd }).snapshot().skills["built-in:bugfix-tight-loop"];
+
+  assert.equal(record?.activations, 1);
+  assert.equal(record?.outcomes, 1);
+  assert.equal(record?.verificationObserved, 1);
 });
 
 test("ChalinKernel resumes an already-started non-critical run without a second approval prompt", async () => {
