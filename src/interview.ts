@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Editor, Key, matchesKey, truncateToWidth, type Component, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
+import { Editor, Key, matchesKey, truncateToWidth, visibleWidth, type Component, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
 import type { ArtifactStore, InterviewDecisionInput } from "./artifacts.ts";
 
 export interface InterviewChoiceInput {
@@ -121,10 +121,10 @@ async function runBatchedInterview(ctx: ExtensionContext, questions: InterviewQu
     {
       overlay: true,
       overlayOptions: {
-        anchor: "center",
-        width: "94%",
-        maxHeight: "88%",
-        margin: 1,
+        anchor: "bottom-center",
+        width: "100%",
+        maxHeight: "100%",
+        margin: { left: 0, right: 0, bottom: 0 },
       },
     },
   );
@@ -208,34 +208,28 @@ class InterviewBatchOverlay implements Component {
 
   render(width: number): string[] {
     if (this.cachedLines) return this.cachedLines;
-    const safeWidth = Math.max(40, width);
+    const overlayWidth = Math.max(40, width);
+    const innerWidth = Math.max(1, overlayWidth - 2);
+    const contentWidth = Math.max(1, innerWidth - 2);
     const lines: string[] = [];
-    const add = (line = "") => lines.push(line ? truncateToWidth(line, safeWidth) : "");
     const answered = this.answers.size;
     const total = this.questions.length;
 
-    add(this.theme.fg("accent", "chalin_interview"));
-    add(this.theme.fg("muted", `${answered}/${total} answered · Tab changes question · Enter edits/chooses`));
-    add(this.tabLine(safeWidth));
-    add("");
+    lines.push(` ${this.theme.fg("accent", this.theme.bold("Interview"))} ${this.theme.fg("dim", `${answered}/${total} answered`)}`);
+    lines.push(` ${this.tabLine(Math.max(20, contentWidth))}`);
+    lines.push("");
 
-    for (let index = 0; index < this.questions.length; index += 1) {
-      const question = this.questions[index]!;
-      const active = this.focusIndex === index;
-      const answer = this.answers.get(question.id ?? `q${index + 1}`);
-      const marker = active ? this.theme.fg("accent", ">") : " ";
-      const status = answer ? this.theme.fg("success", "answered") : this.theme.fg("warning", "pending");
-      add(`${marker} ${index + 1}. ${compact(question.question, Math.max(36, safeWidth - 18))} · ${status}`);
-      add(`   ${this.theme.fg("muted", "answer:")} ${answer ? this.answerLabel(answer, safeWidth - 12) : this.theme.fg("dim", "not selected yet")}`);
-      if (active) this.renderActiveQuestion(lines, safeWidth, question, index);
-      if (index < this.questions.length - 1) add("");
+    if (this.isSubmitFocused()) {
+      this.renderSubmitPanel(lines, contentWidth);
+    } else {
+      const question = this.questions[this.focusIndex];
+      if (question) this.renderQuestionPanel(lines, contentWidth, question, this.focusIndex);
     }
 
-    add("");
-    add(this.submitLine());
-    add(this.theme.fg("dim", "Tab/←→ question · ↑↓ option · Enter choose/submit · Esc cancel"));
-    this.cachedLines = lines;
-    return lines;
+    lines.push("");
+    lines.push(` ${this.theme.fg("dim", "Enter select · ↑/↓ navigate · Tab switch · Esc cancel")}`);
+    this.cachedLines = renderInterviewOverlayShell(this.theme, overlayWidth, lines);
+    return this.cachedLines;
   }
 
   handleInput(data: string): void {
@@ -279,23 +273,61 @@ class InterviewBatchOverlay implements Component {
     this.cachedLines = undefined;
   }
 
-  private renderActiveQuestion(lines: string[], width: number, question: InterviewQuestionInput, questionIndex: number): void {
+  private renderQuestionPanel(lines: string[], width: number, question: InterviewQuestionInput, questionIndex: number): void {
+    const id = question.id ?? `q${questionIndex + 1}`;
+    const answer = this.answers.get(id);
+    lines.push(` ${this.theme.fg("muted", `Question ${questionIndex + 1}/${this.questions.length}`)} ${this.theme.fg("accent", compact(id, 18))}`);
+    for (const line of wrapPlainText(question.question, Math.max(18, width - 2))) {
+      lines.push(` ${this.theme.bold(line)}`);
+    }
+    if (answer) {
+      lines.push(` ${this.theme.fg("muted", "Answer")} ${this.theme.fg("success", this.answerLabel(answer, Math.max(16, width - 10)))}`);
+    }
+    lines.push("");
+    this.renderOptions(lines, width, question, questionIndex, answer);
+    if (this.inputQuestionIndex === questionIndex) this.renderCustomInput(lines, width);
+  }
+
+  private renderOptions(lines: string[], width: number, question: InterviewQuestionInput, questionIndex: number, answer: InterviewAnswer | undefined): void {
     const options = questionOptionsForOverlay(question);
     const selectedIndex = this.optionIndexes[questionIndex] ?? 0;
     for (let optionIndex = 0; optionIndex < options.length; optionIndex += 1) {
       const option = options[optionIndex]!;
       const selected = optionIndex === selectedIndex;
-      const prefix = selected ? this.theme.fg("accent", "   > ") : "     ";
-      const suffix = option.recommended ? this.theme.fg("muted", " (recommended)") : "";
-      lines.push(truncateToWidth(`${prefix}${optionIndex + 1}. ${option.label}${suffix}`, width));
+      const confirmed = answer && optionMatchesAnswer(option, answer);
+      const pointer = selected ? this.theme.fg("accent", "❯ ") : "  ";
+      const number = `${optionIndex + 1}. `;
+      const label = selected ? this.theme.fg("accent", this.theme.bold(option.label)) : this.theme.fg("text", option.label);
+      const recommended = option.recommended ? ` ${this.theme.fg("accent", "recommended")}` : "";
+      const check = confirmed ? ` ${this.theme.fg("success", "✔")}` : "";
+      lines.push(truncateToWidth(`${pointer}${number}${label}${recommended}${check}`, width, "…", false));
     }
-    if (this.inputQuestionIndex === questionIndex) {
-      lines.push("");
-      lines.push(truncateToWidth(this.theme.fg("muted", "   custom answer:"), width));
-      for (const line of this.editor.render(Math.max(24, width - 4))) {
-        lines.push(truncateToWidth(`   ${line}`, width));
-      }
+  }
+
+  private renderCustomInput(lines: string[], width: number): void {
+    lines.push("");
+    lines.push(truncateToWidth(` ${this.theme.fg("muted", "Custom answer")}`, width, "…", false));
+    for (const line of this.editor.render(Math.max(24, width - 4))) {
+      lines.push(truncateToWidth(` ${line}`, width, "…", false));
     }
+  }
+
+  private renderSubmitPanel(lines: string[], width: number): void {
+    lines.push(` ${this.theme.fg("accent", this.theme.bold("Review answers"))}`);
+    lines.push("");
+    for (let index = 0; index < this.questions.length; index += 1) {
+      const question = this.questions[index]!;
+      const id = question.id ?? `q${index + 1}`;
+      const answer = this.answers.get(id);
+      const box = answer ? this.theme.fg("success", "■") : this.theme.fg("muted", "□");
+      lines.push(truncateToWidth(` ${box} ${this.theme.fg("muted", compact(id, 18))}`, width, "…", false));
+      const value = answer ? this.theme.fg("text", this.answerLabel(answer, Math.max(16, width - 6))) : this.theme.fg("warning", "pending");
+      lines.push(truncateToWidth(`   ${this.theme.fg("muted", "→")} ${value}`, width, "…", false));
+    }
+    lines.push("");
+    const missing = this.questions.length - this.answers.size;
+    const action = missing === 0 ? "Submit answers" : `Answer ${missing} remaining question${missing === 1 ? "" : "s"}`;
+    lines.push(truncateToWidth(` ${this.theme.fg("accent", "❯")} ${this.theme.fg(missing === 0 ? "success" : "warning", action)}`, width, "…", false));
   }
 
   private handleCustomInput(data: string): void {
@@ -405,27 +437,28 @@ class InterviewBatchOverlay implements Component {
   }
 
   private tabLine(width: number): string {
-    const tabs = this.questions.map((question, index) => {
+    const pieces: string[] = ["← "];
+    for (let index = 0; index < this.questions.length; index += 1) {
+      const question = this.questions[index]!;
       const id = question.id ?? `q${index + 1}`;
       const answered = this.answers.has(id);
-      const label = `${answered ? "x" : " "} ${compact(id, 14)}`;
-      return this.focusIndex === index ? this.theme.bg("selectedBg", ` ${label} `) : this.theme.fg(answered ? "success" : "muted", ` ${label} `);
-    });
+      const box = answered ? "■" : "□";
+      const raw = ` ${box} ${compact(id, 14)} `;
+      const styled = this.focusIndex === index
+        ? this.theme.bg("selectedBg", this.theme.fg("text", raw))
+        : this.theme.fg(answered ? "success" : "muted", raw);
+      pieces.push(styled, " ");
+    }
+    const submitText = " ✓ Submit ";
     const submit = this.isSubmitFocused()
-      ? this.theme.bg("selectedBg", " submit ")
-      : this.theme.fg(this.allAnswered() ? "success" : "dim", " submit ");
-    return truncateToWidth([...tabs, submit].join(" "), width);
-  }
-
-  private submitLine(): string {
-    const label = this.allAnswered()
-      ? "submit: ready, press Enter"
-      : `submit: answer ${this.questions.length - this.answers.size} more`;
-    return this.isSubmitFocused() ? this.theme.fg("accent", `> ${label}`) : this.theme.fg("muted", `  ${label}`);
+      ? this.theme.bg("selectedBg", this.theme.fg("text", submitText))
+      : this.theme.fg(this.allAnswered() ? "success" : "dim", submitText);
+    pieces.push(submit, " →");
+    return truncateToWidth(pieces.join(""), width, "", false);
   }
 
   private answerLabel(answer: InterviewAnswer, width: number): string {
-    const suffix = answer.custom ? " (custom)" : answer.recommended ? " (recommended)" : "";
+    const suffix = answer.custom ? " custom" : answer.recommended ? " recommended" : "";
     return truncateToWidth(`${answer.answer}${suffix}`, Math.max(16, width));
   }
 
@@ -433,6 +466,59 @@ class InterviewBatchOverlay implements Component {
     this.cachedLines = undefined;
     this.tui.requestRender();
   }
+}
+
+function optionMatchesAnswer(option: InterviewChoiceOption, answer: InterviewAnswer): boolean {
+  if (option.custom) return answer.custom;
+  if (option.skip) return answer.choiceLabel === SKIP_OPTION || answer.answer === option.value;
+  return answer.choiceLabel === option.label || answer.answer === option.value;
+}
+
+function renderInterviewOverlayShell(theme: InterviewTheme, width: number, rows: string[]): string[] {
+  const overlayWidth = Math.max(1, width);
+  const innerWidth = Math.max(1, overlayWidth - 2);
+  const border = (text: string) => theme.fg("border", text);
+  const row = (content = "") => `${border("│")}${padAnsi(content, innerWidth)}${border("│")}`;
+  return clampRenderedLines([
+    border(`╭${"─".repeat(innerWidth)}╮`),
+    ...rows.map((line) => row(line)),
+    border(`╰${"─".repeat(innerWidth)}╯`),
+  ], overlayWidth);
+}
+
+function padAnsi(text: string, width: number): string {
+  const singleLine = text.replace(/\r/g, "").replace(/\n/g, " ").replace(/\t/g, "   ");
+  const truncated = truncateToWidth(singleLine, width, "…", false);
+  const visible = visibleWidth(truncated);
+  const repaired = visible <= width ? truncated : truncateToWidth(truncated, width, "", false);
+  return `${repaired}${" ".repeat(Math.max(0, width - visibleWidth(repaired)))}`;
+}
+
+function clampRenderedLines(lines: string[], width: number): string[] {
+  return lines.map((line) => padAnsi(line, width));
+}
+
+function wrapPlainText(text: string, width: number): string[] {
+  const normalized = text.replace(/\r/g, "").split("\n").flatMap((line) => line.trim() ? [line.trim()] : [""]);
+  const result: string[] = [];
+  for (const line of normalized) {
+    if (!line) {
+      result.push("");
+      continue;
+    }
+    let current = "";
+    for (const word of line.split(/\s+/)) {
+      const next = current ? `${current} ${word}` : word;
+      if (visibleWidth(next) <= width) {
+        current = next;
+        continue;
+      }
+      if (current) result.push(current);
+      current = visibleWidth(word) > width ? truncateToWidth(word, width, "", false) : word;
+    }
+    if (current) result.push(current);
+  }
+  return result.length ? result : [""];
 }
 
 function normalizeQuestions(raw: InterviewQuestionInput[], batchSize: number): InterviewQuestionInput[] {

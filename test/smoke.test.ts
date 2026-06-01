@@ -3107,8 +3107,21 @@ test("chalin_interview presents batched editable questions in a custom overlay",
 
   assert.equal(selectCalled, false);
   assert.match(JSON.stringify(customOptions), /"overlay":true/);
+  assert.match(JSON.stringify(customOptions), /"anchor":"bottom-center"/);
+  assert.match(JSON.stringify(customOptions), /"width":"100%"/);
+  assert.match(renders[0] ?? "", /╭/);
+  assert.match(renders[0] ?? "", /Interview/);
+  assert.match(renders[0] ?? "", /←/);
+  assert.match(renders[0] ?? "", /□ scope/);
+  assert.match(renders[0] ?? "", /□ exclude/);
+  assert.match(renders[0] ?? "", /✓ Submit/);
   assert.match(renders[0] ?? "", /What scope should pi-chalin implement first\?/);
-  assert.match(renders[0] ?? "", /Any area to exclude\?/);
+  assert.doesNotMatch(renders[0] ?? "", /Any area to exclude\?/);
+  assert.match(renders[0] ?? "", /❯ 1\. MVP slice/);
+  assert.match(renders[0] ?? "", /recommended/);
+  assert.match(renders[0] ?? "", /Tab switch/);
+  assert.doesNotMatch(renders[0] ?? "", /chalin_interview/);
+  for (const line of (renders[0] ?? "").split("\n")) assert.ok(visibleWidth(line) <= 96, `line exceeds overlay width: ${visibleWidth(line)} > 96`);
   assert.ok(renderRequests > 0);
   assert.deepEqual(result.details.interview?.answers.map((answer) => answer.answer), ["MVP slice", "Do not touch billing yet."]);
   assert.equal(result.details.interview?.answers[0]?.recommended, true);
