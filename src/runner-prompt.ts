@@ -33,7 +33,6 @@ export function buildSdkPrompt(
   budgetProfile: ToolBudgetProfile = "normal",
   options: SdkPromptOptions = {},
 ): string {
-  const discoveryIndex = formatProjectDiscoveryIndex(buildProjectDiscoveryIndex(cwd));
   const capabilities = agent?.capabilities ?? [];
   const mutationRelevant = Boolean(agent && (
     agent.concern === "implementation"
@@ -41,20 +40,19 @@ export function buildSdkPrompt(
     || capabilities.includes("edit-files")
     || capabilities.includes("write-new-files")
   ));
-  const implementationReviewRelevant = Boolean(agent?.concern === "review" && implementationReviewText([task, previous, options.rootTask].filter(Boolean).join("\n")));
-  const contractText = [task, previous, options.rootTask].filter(Boolean).join("\n");
-  const implementationContractRelevant = implementationReviewText(contractText);
-  const scaffoldContractRelevant = /\b(scaffold|greenfield|package|package\.json|cli|bin|entrypoint|readme|build script|typescript|javascript|npm|pnpm|yarn|bun|crate|cargo)\b/i.test(contractText);
-  const parserContractRelevant = /\b(parser|scanner|tokenizer|lexer|grammar|state machine|delimiter|escape|quote|quoted|string literal|comment|sql|sqlite|redis|unicode|ttl|expire)\b/i.test(contractText);
-  const normalizationContractRelevant = /\b(sort|order|normaliz|canonical|case|casefold|lowercase|uppercase|duplicate|marker|key builder|filter|trim|preserv(?:e|ing)|retention)\b/i.test(contractText);
-  const timeContractRelevant = /\b(time|date|retry|cache|rate|budget|ttl|expire|window|deadline|timeout)\b/i.test(contractText);
+  const implementationReviewRelevant = agent?.concern === "review";
+  const goalAwareScoutingRelevant = agent?.concern === "recon" && Boolean(options.rootTask?.trim());
   const budgetPolicy = typeof budget === "number"
-    ? policyForStep(agent, { agent: agent?.name ?? "agent", task, budget: budgetProfile }, "single-agent")
+    ? policyForStep(agent, { agent: agent?.name ?? "agent", task, budget: budgetProfile }, "multi-agent-sequential")
     : budget;
   const maxTools = typeof budget === "number" ? budget : budget.caps.maxToolCalls;
   const profile = typeof budget === "number" ? budgetProfile : budget.profile;
+  const discoveryIndex = previous
+    ? "Discovery index omitted because Previous Handoff is available. Call chalin_project_discovery only if the handoff lacks required repo facts."
+    : formatProjectDiscoveryIndex(buildProjectDiscoveryIndex(cwd, { maxEntries: 220 }), { maxEntries: promptDiscoveryEntryLimit(profile) });
   const deepProjectAnalysis = profile === "deep";
   const handoffGapMode = isHandoffGapReadMode(agent, previous, deepProjectAnalysis);
+  const structuredHandoffRequired = requiresStructuredAgentHandoff(agent);
   return [
     compactAgentInstructions(agent),
     "",
@@ -88,31 +86,26 @@ export function buildSdkPrompt(
     agent?.concern === "context-building"
       ? "- Context handoff completeness: follow imports, callers, tests, fixtures, config, docs, and adjacent patterns until the implementation approach, risks, and validation path are evidence-backed; do not omit a domain-critical file/source just to keep the handoff short. Name remaining gaps explicitly."
       : undefined,
-    agent?.concern === "recon" && implementationContractRelevant
-      ? "- Implementation scouting: map source+test evidence per requested behavior. Do not call tests sufficient/as-is unless each criterion has a direct runner-discoverable assertion; hand off missing regressions."
+    goalAwareScoutingRelevant
+      ? "- Goal-aware scouting: map the source, tests, fixtures, config, docs, and verification evidence needed for the Original User Goal. Do not declare coverage sufficient without direct evidence for each requested criterion; hand off concrete gaps."
       : undefined,
     "- Prefer concise evidence; stop after high-value actionable issues.",
     evidenceClaimDiscipline(),
     "- Preserve failure triggers/counterexamples before adjacent findings.",
-    mutationRelevant ? "- Impl/test: derive the contract from prompt+repo evidence. Tests are contract oracles: preserve starter assertions unless disproven; add focused criteria plus one boundary/counterexample; cover changed and preservation/no-op/composition paths. Preserve public compatibility unless evidence requires. Narrow token/flag/path/format means local change plus adjacent preservation. Invalid/reject requirements are contract." : undefined,
-    mutationRelevant && timeContractRelevant ? "- Time/window/retry/cache/rate/budget behavior prefers internal test seams or runner-native fake time without expanding public APIs; use Bun `setSystemTime`, Vitest fake timers, or the smallest scoped Date.now restore instead of ad hoc sleeps." : undefined,
-    mutationRelevant && normalizationContractRelevant ? "- Normalization/filter contracts: capture normalized config so caller-side object mutation cannot alter runtime semantics. Text/query filters need trim/blank, no-match, order, and preservation assertions when relevant." : undefined,
+    mutationRelevant ? "- Impl/test: derive the contract from prompt+repo evidence. Tests are contract oracles: preserve existing assertions unless disproven; add focused criteria plus one meaningful boundary/counterexample. Preserve public compatibility unless evidence requires otherwise. Invalid/reject requirements are contract." : undefined,
+    mutationRelevant ? "- Domain-specific edge contracts belong in active Skills. If no relevant Skill is loaded, derive edge behavior from repository grammar, tests, docs, and public API evidence instead of inventing special cases." : undefined,
     mutationRelevant && previous?.trim() ? "- Upstream handoffs are context, not authority. Before skipping tests/docs, compare Original User Goal criteria against repo evidence." : undefined,
     mutationRelevant ? "- Code behavior changes update nearest tests unless existing assertions cover every criterion; final distinguishes edited tests from evidence-only tests. Test files register runner-discoverable cases; zero-test assertion scripts are invalid. A narrower step task cannot forbid tests unless the Original User Goal explicitly forbids test edits." : undefined,
     mutationRelevant ? "- Coverage breadth: multiple requested rules get separate compact tests per rule plus one composition/determinism case; do not collapse several requirements into one smoke test." : undefined,
-    mutationRelevant && normalizationContractRelevant ? "- Normalization/key APIs need 8-12 focused visible tests when the public contract has several rules, not one smoke." : undefined,
-    mutationRelevant && scaffoldContractRelevant ? "- Scaffold/package work: requested files, metadata, entrypoints, build output, tests, docs, and language/toolchain agree. Tests use the runner's discoverable API. CLI bins target real executables; CLI tests cover API + real command path, with args/no-input when relevant." : undefined,
-    mutationRelevant && parserContractRelevant ? "- Parser/scanner/state-machine changes follow repo grammar evidence. Name states/transitions; test adjacency, delimiter transitions, suffix/metadata preservation, termination, escaping/quoting, and EOF/error behavior. Protected spans such as quoted strings/comments are boundary states: when the prompt says the delimited segment is a separate token/entity, adjacency before and after non-whitespace must be tested as separation, not merged into neighbors, unless repo evidence explicitly says otherwise. Permanent repo tests must cover changed transitions; ad-hoc temp tests are not a substitute." : undefined,
-    mutationRelevant && normalizationContractRelevant ? "- Sorting/normalization contracts: when preserving original case/content, sort/order trimmed originals with the language's normal lexicographic/ordinal comparison unless case-insensitive, natural, locale, or custom ordering is requested/evidenced. Do not lowercase/casefold a preserved value only for determinism. Tests separate mixed-case ordering, retention, duplicates, empty filtering, and reorder determinism." : undefined,
-    mutationRelevant ? "- Public API contract comments: when editing/adding a public/exported function, preserve docs and add a concise contract doc comment when local style supports it, especially for serialization, normalization, validation, or cross-module APIs." : undefined,
+    mutationRelevant ? "- Public API contract comments: when editing/adding a public/exported function, preserve docs and add a concise contract doc comment when local style supports it, especially for cross-module behavior, input/output guarantees, or compatibility-sensitive APIs." : undefined,
     mutationRelevant ? "- Prefer low-allocation ownership/resources; avoid leaks, globals, unsafe casts, warning suppression, arbitrary fixed caps, or resource escape hatches unless evidence requires them." : undefined,
     mutationRelevant ? "- Bounded impl/test: small evidence, one impl/test edit when possible, avoid micro-edits, verify once after, one corrective edit/fail." : undefined,
     mutationRelevant ? "- Verify with exact named command else nearest. If edit fails, reread and patch smallest exact block. After pass, one readback, then final immediately; no more shell/tests or open-ended thinking unless edited again. Fix scope/warnings and rerun." : undefined,
     mutationRelevant ? "- Modified files: `## Handoff` includes `Changed:`, `Verification:`, `Notes:`, exact paths, readback, exact implementation and test/evidence source paths. Never write only local/existing tests, binaries, or commands." : "- Handoff cites exact evidence paths, unresolved uncertainty, and avoids raw logs or unsupported claims.",
     implementationReviewRelevant ? "- Implementation review gate: independently compare the actual changed files against the Original User Goal, the planner contract, and the worker's claims. A worker deviation from a locked plan is a finding even when visible tests pass. Passing visible tests prove only observed behavior; flag untested or invented semantics that could fail hidden/broader cases." : undefined,
     implementationReviewRelevant ? "- Review economy: start from the handoff; re-read only changed/high-risk files needed for verdict. If duplicate-read policy blocks evidence, mark sampled/not rechecked." : undefined,
-    implementationReviewRelevant ? "- Review lossy normalization/coercion carefully. If the task says preserve case/content/format/order, lowercased helper keys, casefolding, broad casts, or lossy conversions are defects unless explicitly requested or evidenced. For sorted preserved values, prefer the language's normal lexicographic/ordinal sort and require a mixed-case ordering test." : undefined,
-    implementationReviewRelevant ? "- Reviewer handoff says PASS only after checking changed file contents plus the verification command. If you find bugs, insufficient requested-criteria coverage, verification blind spots, skipped plan items, or code-standard concerns, start with Verdict: FAIL/GAP and exact evidence. Do not downgrade missing permanent tests for user-requested behavior to low severity just because ad-hoc temp checks passed." : undefined,
+    implementationReviewRelevant ? "- Review contract-preserving transformations carefully. If the task says preserve specific content, format, order, or public behavior, broad casts, coercions, or lossy conversions are defects unless explicitly requested or evidenced." : undefined,
+    implementationReviewRelevant ? "- Reviewer verdict is structured, not prose-parsed. Emit `## Reviewer Verdict` as JSON with verdict, blockingFindings, missingCoverage, evidence, and requiredRepair. For pass, evidence must include reviewed file/content paths; when verification is expected, also include the command/result evidence. Use fail/gap for blocking bugs, missing requested criteria, verification blind spots, skipped scope, or insufficient permanent tests." : undefined,
     !mutationRelevant ? "- For project analysis, cite full relative paths from the repo root, not only basenames, and preserve exact runnable commands discovered in README, package manifests, Makefiles, CI, or test files; do not replace them with generic labels like tests exist." : undefined,
     !mutationRelevant ? "- When package scripts are present, report them as runnable invocations using the detected package manager, such as `bun run test`, `npm run build`, or `pnpm test`." : undefined,
     `- Treat ${maxTools} tool calls as the soft planning budget. Continue only when the next tool has clear expected value; stop with partial findings plus uncertainty once marginal value drops.`,
@@ -152,9 +145,11 @@ export function buildSdkPrompt(
     task,
     "",
     "## Cached Project Discovery Index",
-    previous ? "Discovery index omitted because Previous Handoff is available. Call chalin_project_discovery only if the handoff lacks required repo facts." : discoveryIndex,
+    discoveryIndex,
     "",
-    "Return a concise result with these sections when useful:",
+    structuredHandoffRequired
+      ? "Return concise sections. `## Agent Handoff` is a REQUIRED runtime contract:"
+      : "Return a concise result with these sections when useful:",
     "## Findings",
     deepProjectAnalysis
       ? "- Evidence-backed discoveries that the orchestrator should show the user. Include claim + evidence; do not merge unsupported guesses."
@@ -163,6 +158,10 @@ export function buildSdkPrompt(
     deepProjectAnalysis
       ? "- Preserve the Coverage Matrix, Evidence Table, Unknowns/Gaps, and final synthesis material. Do not drop domain-critical subsystems."
       : "- A compact summary for the next agent or the orchestrator. Max 8 bullets or 1200 characters.",
+    "## Agent Handoff",
+    structuredHandoffRequired
+      ? "- REQUIRED JSON: summary, changedFiles, verification, evidenceClaims, risks, nextActions. Writer/write handoffs must populate changedFiles; verify handoffs must populate verification. Use [] only when not applicable."
+      : "- JSON object: summary, changedFiles, verification, evidenceClaims, risks, nextActions. Use compact arrays and [] for absent fields.",
     "## Memory Candidates",
     "- Only durable, human-readable project knowledge for future work. Max 3 bullets.",
     "- Prefer categories like `project-fact:`, `pattern:`, `tooling:`, `testing:`, `workflow:`, `bugfix:`, `decision:`, or `preference:`.",
@@ -172,8 +171,19 @@ export function buildSdkPrompt(
   ].filter(Boolean).join("\n");
 }
 
-function implementationReviewText(text: string): boolean {
-  return /\b(implement|implementation|changed|worker|verification|tests?|edit|mutation|mutaci[oó]n|fix|bugfix|refactor|feature|scaffold|code|c[oó]digo|build|update|actualiza|modifica)\b/i.test(text);
+function requiresStructuredAgentHandoff(agent: AgentDefinition | undefined): boolean {
+  if (!agent) return false;
+  if (agent.concern === "planning" || agent.concern === "context-building" || agent.concern === "review" || agent.concern === "decision-consistency" || agent.concern === "conflict-resolution") return true;
+  return agent.concern === "implementation"
+    || agent.capabilities.includes("edit-files")
+    || agent.capabilities.includes("write-new-files")
+    || agent.capabilities.includes("validate");
+}
+
+function promptDiscoveryEntryLimit(profile: ToolBudgetProfile): number {
+  if (profile === "tight") return 90;
+  if (profile === "deep" || profile === "extended") return 180;
+  return 140;
 }
 
 function claimLedgerOutputContract(agent: AgentDefinition | undefined): string | undefined {
@@ -232,7 +242,7 @@ function shouldExposeArtifactWrite(agent: AgentDefinition, needsArtifacts: boole
   return false;
 }
 
-export function toolBudgetForStep(agent: AgentDefinition | undefined, step: Pick<RunStepState, "agent" | "task" | "budget">, routeKind: RouteKind = "single-agent"): number {
+export function toolBudgetForStep(agent: AgentDefinition | undefined, step: Pick<RunStepState, "agent" | "task" | "budget">, routeKind: RouteKind = "multi-agent-sequential"): number {
   const env = Number(process.env.PI_CHALIN_CHILD_TOOL_BUDGET);
   if (Number.isFinite(env) && env > 0) return Math.floor(env);
   return policyForStep(agent, step, routeKind).caps.maxToolCalls;

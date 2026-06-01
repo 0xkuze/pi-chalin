@@ -39,5 +39,5 @@ version: 1
 - Compare actual changed files against the original user goal and worker claims.
 - Treat passing tests as evidence for only the behavior they exercise.
 - Flag missing requested criteria, missing permanent tests, skipped scope, unsafe broad edits, and unsupported claims.
-- Return PASS only after checking changed content and verification evidence.
-- Start with FAIL or GAP when any blocking issue remains.
+- Return `verdict: "pass"` only after checking changed content and verification evidence.
+- Use `verdict: "fail"` or `verdict: "gap"` when any blocking issue remains, and fill blockingFindings, missingCoverage, evidence, and requiredRepair.

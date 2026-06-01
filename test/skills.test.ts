@@ -57,7 +57,7 @@ function childSkillHarness(input: {
   cwd: string;
   task: string;
   rootTask?: string;
-  routeKind?: "bypass" | "single-agent" | "multi-agent-chain" | "multi-agent-dag" | "multi-agent-parallel";
+  routeKind?: "bypass" | "multi-agent-sequential" | "multi-agent-sequential" | "multi-agent-dag" | "multi-agent-dag";
   explicitSkills?: string[];
 }) {
   const resolution = resolveSkillsForStep({
@@ -65,7 +65,7 @@ function childSkillHarness(input: {
     config: loadEffectiveConfig({ cwd: input.cwd }).config,
     agent: input.agent,
     task: [input.task, input.rootTask].filter(Boolean).join("\n"),
-    routeKind: input.routeKind ?? "single-agent",
+    routeKind: input.routeKind ?? "multi-agent-sequential",
     risk: "low",
     explicitSkills: input.explicitSkills,
   });
@@ -285,7 +285,7 @@ trust: reviewed
     config: loadEffectiveConfig({ cwd }).config,
     agent: worker(),
     task: "Fix the bugfix regression from the failing test in src/parser.ts.",
-    routeKind: "single-agent",
+    routeKind: "multi-agent-sequential",
     risk: "low",
   });
 
@@ -312,7 +312,7 @@ trust: trusted
 
   const catalog = SkillCatalog.load({ cwd, packageRoot });
   const agent = worker();
-  let result = resolveSkillsForStep({ catalog, agent, task: "implement parser change", routeKind: "single-agent", risk: "low" });
+  let result = resolveSkillsForStep({ catalog, agent, task: "implement parser change", routeKind: "multi-agent-sequential", risk: "low" });
   assert.equal(result.active.some((item) => item.skill.name === "manual-review"), false);
 
   activateSkillForTurn("built-in:manual-review");
@@ -321,7 +321,7 @@ trust: trusted
     catalog,
     agent,
     task: "implement parser change",
-    routeKind: "single-agent",
+    routeKind: "multi-agent-sequential",
     risk: "low",
     explicitSkills: [...overrides.explicit],
     disabledSkills: [...overrides.disabled],
@@ -334,7 +334,7 @@ trust: trusted
     catalog,
     agent,
     task: "implement parser change",
-    routeKind: "single-agent",
+    routeKind: "multi-agent-sequential",
     risk: "low",
     explicitSkills: [...overrides.explicit],
     disabledSkills: [...overrides.disabled],
@@ -377,7 +377,7 @@ expiresAt: 2020-01-01T00:00:00.000Z
     config: loadEffectiveConfig({ cwd }).config,
     agent: worker(),
     task: "verify project",
-    routeKind: "single-agent",
+    routeKind: "multi-agent-sequential",
     risk: "low",
   });
 

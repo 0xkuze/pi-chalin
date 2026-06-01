@@ -61,6 +61,38 @@ test("scout receives native bash for branch and PR reconnaissance", () => {
   assert.ok(childToolNames(scout, "Review PR comments and map relevant branch context.").includes("bash"));
 });
 
+test("read-only built-in agent prompts do not mention unavailable edit tooling", () => {
+  const cwd = tempDir("pi-chalin-cwd-");
+  const catalog = AgentCatalog.load({ cwd });
+
+  for (const name of ["planner", "reviewer", "scout"]) {
+    const prompt = catalog.resolve(name).agent?.systemPrompt ?? "";
+    assert.doesNotMatch(prompt, /\bedit\b/i, `${name} should not mention edit`);
+  }
+});
+
+test("edge implementation contracts live in the contextual skill, not base agents", () => {
+  const cwd = tempDir("pi-chalin-cwd-");
+  const catalog = AgentCatalog.load({ cwd });
+  const worker = catalog.resolve("worker").agent?.systemPrompt ?? "";
+  const reviewer = catalog.resolve("reviewer").agent?.systemPrompt ?? "";
+  const skill = fs.readFileSync(path.join(process.cwd(), "skills", "implementation-contract-edges", "SKILL.md"), "utf-8");
+  const edgePatterns = [
+    /Parser, scanner, tokenizer, and state-machine work/,
+    /Normalization, sorting, filtering, and key-builder work/,
+    /Time, retry, cache, rate, budget, and window behavior/,
+    /Scaffold, package, CLI, and entrypoint work/,
+  ];
+
+  for (const pattern of edgePatterns) {
+    assert.doesNotMatch(worker, pattern);
+    assert.doesNotMatch(reviewer, pattern);
+    assert.match(skill, pattern);
+  }
+  assert.match(reviewer, /always emit `## Reviewer Verdict` JSON/);
+  assert.match(reviewer, /`verdict: "pass"`/);
+});
+
 test("AgentCatalog validates per-agent thinking frontmatter", () => {
   const cwd = tempDir("pi-chalin-cwd-");
   fs.mkdirSync(path.join(cwd, ".pi-chalin", "agents"), { recursive: true });

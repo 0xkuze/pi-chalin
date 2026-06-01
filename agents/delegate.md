@@ -5,6 +5,7 @@ concern: delegation
 capabilities: inspect-files, search-files, memory-read, coordinate
 model: inherit
 thinking: low
+budget-tool-calls: 40
 tools: read, grep, find, ls
 memory-read: true
 memory-write: candidate

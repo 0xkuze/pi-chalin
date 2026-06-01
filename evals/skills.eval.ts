@@ -86,7 +86,7 @@ function evaluateSelection(catalog: SkillCatalog, worker: AgentDefinition): Skil
     catalog,
     agent: worker,
     task: "Fix the bugfix in the parser and run the failing test.",
-    routeKind: "single-agent",
+    routeKind: "multi-agent-sequential",
     risk: "low",
   });
   const active = resolved.active.map((item) => item.skill.qualifiedName);
@@ -112,7 +112,7 @@ function evaluateSecurity(catalog: SkillCatalog, worker: AgentDefinition): Skill
     catalog,
     agent: worker,
     task: "Use unsafe generated skill for a bugfix.",
-    routeKind: "single-agent",
+    routeKind: "multi-agent-sequential",
     risk: "low",
     explicitSkills: ["project:unsafe-generated"],
   });
@@ -162,7 +162,7 @@ function evaluateCommandImprovement(catalog: SkillCatalog, worker: AgentDefiniti
     catalog,
     agent: worker,
     task: "verify checkout project command",
-    routeKind: "single-agent",
+    routeKind: "multi-agent-sequential",
     risk: "low",
     explicitSkills: ["project:run-verify-project"],
   });
@@ -173,7 +173,7 @@ function evaluateCommandImprovement(catalog: SkillCatalog, worker: AgentDefiniti
 
 function evaluateBuiltInChildBenefit(catalog: SkillCatalog, worker: AgentDefinition): SkillEvalResult {
   const task = "Fix the bugfix regression in src/parser.ts and verify the failing test.";
-  const resolved = resolveSkillsForStep({ catalog, agent: worker, task, routeKind: "single-agent", risk: "low" });
+  const resolved = resolveSkillsForStep({ catalog, agent: worker, task, routeKind: "multi-agent-sequential", risk: "low" });
   const activePrompt = buildSdkPrompt(worker, task, cwd, undefined, 12, "normal", { activeSkills: resolved.active });
   const unrelated = resolveSkillsForStep({ catalog, agent: worker, task: "Rename README heading typo.", routeKind: "bypass", risk: "low" });
   const active = resolved.active.map((item) => item.skill.qualifiedName);
@@ -193,7 +193,7 @@ function evaluateBuiltInChildBenefit(catalog: SkillCatalog, worker: AgentDefinit
 
 function evaluateProjectChildBenefit(catalog: SkillCatalog, worker: AgentDefinition): SkillEvalResult {
   const task = "verify checkout project command";
-  const resolved = resolveSkillsForStep({ catalog, agent: worker, task, routeKind: "single-agent", risk: "low" });
+  const resolved = resolveSkillsForStep({ catalog, agent: worker, task, routeKind: "multi-agent-sequential", risk: "low" });
   const baseTools = childToolNames(worker, task, true);
   const effectiveTools = effectiveSkillToolNames(baseTools, resolved.active.map((item) => item.skill));
   const prompt = buildSdkPrompt(worker, task, cwd, undefined, 12, "normal", { activeSkills: resolved.active });
@@ -216,7 +216,7 @@ function evaluateProjectChildBenefit(catalog: SkillCatalog, worker: AgentDefinit
 
 function evaluateUserChildBenefit(catalog: SkillCatalog, worker: AgentDefinition): SkillEvalResult {
   const task = "run team runbook checks";
-  const resolved = resolveSkillsForStep({ catalog, agent: worker, task, routeKind: "single-agent", risk: "low" });
+  const resolved = resolveSkillsForStep({ catalog, agent: worker, task, routeKind: "multi-agent-sequential", risk: "low" });
   const baseTools = childToolNames(worker, task, true);
   const effectiveTools = effectiveSkillToolNames(baseTools, resolved.active.map((item) => item.skill));
   const prompt = buildSdkPrompt(worker, task, cwd, undefined, 12, "normal", { activeSkills: resolved.active });
