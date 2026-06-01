@@ -6,7 +6,7 @@ import { afterEach, test } from "bun:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import registerPiChalin from "../src/index.ts";
 import { resetAutorouteToolStateForTests, shouldUseCompactDirectOrchestrationPrompt } from "../src/autoroute.ts";
-import { getDirectToolEventsForTests, resetRuntimeState, setLatestRun, setLiveStepSession } from "../src/runtime-state.ts";
+import { getDirectToolEventsForTests, getLatestRun, resetRuntimeState, setLatestRun, setLiveStepSession } from "../src/runtime-state.ts";
 import { openAgentManager, openAgentModelPicker, openSkillManager } from "../src/ui-agents.ts";
 import { openMemoryReview, openMemoryReviewWithLoading, openSmartPanel, openWebFetchAuditPanel, summarizeRuntimeGuards } from "../src/ui.ts";
 import { finalAnswerMaterial } from "../src/route-format.ts";
@@ -559,6 +559,72 @@ test("resumable run context lets the parent decide chalin_resume without a promp
   const recovered = JSON.parse(fs.readFileSync(stale.logsPath!, "utf-8")) as RunState;
   assert.equal(recovered.status, "running");
   assert.doesNotMatch(recovered.warnings.join("\n"), /Recovered stale running run/);
+});
+
+test("new unrelated prompts do not inherit stale resumable run context", async () => {
+  const fake = createFakePi();
+  registerPiChalin(fake.api as never);
+  const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<{ systemPrompt?: string; message?: { customType?: string; content?: string; display?: boolean } } | undefined>;
+  const cwd = tempDir("pi-chalin-resume-isolation-");
+  const route: RunState["route"] = {
+    kind: "multi-agent-chain",
+    agents: ["scout", "planner", "worker"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    reason: "old interrupted workflow",
+    plan: { kind: "chain", steps: [{ agent: "scout", task: "scan" }, { agent: "planner", task: "plan" }, { agent: "worker", task: "implement" }] },
+  };
+  const stale = createRunState(route, cwd, "old docs spec task");
+  stale.status = "paused";
+  stale.steps[0]!.status = "complete";
+  stale.steps[0]!.output = { agent: "scout", text: "mapped", handoff: "Old scout handoff.", memoryCandidates: [], raw: "mapped", warnings: [] };
+  stale.steps[1]!.status = "paused";
+  persistRun(stale);
+
+  const promptResult = await beforeAgentStart({
+    type: "before_agent_start",
+    prompt: "hey haz un analisis full de este proyecto busca puntos debiles de mantenibilidad en profundidad",
+    systemPrompt: "base",
+    systemPromptOptions: {},
+  }, {
+    cwd,
+    hasUI: true,
+    model: undefined,
+    modelRegistry: { getAvailable: () => [] },
+    ui: { notify: () => {}, setStatus: () => {}, setWidget: () => {} },
+  });
+
+  assert.doesNotMatch(promptResult?.message?.content ?? "", /Resumable pi-chalin run available/i);
+  assert.doesNotMatch(promptResult?.message?.content ?? "", new RegExp(stale.id));
+});
+
+test("session_start resets stale in-memory chalin run state", async () => {
+  const fake = createFakePi();
+  registerPiChalin(fake.api as never);
+  const sessionStart = fake.handlers.get("session_start")?.[0] as (event: unknown, ctx: unknown) => void;
+  const cwd = tempDir("pi-chalin-session-reset-");
+  const run = createRunState({
+    kind: "single-agent",
+    agents: ["worker"],
+    risk: "low",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    reason: "stale running state",
+    plan: { kind: "single", agent: "worker", task: "old work" },
+  }, cwd, "old task");
+  setLatestRun(run);
+
+  sessionStart({ type: "session_start" }, {
+    cwd,
+    hasUI: true,
+    sessionManager: { getSessionDir: () => cwd, getSessionFile: () => path.join(cwd, "current.json"), getCwd: () => cwd },
+    ui: { notify: () => {}, setStatus: () => {}, setWidget: () => {} },
+  });
+
+  assert.equal(getLatestRun(), undefined);
 });
 
 test("pi-chalin uses compact orchestration context for bounded scaffold prompts", async () => {

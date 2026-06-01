@@ -53,7 +53,9 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
     if (!loaded.config.enabled) return;
     forceOrchestratorThinkingHigh(pi);
     const promptText = typeof event.prompt === "string" ? event.prompt : "";
-    const resumableRun = loadResumableRunState({ cwd: ctx.cwd, recoverStale: false });
+    const resumableRun = promptLooksResumeIntent(promptText)
+      ? loadResumableRunState({ cwd: ctx.cwd, recoverStale: false })
+      : undefined;
     const resumeContext = resumableRun ? compactResumeCandidateMessage(resumableRun) : undefined;
     const forceRouteFirst = shouldForceRouteFirst(promptText, Boolean(resumeContext));
     const useModeGate = shouldUseOrchestrationModeGate(promptText, Boolean(resumeContext), forceRouteFirst);
@@ -691,6 +693,10 @@ function hiddenDirectToolsForPrompt(prompt: string, hasResumeContext: boolean): 
 
 function decisionToolAllowlistForPrompt(prompt: string): ReadonlySet<string> {
   return promptNeedsExternalContext(prompt) ? INTERVIEW_ROUTE_WEB_TOOLS : INTERVIEW_ROUTE_TOOLS;
+}
+
+function promptLooksResumeIntent(prompt: string): boolean {
+  return /\b(contin[uú]a|continuar|continue|resume|resumir|reanuda|reanudar|retoma|retomar|sigue|seguir|procede con (?:eso|lo anterior)|donde qued[oó]|where (?:we )?left off|interrupted|interrumpid[ao]|paused|pausad[ao]|stale run|run anterior|ejecuci[oó]n anterior)\b/i.test(prompt);
 }
 
 function promptNeedsExternalContext(prompt: string): boolean {

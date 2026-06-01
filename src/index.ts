@@ -3,6 +3,7 @@ import { Context, Effect, Layer } from "effect";
 import { registerChalinAutoRouter } from "./autoroute.ts";
 import { hideLegacyTopLevelChildSessions } from "./child-sessions.ts";
 import { registerChalinCommands } from "./commands.ts";
+import { resetRuntimeState } from "./runtime-state.ts";
 import { registerChalinTools } from "./tools.ts";
 import { setChalinStatus } from "./ui-status.ts";
 
@@ -34,6 +35,7 @@ function registerPiChalinUnsafe(pi: ExtensionAPI): void {
   registerChalinAutoRouter(pi);
 
   pi.on("session_start", (_event, ctx) => {
+    resetRuntimeState();
     void hideLegacyTopLevelChildSessions(ctx).then((result) => {
       if (ctx.hasUI && result.moved.length > 0) {
         ctx.ui.notify(`pi-chalin hid ${result.moved.length} legacy child session(s) from Pi resume.`, "info");
