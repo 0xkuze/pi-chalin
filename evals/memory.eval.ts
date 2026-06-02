@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createMemoryCandidate, MemoryStore } from "../src/memory.ts";
+import { createMemoryCandidate, MemoryStore } from "../src/memory/memory.ts";
 
 interface MemoryEvalResult {
   id: string;

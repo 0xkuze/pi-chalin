@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
-import type { RunState } from "../src/schemas.ts";
+import type { RunState } from "../src/domain/schemas.ts";
 
 const repoRoot = path.resolve(import.meta.dir, "..");
 const extensionPath = path.join(repoRoot, "src", "index.ts");

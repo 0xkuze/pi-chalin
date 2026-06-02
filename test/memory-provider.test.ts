@@ -4,13 +4,13 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, test } from "bun:test";
-import { createChildToolPolicy, createChildTools } from "../src/child-tools.ts";
-import { DEFAULT_CONFIG, type ChalinConfig } from "../src/config.ts";
-import { ChalinKernel, routeFromPlan } from "../src/kernel.ts";
-import { createMemoryCandidate, MemoryStore } from "../src/memory.ts";
-import { createConfiguredMemoryStore, EngramMemoryStore, resolveMemoryBackendStatus } from "../src/memory-provider.ts";
-import type { WorkerRunner, WorkerRunnerContext } from "../src/runner.ts";
-import type { RouteDecision, RunState } from "../src/schemas.ts";
+import { createChildToolPolicy, createChildTools } from "../src/tools/child-tools.ts";
+import { DEFAULT_CONFIG, type ChalinConfig } from "../src/config/config.ts";
+import { ChalinKernel, routeFromPlan } from "../src/kernel/kernel.ts";
+import { createMemoryCandidate, MemoryStore } from "../src/memory/memory.ts";
+import { createConfiguredMemoryStore, EngramMemoryStore, resolveMemoryBackendStatus } from "../src/memory/memory-provider.ts";
+import type { WorkerRunner, WorkerRunnerContext } from "../src/runner/runner.ts";
+import type { RouteDecision, RunState } from "../src/domain/schemas.ts";
 
 const tempDirs: string[] = [];
 const servers: Server[] = [];

@@ -1,6 +1,6 @@
 {
   "name": "pi-chalin",
-  "version": "0.4.0",
+  "version": "1.0.0",
   "description": "Pi Coding Agent extension for routed, memory-aware subagent workflows",
   "license": "SEE LICENSE IN LICENSE",
   "repository": {
@@ -14,6 +14,30 @@
   "packageManager": "bun@1.3.14",
   "type": "module",
   "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./agents/*": "./src/agents/*.ts",
+    "./artifacts/*": "./src/artifacts/*.ts",
+    "./budget/*": "./src/budget/*.ts",
+    "./commands/*": "./src/commands/*.ts",
+    "./config/*": "./src/config/*.ts",
+    "./domain/*": "./src/domain/*.ts",
+    "./interview/*": "./src/interview/*.ts",
+    "./kernel/*": "./src/kernel/*.ts",
+    "./memory/*": "./src/memory/*.ts",
+    "./observability/*": "./src/observability/*.ts",
+    "./orchestration/*": "./src/orchestration/*.ts",
+    "./project/*": "./src/project/*.ts",
+    "./routing/*": "./src/routing/*.ts",
+    "./runner/*": "./src/runner/*.ts",
+    "./runtime/*": "./src/runtime/*.ts",
+    "./skills/*": "./src/skills/*.ts",
+    "./tools/*": "./src/tools/*.ts",
+    "./ui/*": "./src/ui/*.ts",
+    "./webfetch/*": "./src/webfetch/*.ts",
+    "./worktrees/*": "./src/worktrees/*.ts",
+    "./package.json": "./package.json"
+  },
   "sideEffects": false,
   "files": [
     "src/**/*.ts",

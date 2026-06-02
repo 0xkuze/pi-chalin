@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, test } from "bun:test";
-import { loadEffectiveConfig, setAgentThinkingOverride } from "../src/config.ts";
+import { loadEffectiveConfig, setAgentThinkingOverride } from "../src/config/config.ts";
 
 const tempDirs: string[] = [];
 

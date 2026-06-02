@@ -3,13 +3,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, test } from "bun:test";
-import { ChalinKernel, routeFromLegacyPlan, routeFromPlan } from "../src/kernel.ts";
-import { createMemoryCandidate, MemoryStore } from "../src/memory.ts";
-import { createSkillTraceEvent } from "../src/observability.ts";
-import type { WorkerRunner, WorkerRunnerContext } from "../src/runner.ts";
-import { createRunState } from "../src/runner-state.ts";
-import type { RouteDecision, RunState } from "../src/schemas.ts";
-import { SkillMetricsStore } from "../src/skills.ts";
+import { ChalinKernel, routeFromLegacyPlan, routeFromPlan } from "../src/kernel/kernel.ts";
+import { createMemoryCandidate, MemoryStore } from "../src/memory/memory.ts";
+import { createSkillTraceEvent } from "../src/observability/observability.ts";
+import type { WorkerRunner, WorkerRunnerContext } from "../src/runner/runner.ts";
+import { createRunState } from "../src/runner/runner-state.ts";
+import type { RouteDecision, RunState } from "../src/domain/schemas.ts";
+import { SkillMetricsStore } from "../src/skills/skills.ts";
 
 const tempDirs: string[] = [];
 afterEach(() => { while (tempDirs.length > 0) fs.rmSync(tempDirs.pop()!, { recursive: true, force: true }); });
@@ -85,6 +85,29 @@ test("routeFromPlan builds sequential and DAG workflows", () => {
   assert.equal(single.kind, "multi-agent-sequential");
   assert.equal(single.plan?.kind, "sequential");
   assert.deepEqual(single.plan?.steps.map((step) => step.agent), ["reviewer"]);
+});
+
+test("routeFromPlan ignores empty DAG placeholder stages but still requires executable stages", () => {
+  const discover = routeFromPlan({
+    topology: "dag",
+    expectedEffects: ["read", "write", "verify"],
+    workUnitStrategy: "discover",
+    stages: [
+      { id: "discover", tasks: [{ agent: "scout", task: "Discover bounded execution units." }] },
+      { id: "execute" },
+      { id: "review", tasks: [] },
+    ],
+  });
+  const empty = routeFromPlan({
+    topology: "dag",
+    expectedEffects: ["read"],
+    stages: [{ id: "placeholder" }],
+  });
+
+  assert.equal(discover.kind, "multi-agent-dag");
+  assert.deepEqual(discover.plan?.kind === "dag" ? discover.plan.stages.map((stage) => stage.id) : [], ["discover"]);
+  assert.equal(empty.kind, "ask-user");
+  assert.match(empty.reason, /requires at least one stage/i);
 });
 
 test("memory-disabled harness mode strips route memory use for ablation evals", () => {
@@ -191,6 +214,31 @@ test("ChalinKernel executes an LLM-planned mock route", async () => {
   assert.equal(result.approval.action, "allow");
   assert.equal(result.run?.status, "complete");
   assert.equal(result.run?.steps[0]?.agent, "reviewer");
+});
+
+test("ChalinKernel provides executable agents for dynamically materialized WorkUnits", async () => {
+  const cwd = tempDir("pi-chalin-kernel-dynamic-agents-");
+  const route = routeFromPlan({
+    topology: "dag",
+    expectedEffects: ["read", "write", "verify"],
+    workUnitStrategy: "discover",
+    stages: [{ id: "discover", tasks: [{ agent: "scout", task: "Discover bounded implementation units." }] }],
+  });
+  let workerCapabilities: string[] | undefined;
+  const runner: WorkerRunner = {
+    async run(inputRoute: RouteDecision, context: WorkerRunnerContext): Promise<RunState> {
+      workerCapabilities = context.agents.get("worker")?.capabilities;
+      const run = createRunState(inputRoute, cwd);
+      run.status = "complete";
+      run.endedAt = new Date().toISOString();
+      return run;
+    },
+  };
+
+  await new ChalinKernel({ cwd, runner }).handleRoute(route, "discover units, implement them, review each unit", { cwd });
+
+  assert.ok(workerCapabilities?.includes("edit-files"));
+  assert.ok(workerCapabilities?.includes("write-new-files"));
 });
 
 test("ChalinKernel records skill metrics even when the run does not need artifacts", async () => {

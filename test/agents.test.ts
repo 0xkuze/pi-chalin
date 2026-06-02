@@ -3,8 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, test } from "bun:test";
-import { AgentCatalog } from "../src/agents.ts";
-import { childToolNames } from "../src/runner-prompt.ts";
+import { AgentCatalog } from "../src/agents/agents.ts";
+import { childToolNames } from "../src/runner/runner-prompt.ts";
 
 const tempDirs: string[] = [];
 
@@ -43,6 +43,7 @@ test("AgentCatalog loads explicit concern capabilities", () => {
 
   assert.ok(worker?.capabilities.includes("edit-files"));
   assert.ok(worker?.capabilities.includes("write-new-files"));
+  assert.ok(worker?.capabilities.includes("coordinate"));
   assert.ok(scout?.capabilities.includes("run-safe-bash"));
   assert.ok(conflictResolver?.capabilities.includes("edit-files"));
   assert.equal(conflictResolver?.capabilities.includes("write-new-files"), false);
@@ -51,6 +52,17 @@ test("AgentCatalog loads explicit concern capabilities", () => {
   assert.equal(worker?.thinking, "high");
   assert.equal(planner?.thinking, "high");
   assert.equal(scout?.thinking, "low");
+});
+
+test("built-in worker can coordinate nested decomposition below depth limit", () => {
+  const cwd = tempDir("pi-chalin-cwd-");
+  const worker = AgentCatalog.load({ cwd }).resolve("worker").agent;
+
+  assert.ok(worker);
+  assert.ok(childToolNames(worker, "Implementa un scope que excede un limite de ownership confiable.", true, false, {
+    delegationDepth: 1,
+    maxDelegationDepth: 2,
+  }).includes("chalin_delegate"));
 });
 
 test("scout receives native bash for branch and PR reconnaissance", () => {

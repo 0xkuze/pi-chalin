@@ -3,21 +3,22 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, test } from "bun:test";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import registerPiChalin from "../src/index.ts";
-import { resetAutorouteToolStateForTests } from "../src/autoroute.ts";
-import { getDirectToolEventsForTests, getLatestRun, resetRuntimeState, setLatestRun, setLiveStepSession } from "../src/runtime-state.ts";
-import { openAgentManager, openAgentModelPicker, openSkillManager } from "../src/ui-agents.ts";
-import { openMemoryReview, openMemoryReviewWithLoading, openSmartPanel, openWebFetchAuditPanel, summarizeRuntimeGuards } from "../src/ui.ts";
-import { finalAnswerMaterial, formatRoute } from "../src/route-format.ts";
-import { formatChalinRoutePlanWidget, formatChalinRunWidget } from "../src/route-widget.ts";
-import { createRunState, persistRun } from "../src/runner-state.ts";
-import { chalinFooterText } from "../src/ui-status.ts";
-import { createMemoryCandidate, MemoryStore } from "../src/memory.ts";
-import { buildRunLifecycleSpans, redactTraceAttribute } from "../src/observability.ts";
-import type { AgentDefinition, MemoryRecord, RunState } from "../src/schemas.ts";
-import { SkillCatalog } from "../src/skills.ts";
-import type { WebFetchAuditEntry } from "../src/webfetch.ts";
+import { resetAutorouteToolStateForTests } from "../src/routing/autoroute.ts";
+import { getDirectToolEventsForTests, getLatestRun, resetRuntimeState, setLatestRun, setLiveStepSession } from "../src/runtime/state.ts";
+import { openAgentManager, openAgentModelPicker, openSkillManager } from "../src/ui/ui-agents.ts";
+import { openMemoryReview, openMemoryReviewWithLoading, openSmartPanel, openWebFetchAuditPanel, summarizeRuntimeGuards } from "../src/ui/ui.ts";
+import { finalAnswerMaterial, formatRoute } from "../src/routing/route-format.ts";
+import { formatChalinRoutePlanWidget, formatChalinRunWidget } from "../src/routing/route-widget.ts";
+import { createRunState, persistRun } from "../src/runner/runner-state.ts";
+import { chalinFooterText } from "../src/ui/ui-status.ts";
+import { createMemoryCandidate, MemoryStore } from "../src/memory/memory.ts";
+import { buildRunLifecycleSpans, redactTraceAttribute } from "../src/observability/observability.ts";
+import type { AgentDefinition, MemoryRecord, RunState } from "../src/domain/schemas.ts";
+import { SkillCatalog } from "../src/skills/skills.ts";
+import type { WebFetchAuditEntry } from "../src/webfetch/webfetch.ts";
 
 const tempDirs: string[] = [];
 afterEach(() => {
@@ -67,6 +68,59 @@ function directSteerTypesSince(fake: ReturnType<typeof createFakePi>, fromIndex:
     .filter((customType) => customType.startsWith("pi-chalin-direct-") || customType.startsWith("pi-chalin-docs-"));
 }
 
+function decisionToolSet(fullToolSet: readonly string[]): string[] {
+  return ["chalin_direct", ...["chalin_route", "chalin_resume", "chalin_interview"].filter((tool) => fullToolSet.includes(tool))];
+}
+
+async function unlockDirectTools(fake: ReturnType<typeof createFakePi>, task = "bounded direct task"): Promise<void> {
+  const tool = fake.tools.get("chalin_direct") as unknown as { execute: (...args: never[]) => Promise<unknown> };
+  await tool.execute("direct-tool" as never, {
+    task,
+    reason: "bounded, local, parent-verifiable",
+    scope: validDirectScope(),
+  } as never);
+}
+
+async function callChalinDirectForTest(fake: ReturnType<typeof createFakePi>, task = "bounded direct task"): Promise<{ isError?: boolean; content?: Array<{ text?: string }> }> {
+  const tool = fake.tools.get("chalin_direct") as unknown as { execute: (...args: never[]) => Promise<{ isError?: boolean; content?: Array<{ text?: string }> }> };
+  return tool.execute("direct-tool-repeat" as never, {
+    task,
+    reason: "bounded, local, parent-verifiable",
+    scope: validDirectScope(),
+  } as never);
+}
+
+function validDirectScope() {
+  return {
+    oneOwnershipSurface: true,
+    clearAcceptanceSurface: true,
+    parentVerifiableWithoutDelegation: true,
+    needsRepositoryStateOrHistorySynthesis: false,
+    needsMultipleLocalEvidenceSurfaces: false,
+    needsBroadWorkspaceEvidence: false,
+    needsDelegatedReviewOrSplitCoverage: false,
+  };
+}
+
+function openAiTool(name: string): { type: "function"; function: { name: string } } {
+  return { type: "function", function: { name } };
+}
+
+function providerToolNames(payload: unknown): string[] {
+  const tools = (payload as { tools?: Array<{ name?: string; function?: { name?: string } }> }).tools ?? [];
+  return tools.map((tool) => tool.name ?? tool.function?.name).filter((name): name is string => Boolean(name));
+}
+
+function filterProviderToolsForTest(fake: ReturnType<typeof createFakePi>, toolNames: readonly string[]): unknown {
+  const providerHook = fake.handlers.get("before_provider_request")?.[0] as (event: { payload: unknown }) => unknown;
+  assert.equal(typeof providerHook, "function");
+  return providerHook({ payload: { tools: toolNames.map(openAiTool) } });
+}
+
+function assertSameToolSet(actual: readonly string[], expected: readonly string[], message?: string): void {
+  assert.deepEqual([...actual].sort(), [...expected].sort(), message);
+}
+
 function createFakePi() {
   const commands = new Map<string, unknown>();
   const tools = new Map<string, unknown>();
@@ -96,6 +150,10 @@ function createFakePi() {
       getActiveTools() {
         return [...fake.activeTools];
       },
+      getAllTools() {
+        const names = new Set([...fake.activeTools, ...tools.keys()]);
+        return [...names].map((name) => ({ name }));
+      },
       setActiveTools(toolNames: string[]) {
         fake.activeTools = [...toolNames];
         fake.toolSetHistory.push([...toolNames]);
@@ -118,6 +176,7 @@ test("pi-chalin extension registers Phase 0 command and tool", () => {
 
   assert.equal(fake.commands.has("chalin"), true);
   assert.equal(fake.tools.has("chalin_route"), true);
+  assert.equal(fake.tools.has("chalin_direct"), true);
   assert.equal(fake.tools.has("chalin_resume"), true);
   assert.equal(fake.tools.has("chalin_interview"), true);
   assert.equal(fake.tools.has("chalin_project_discovery"), true);
@@ -128,6 +187,7 @@ test("pi-chalin extension registers Phase 0 command and tool", () => {
   assert.equal(fake.tools.has("chalin_memory_revise"), true);
   assert.equal(fake.handlers.has("session_start"), true);
   assert.equal(fake.handlers.has("input"), true);
+  assert.equal(fake.handlers.has("before_provider_request"), true);
 });
 
 test("pi-chalin recursion guard skips child registration", () => {
@@ -199,20 +259,21 @@ test("pi-chalin keeps the native prompt and teaches the primary Pi agent to deci
     systemPrompt: "base system prompt",
     systemPromptOptions: {},
   }, ctx);
-  assert.match(promptResult?.systemPrompt ?? "", /primary Pi agent/i);
-  assert.match(promptResult?.systemPrompt ?? "", /chalin_resume/i);
-  assert.match(promptResult?.systemPrompt ?? "", /chalin_interview/i);
-  assert.match(promptResult?.systemPrompt ?? "", /chalin_route/i);
-  assert.match(promptResult?.systemPrompt ?? "", /At the start choose one path: `DIRECT` or `ROUTE`/i);
-  assert.match(promptResult?.systemPrompt ?? "", /topology=sequential.*topology=dag/i);
-  assert.match(promptResult?.systemPrompt ?? "", /memory is a capability, not a route category/i);
-  assert.match(promptResult?.systemPrompt ?? "", /Routed file mutation needs a worker and a later reviewer/i);
+  const systemPrompt = promptResult?.systemPrompt ?? "";
+  for (const stableToken of ["DIRECT", "ROUTE", "chalin_direct", "chalin_resume", "chalin_interview", "chalin_route", "topology=sequential", "topology=dag"]) {
+    assert.match(systemPrompt, new RegExp(stableToken.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), stableToken);
+  }
+  assert.match(systemPrompt, /ownership/i);
+  assert.match(systemPrompt, /review/i);
   assert.doesNotMatch(promptResult?.systemPrompt ?? "", /branch\/diff\/PR/i);
-  assert.match(promptResult?.systemPrompt ?? "", /scout/);
-  assert.match(promptResult?.systemPrompt ?? "", /reviewer/);
+  assert.match(systemPrompt, /scout/);
+  assert.match(systemPrompt, /reviewer/);
   assert.equal(promptResult?.message?.customType, "pi-chalin-orchestration");
   assert.equal(promptResult?.message?.display, false);
   assert.match(JSON.stringify(promptResult?.message ?? {}), /Decide DIRECT or ROUTE/i);
+  assert.match(JSON.stringify(promptResult?.message ?? {}), /call `chalin_direct`/i);
+  assert.match(JSON.stringify(promptResult?.message ?? {}), /first tool is one `chalin_route`/i);
+  assert.match(JSON.stringify(promptResult?.message ?? {}), /workspace tools are unavailable/i);
 });
 
 test("pi-chalin forces high thinking only for the parent orchestration decision", async () => {
@@ -240,9 +301,10 @@ test("pi-chalin forces high thinking only for the parent orchestration decision"
   assert.deepEqual(fake.thinkingHistory.slice(-2), ["high", "minimal"]);
 });
 
-test("pi-chalin leaves general no-path routing decisions to the model with full tools", async () => {
+test("pi-chalin gates initial workspace tools until the model chooses direct or route", async () => {
   const fake = createFakePi();
   const fullToolSet = ["read", "bash", "grep", "find", "ls", "chalin_interview", "chalin_route", "chalin_web_search"];
+  const providerToolSet = ["chalin_direct", ...fullToolSet];
   fake.activeTools = [...fullToolSet];
   fake.thinkingLevel = "low";
   registerPiChalin(fake.api as never);
@@ -263,15 +325,39 @@ test("pi-chalin leaves general no-path routing decisions to the model with full 
 
   assert.equal(fake.thinkingLevel, "high");
   assert.deepEqual(fake.activeTools, fullToolSet);
-  toolStart({ toolName: "chalin_route", args: {} });
-  assert.equal(fake.thinkingLevel, "low");
+  assert.deepEqual(fake.toolSetHistory, []);
+  assertSameToolSet(providerToolNames(filterProviderToolsForTest(fake, providerToolSet)), decisionToolSet(fullToolSet));
+  toolStart({ toolName: "chalin_direct", args: {} });
+  assert.equal(fake.thinkingLevel, "high");
+  await unlockDirectTools(fake, "project organization");
   assert.deepEqual(fake.activeTools, fullToolSet);
   assert.deepEqual(fake.toolSetHistory, []);
+  assertSameToolSet(providerToolNames(filterProviderToolsForTest(fake, providerToolSet)), fullToolSet);
+  toolStart({ toolName: "bash", args: { command: "pwd" } });
+  assert.equal(fake.thinkingLevel, "low");
+
+  await beforeAgentStart({
+    type: "before_agent_start",
+    prompt: "Dime como esta organizado este proyecto y si conviene dividir responsabilidades.",
+    systemPrompt: "base",
+    systemPromptOptions: {},
+  }, {
+    cwd: tempDir("pi-chalin-mode-gate-continuation-"),
+    hasUI: false,
+    model: undefined,
+    modelRegistry: { getAvailable: () => [] },
+  });
+  assert.deepEqual(fake.activeTools, fullToolSet, "internal continuation after chalin_direct must not re-enter decision gating");
+  assert.equal(fake.thinkingLevel, "low", "internal continuation after chalin_direct should not re-run high-thinking route selection");
+  const repeatedDirect = await callChalinDirectForTest(fake, "project organization");
+  assert.equal(repeatedDirect.isError, true);
+  assert.match(repeatedDirect.content?.map((part) => part.text ?? "").join("\n") ?? "", /already confirmed/i);
 });
 
-test("primary Pi keeps interview and web search available for ambiguous URL/docs decisions without forcing route", async () => {
+test("primary Pi keeps interview available during route decision and restores direct tools after chalin_direct", async () => {
   const fake = createFakePi();
   const fullToolSet = ["read", "bash", "grep", "find", "ls", "edit", "write", "chalin_interview", "chalin_route", "chalin_web_search"];
+  const providerToolSet = ["chalin_direct", ...fullToolSet];
   fake.activeTools = [...fullToolSet];
   registerPiChalin(fake.api as never);
   const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
@@ -289,16 +375,17 @@ test("primary Pi keeps interview and web search available for ambiguous URL/docs
     systemPromptOptions: {},
   }, ctx);
 
-  assert.ok(fake.activeTools.includes("chalin_interview"));
-  assert.ok(fake.activeTools.includes("chalin_web_search"));
-  assert.ok(fake.activeTools.includes("read"));
-  assert.ok(fake.activeTools.includes("edit"));
-  assert.notDeepEqual(fake.activeTools, ["chalin_route"]);
+  assert.deepEqual(fake.activeTools, fullToolSet);
+  assertSameToolSet(providerToolNames(filterProviderToolsForTest(fake, providerToolSet)), decisionToolSet(fullToolSet));
+  await unlockDirectTools(fake, "bounded URL/docs update");
+  assert.deepEqual(fake.activeTools, fullToolSet);
+  assertSameToolSet(providerToolNames(filterProviderToolsForTest(fake, providerToolSet)), fullToolSet);
 });
 
-test("bounded local prompts keep route and native tools available for model choice", async () => {
+test("bounded local prompts can choose DIRECT and then use restored native tools", async () => {
   const fake = createFakePi();
   const fullToolSet = ["read", "bash", "edit", "write", "grep", "find", "ls", "chalin_interview", "chalin_route", "chalin_web_search"];
+  const providerToolSet = ["chalin_direct", ...fullToolSet];
   fake.activeTools = [...fullToolSet];
   registerPiChalin(fake.api as never);
   const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
@@ -316,9 +403,97 @@ test("bounded local prompts keep route and native tools available for model choi
   });
 
   assert.deepEqual(fake.activeTools, fullToolSet);
+  assertSameToolSet(providerToolNames(filterProviderToolsForTest(fake, providerToolSet)), decisionToolSet(fullToolSet));
+  await unlockDirectTools(fake, "bounded cache fix");
+  assert.deepEqual(fake.activeTools, fullToolSet);
+  assertSameToolSet(providerToolNames(filterProviderToolsForTest(fake, providerToolSet)), fullToolSet);
 });
 
-test("bounded release and git operations keep native and orchestration tools available", async () => {
+test("chalin_direct rejects structurally broad direct scope and keeps decision tools gated", async () => {
+  const fake = createFakePi();
+  const fullToolSet = ["read", "bash", "grep", "find", "ls", "chalin_interview", "chalin_route", "chalin_memory_search"];
+  const providerToolSet = ["chalin_direct", ...fullToolSet];
+  fake.activeTools = [...fullToolSet];
+  registerPiChalin(fake.api as never);
+  const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
+  await beforeAgentStart({
+    type: "before_agent_start",
+    prompt: "summarize repository state from several local evidence surfaces",
+    systemPrompt: "base",
+    systemPromptOptions: {},
+  }, {
+    cwd: tempDir("pi-chalin-direct-reject-"),
+    hasUI: false,
+    model: undefined,
+    modelRegistry: { getAvailable: () => [] },
+  });
+
+  const tool = fake.tools.get("chalin_direct") as unknown as { execute: (...args: never[]) => Promise<{ isError?: boolean; content?: Array<{ text?: string }> }> };
+  const rejected = await tool.execute("direct-tool-reject" as never, {
+    task: "summarize repository state from several local evidence surfaces",
+    reason: "requires state synthesis",
+    scope: {
+      ...validDirectScope(),
+      oneOwnershipSurface: false,
+      needsRepositoryStateOrHistorySynthesis: true,
+      needsMultipleLocalEvidenceSurfaces: true,
+    },
+  } as never);
+
+  assert.equal(rejected.isError, true);
+  assert.match(rejected.content?.map((part) => part.text ?? "").join("\n") ?? "", /DIRECT rejected/i);
+  assertSameToolSet(providerToolNames(filterProviderToolsForTest(fake, providerToolSet)), decisionToolSet(fullToolSet));
+});
+
+test("chalin_direct rejects semantically invalid direct scope before releasing provider gate", async () => {
+  const registration = registerFauxProvider({
+    api: "direct-decision-smoke-faux",
+    provider: "direct-decision-smoke-faux",
+  });
+  try {
+    registration.setResponses([
+      () => fauxAssistantMessage(JSON.stringify({
+        decision: "route",
+        reason: "The proposed direct work needs project state reconstruction and independent synthesis.",
+        confidence: 0.9,
+        blockers: ["project state reconstruction", "independent synthesis"],
+      })),
+    ]);
+    const fake = createFakePi();
+    const fullToolSet = ["read", "bash", "grep", "find", "ls", "chalin_interview", "chalin_route", "chalin_memory_search"];
+    const providerToolSet = ["chalin_direct", ...fullToolSet];
+    fake.activeTools = [...fullToolSet];
+    registerPiChalin(fake.api as never);
+    const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
+    const ctx = {
+      cwd: tempDir("pi-chalin-direct-semantic-reject-"),
+      hasUI: false,
+      model: registration.getModel(),
+      modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true as const, apiKey: "test-key" }) },
+    };
+    await beforeAgentStart({
+      type: "before_agent_start",
+      prompt: "Explain the current workspace state and changed work.",
+      systemPrompt: "base",
+      systemPromptOptions: {},
+    }, ctx);
+
+    const tool = fake.tools.get("chalin_direct") as unknown as { execute: (...args: never[]) => Promise<{ isError?: boolean; content?: Array<{ text?: string }> }> };
+    const rejected = await tool.execute("direct-tool-semantic-reject" as never, {
+      task: "Explain the current workspace state and changed work.",
+      reason: "Self-certified as bounded direct work.",
+      scope: validDirectScope(),
+    } as never, undefined as never, undefined as never, ctx as never);
+
+    assert.equal(rejected.isError, true);
+    assert.match(rejected.content?.map((part) => part.text ?? "").join("\n") ?? "", /semantic judge/i);
+    assertSameToolSet(providerToolNames(filterProviderToolsForTest(fake, providerToolSet)), decisionToolSet(fullToolSet));
+  } finally {
+    registration.unregister();
+  }
+});
+
+test("bounded release and git operations can restore native and orchestration tools after DIRECT choice", async () => {
   const prompts = [
     "hey bump the package json versions please, for the last merge that we do in the main branch",
     "sync manifest and lockfile version metadata for the changed packages",
@@ -329,6 +504,7 @@ test("bounded release and git operations keep native and orchestration tools ava
   for (const prompt of prompts) {
     const fake = createFakePi();
     const fullToolSet = ["read", "bash", "edit", "write", "grep", "find", "ls", "chalin_interview", "chalin_route", "chalin_web_search", "chalin_memory_search"];
+    const providerToolSet = ["chalin_direct", ...fullToolSet];
     fake.activeTools = [...fullToolSet];
     registerPiChalin(fake.api as never);
     const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
@@ -345,6 +521,9 @@ test("bounded release and git operations keep native and orchestration tools ava
       modelRegistry: { getAvailable: () => [] },
     });
 
+    assert.deepEqual(fake.activeTools, fullToolSet, prompt);
+    assertSameToolSet(providerToolNames(filterProviderToolsForTest(fake, providerToolSet)), decisionToolSet(fullToolSet), prompt);
+    await unlockDirectTools(fake, "bounded release operation");
     assert.ok(fake.activeTools.includes("read"), prompt);
     assert.ok(fake.activeTools.includes("bash"), prompt);
     assert.ok(fake.activeTools.includes("edit"), prompt);
@@ -352,10 +531,11 @@ test("bounded release and git operations keep native and orchestration tools ava
     assert.ok(fake.activeTools.includes("chalin_route"), prompt);
     assert.ok(fake.activeTools.includes("chalin_interview"), prompt);
     assert.deepEqual(fake.activeTools, fullToolSet, prompt);
+    assertSameToolSet(providerToolNames(filterProviderToolsForTest(fake, providerToolSet)), fullToolSet, prompt);
   }
 });
 
-test("broad release and PR analysis are not programmatically forced to route-only", async () => {
+test("broad release and PR analysis are not programmatically classified by prompt text", async () => {
   const prompts = [
     "review this PR and summarize architecture risks",
     "analiza la estrategia de release y compara opciones para todo el monorepo",
@@ -364,6 +544,7 @@ test("broad release and PR analysis are not programmatically forced to route-onl
   for (const prompt of prompts) {
     const fake = createFakePi();
     const fullToolSet = ["read", "bash", "edit", "write", "grep", "find", "ls", "chalin_interview", "chalin_route", "chalin_web_search", "chalin_memory_search"];
+    const providerToolSet = ["chalin_direct", ...fullToolSet];
     fake.activeTools = [...fullToolSet];
     registerPiChalin(fake.api as never);
     const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
@@ -381,13 +562,17 @@ test("broad release and PR analysis are not programmatically forced to route-onl
     });
 
     assert.deepEqual(fake.activeTools, fullToolSet, prompt);
+    assert.deepEqual(fake.toolSetHistory, [], prompt);
+    assertSameToolSet(providerToolNames(filterProviderToolsForTest(fake, providerToolSet)), decisionToolSet(fullToolSet), prompt);
   }
 });
 
-test("pi-chalin keeps direct tools for bounded review, root docs edits, and explicit commands", async () => {
+test("pi-chalin restores direct tools for bounded review, root docs edits, and explicit commands after DIRECT choice", async () => {
   const fake = createFakePi();
   const fullToolSet = ["read", "bash", "grep", "find", "ls", "edit", "write", "chalin_route"];
+  const providerToolSet = ["chalin_direct", ...fullToolSet];
   registerPiChalin(fake.api as never);
+  const inputHandler = fake.handlers.get("input")?.[0] as (event: unknown, ctx: unknown) => Promise<{ action: string }>;
   const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
   const ctx = {
     cwd: tempDir("pi-chalin-direct-gate-exclusions-"),
@@ -403,13 +588,18 @@ test("pi-chalin keeps direct tools for bounded review, root docs edits, and expl
   ];
   for (const prompt of prompts) {
     fake.activeTools = [...fullToolSet];
+    await inputHandler({ type: "input", text: prompt.text, source: "interactive" }, ctx);
     await beforeAgentStart({
       type: "before_agent_start",
       prompt: prompt.text,
       systemPrompt: "base",
       systemPromptOptions: {},
     }, ctx);
+    assert.deepEqual(fake.activeTools, fullToolSet, prompt.text);
+    assertSameToolSet(providerToolNames(filterProviderToolsForTest(fake, providerToolSet)), decisionToolSet(fullToolSet), prompt.text);
+    await unlockDirectTools(fake, prompt.text);
     assert.deepEqual(fake.activeTools, prompt.expected, prompt.text);
+    assertSameToolSet(providerToolNames(filterProviderToolsForTest(fake, providerToolSet)), prompt.expected, prompt.text);
   }
 });
 
@@ -453,7 +643,7 @@ test("resumable run context lets the parent decide chalin_resume without a promp
   assert.equal(promptResult?.message?.customType, "pi-chalin-orchestration");
   assert.equal(promptResult?.message?.display, false);
   assert.doesNotMatch(promptResult?.systemPrompt ?? "", /resume orchestration \(compact\)/i);
-  assert.match(promptResult?.systemPrompt ?? "", /Available pi-chalin agents/i);
+  assert.match(promptResult?.systemPrompt ?? "", /Agents:/i);
   assert.match(promptResult?.message?.content ?? "", /Resumable pi-chalin run available/i);
   assert.match(promptResult?.message?.content ?? "", /use LLM judgment/i);
   assert.match(promptResult?.message?.content ?? "", /call `chalin_resume`/i);
@@ -534,10 +724,10 @@ test("session_start resets stale in-memory chalin run state", async () => {
 
 test("production autoroute prompts do not embed workflow fixture-specific shortcuts", () => {
   const productionPromptFiles = [
-    path.join(process.cwd(), "src", "autoroute.ts"),
-    path.join(process.cwd(), "src", "orchestration.ts"),
-    path.join(process.cwd(), "src", "runtime-state.ts"),
-    path.join(process.cwd(), "src", "runner-prompt.ts"),
+    path.join(process.cwd(), "src", "routing", "autoroute.ts"),
+    path.join(process.cwd(), "src", "orchestration", "orchestration.ts"),
+    path.join(process.cwd(), "src", "runtime", "state.ts"),
+    path.join(process.cwd(), "src", "runner", "runner-prompt.ts"),
   ];
   const combined = productionPromptFiles.map((file) => fs.readFileSync(file, "utf-8")).join("\n");
   for (const pattern of [
@@ -564,7 +754,7 @@ test("production autoroute prompts do not embed workflow fixture-specific shortc
     assert.doesNotMatch(combined, pattern);
   }
 
-  const autorouteSource = fs.readFileSync(path.join(process.cwd(), "src", "autoroute.ts"), "utf-8");
+  const autorouteSource = fs.readFileSync(path.join(process.cwd(), "src", "routing", "autoroute.ts"), "utf-8");
   for (const pattern of [
     /looksLikeChalinOrchestrationWork/,
     /shouldUseCompactChalinCriticalPrompt/,
@@ -623,14 +813,11 @@ test("direct bounded edits get one completion nudge after verification", async (
   assert.match((sourceTestReady[0]?.message as { content?: string }).content ?? "", /assertions must visibly cover the named criteria/i);
   assert.match((sourceTestReady[0]?.message as { content?: string }).content ?? "", /Stop expanding scope/i);
   assert.match((sourceTestReady[0]?.message as { content?: string }).content ?? "", /nearest package verification/i);
-  assert.match((sourceTestReady[0]?.message as { content?: string }).content ?? "", /text query blank\/no-match\/order/i);
-  assert.match((sourceTestReady[0]?.message as { content?: string }).content ?? "", /API payload missing\/null\/array\/type\/blank\/format branches/i);
-  assert.match((sourceTestReady[0]?.message as { content?: string }).content ?? "", /parser\/delimiter adjacency\/protected\/escaping\/EOF including SQL doubled-quote strings/i);
-  assert.match((sourceTestReady[0]?.message as { content?: string }).content ?? "", /Python unittest discoverable `tests\/` path/i);
-  assert.match((sourceTestReady[0]?.message as { content?: string }).content ?? "", /validation normalization-before-regex/i);
-  assert.match((sourceTestReady[0]?.message as { content?: string }).content ?? "", /explicit numeric\/domain bounds fail fast/i);
-  assert.match((sourceTestReady[0]?.message as { content?: string }).content ?? "", /time\/rate fake time with no sleeps/i);
-  assert.match((sourceTestReady[0]?.message as { content?: string }).content ?? "", /sort primary\/secondary\/tie\/no mutation/i);
+  assert.match((sourceTestReady[0]?.message as { content?: string }).content ?? "", /derive edge cases from the user's contract and changed code/i);
+  assert.match((sourceTestReady[0]?.message as { content?: string }).content ?? "", /normal behavior, invalid\/empty\/external inputs, boundaries/i);
+  assert.match((sourceTestReady[0]?.message as { content?: string }).content ?? "", /ordering\/idempotence\/mutation invariants/i);
+  assert.match((sourceTestReady[0]?.message as { content?: string }).content ?? "", /runner discoverability/i);
+  assert.match((sourceTestReady[0]?.message as { content?: string }).content ?? "", /Do not copy a memorized domain checklist/i);
   assert.match((sourceTestReady[0]?.message as { content?: string }).content ?? "", /Tiny stubs may be replaced once/i);
   assert.match((sourceTestReady[0]?.message as { content?: string }).content ?? "", /existing large\/partial files stay targeted edits/i);
   assert.equal(fake.messages.some((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-completion-nudge"), false, "mutation alone is not enough for completion");
@@ -709,6 +896,7 @@ test("direct bounded edits get one completion nudge after verification", async (
 test("direct PR creation is terminal and stops pr body rewrite loops", async () => {
   const fake = createFakePi();
   registerPiChalin(fake.api as never);
+  const inputHandler = fake.handlers.get("input")?.[0] as (event: unknown, ctx: unknown) => Promise<{ action: string }>;
   const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
   const contextHandler = fake.handlers.get("context")?.[0] as (event: { type: "context"; messages: unknown[] }, ctx: unknown) => unknown;
   const toolExecutionEnd = fake.handlers.get("tool_execution_end")?.[0] as (event: { toolName: string; isError?: boolean; args?: Record<string, unknown> }, ctx: unknown) => void;
@@ -755,9 +943,10 @@ test("direct PR creation is terminal and stops pr body rewrite loops", async () 
 });
 
 
-test("bounded direct prompts do not hide orchestration tools programmatically", async () => {
+test("bounded direct prompts restore orchestration tools after chalin_direct", async () => {
   const fake = createFakePi();
   registerPiChalin(fake.api as never);
+  const inputHandler = fake.handlers.get("input")?.[0] as (event: unknown, ctx: unknown) => Promise<{ action: string }>;
   const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
   const ctx = {
     cwd: tempDir("pi-chalin-direct-tool-scope-"),
@@ -766,8 +955,14 @@ test("bounded direct prompts do not hide orchestration tools programmatically", 
     modelRegistry: { getAvailable: () => [] },
   };
   const fullToolSet = ["read", "bash", "edit", "write", "grep", "find", "ls", "chalin_project_discovery", "chalin_project_snapshot", "chalin_route", "chalin_web_search"];
+  const providerToolSet = ["chalin_direct", ...fullToolSet];
 
   fake.activeTools = [...fullToolSet];
+  await inputHandler({
+    type: "input",
+    text: "Añade un test unitario que cubra división por cero en src/safeDivide.ts. Si el comportamiento ya existe, no refactorices de más.",
+    source: "interactive",
+  }, ctx);
   await beforeAgentStart({
     type: "before_agent_start",
     prompt: "Añade un test unitario que cubra división por cero en src/safeDivide.ts. Si el comportamiento ya existe, no refactorices de más.",
@@ -775,8 +970,17 @@ test("bounded direct prompts do not hide orchestration tools programmatically", 
     systemPromptOptions: {},
   }, ctx);
   assert.deepEqual(fake.activeTools, fullToolSet);
+  assertSameToolSet(providerToolNames(filterProviderToolsForTest(fake, providerToolSet)), decisionToolSet(fullToolSet));
+  await unlockDirectTools(fake, "unit test update");
+  assert.deepEqual(fake.activeTools, fullToolSet);
+  assertSameToolSet(providerToolNames(filterProviderToolsForTest(fake, providerToolSet)), fullToolSet);
 
   fake.activeTools = [...fullToolSet];
+  await inputHandler({
+    type: "input",
+    text: "Scaffoldea un CLI TypeScript mínimo llamado note-pack: package.json, src/cli.ts, README con uso, y test básico en test/cli.test.ts. Usa Bun.",
+    source: "interactive",
+  }, ctx);
   await beforeAgentStart({
     type: "before_agent_start",
     prompt: "Scaffoldea un CLI TypeScript mínimo llamado note-pack: package.json, src/cli.ts, README con uso, y test básico en test/cli.test.ts. Usa Bun.",
@@ -784,6 +988,10 @@ test("bounded direct prompts do not hide orchestration tools programmatically", 
     systemPromptOptions: {},
   }, ctx);
   assert.deepEqual(fake.activeTools, fullToolSet);
+  assertSameToolSet(providerToolNames(filterProviderToolsForTest(fake, providerToolSet)), decisionToolSet(fullToolSet));
+  await unlockDirectTools(fake, "cli scaffold");
+  assert.deepEqual(fake.activeTools, fullToolSet);
+  assertSameToolSet(providerToolNames(filterProviderToolsForTest(fake, providerToolSet)), fullToolSet);
 });
 
 test("direct source and test edits reject trivial smoke coverage before final", async () => {
@@ -858,7 +1066,7 @@ test("direct rare gap diagnostics are derived from tool event history", async ()
   registerPiChalin(fake.api as never);
   const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0] as (event: unknown, ctx: unknown) => Promise<unknown>;
   const toolExecutionEnd = fake.handlers.get("tool_execution_end")?.[0] as (event: { toolName: string; isError?: boolean; args?: Record<string, unknown> }, ctx: unknown) => void;
-  const { getDirectDerivedGapDiagnosticsForTests } = await import("../src/runtime-state.ts");
+  const { getDirectDerivedGapDiagnosticsForTests } = await import("../src/runtime/state.ts");
   const ctx = {
     cwd: tempDir("pi-chalin-derived-gaps-"),
     hasUI: false,
@@ -1356,13 +1564,11 @@ test("direct bounded edits recognize Python unittest verification and rerun afte
   assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-ready-to-verify-nudge").length, 0);
   assert.equal(fake.messages.filter((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-source-test-ready-nudge").length, 2);
   const sourceReady = fake.messages.find((item) => (item.message as { customType?: string }).customType === "pi-chalin-direct-source-test-ready-nudge");
-  assert.match((sourceReady?.message as { content?: string }).content ?? "", /string\/slug categories once/i);
-  assert.match((sourceReady?.message as { content?: string }).content ?? "", /API payload missing\/null\/array\/type\/blank\/format branches/i);
-  assert.match((sourceReady?.message as { content?: string }).content ?? "", /numeric below\/inside\/above/i);
-  assert.match((sourceReady?.message as { content?: string }).content ?? "", /parser\/delimiter adjacency\/protected\/escaping\/EOF including SQL doubled-quote strings/i);
-  assert.match((sourceReady?.message as { content?: string }).content ?? "", /Python unittest discoverable `tests\/` path/i);
-  assert.match((sourceReady?.message as { content?: string }).content ?? "", /time\/rate fake time with no sleeps/i);
-  assert.match((sourceReady?.message as { content?: string }).content ?? "", /sort primary\/secondary\/tie\/no mutation/i);
+  assert.match((sourceReady?.message as { content?: string }).content ?? "", /derive edge cases from the user's contract and changed code/i);
+  assert.match((sourceReady?.message as { content?: string }).content ?? "", /normal behavior, invalid\/empty\/external inputs, boundaries/i);
+  assert.match((sourceReady?.message as { content?: string }).content ?? "", /ordering\/idempotence\/mutation invariants/i);
+  assert.match((sourceReady?.message as { content?: string }).content ?? "", /runner discoverability/i);
+  assert.match((sourceReady?.message as { content?: string }).content ?? "", /Do not copy a memorized domain checklist/i);
   assert.match((sourceReady?.message as { content?: string }).content ?? "", /one preservation\/no-op path/i);
 
   toolExecutionEnd({ toolName: "bash", isError: false, args: { command: "python -m unittest discover -s tests" } }, ctx);
@@ -2301,7 +2507,7 @@ test("finalAnswerMaterial prefers final synthesis and keeps prior evidence compa
   run.steps[0]!.status = "complete";
   run.steps[0]!.output = {
     agent: "scout",
-    text: `Coverage Matrix: runtime covered in src/index.ts.\n${"raw scout crawl ".repeat(500)}\nEvidence Table: src/runner.ts owns execution.`,
+    text: `Coverage Matrix: runtime covered in src/index.ts.\n${"raw scout crawl ".repeat(500)}\nEvidence Table: src/runner/runner.ts owns execution.`,
     handoff: "scout handoff",
     raw: "",
     memoryCandidates: [],
@@ -2408,7 +2614,7 @@ test("finalAnswerMaterial uses structured claim evidence without heading-specifi
       kind: "negative-claim",
       subject: "browser automation capability",
       summary: "No direct browser automation entrypoint was found in the repo surface.",
-      evidence: ["src/tools.ts", "src/child-tools.ts"],
+      evidence: ["src/tools/tools.ts", "src/tools/child-tools.ts"],
       confidence: 0.72,
     }],
   } as never;
@@ -2425,7 +2631,7 @@ test("finalAnswerMaterial uses structured claim evidence without heading-specifi
   const material = finalAnswerMaterial(run) ?? "";
 
   assert.match(material, /browser automation capability/);
-  assert.match(material, /src\/tools\.ts/);
+  assert.match(material, /src\/tools\/tools\.ts/);
   assert.doesNotMatch(material, /Notas compactas sin encabezados convencionales/);
 });
 
@@ -3442,15 +3648,15 @@ test("WebFetch Audit uses a searchable overlay with detail drill-down", async ()
 });
 
 
-test("/chalin completions expose Activity instead of technical Runs", () => {
+test("/chalin completions expose Activity and inspectable Runs", () => {
   const fake = createFakePi();
   registerPiChalin(fake.api as never);
   const command = fake.commands.get("chalin") as { getArgumentCompletions?: (prefix: string) => Array<{ value: string; label: string }> | null };
   const completions = command.getArgumentCompletions?.("") ?? [];
 
   assert.ok(completions.some((item) => item.value === "activity"));
+  assert.ok(completions.some((item) => item.value === "runs"));
   assert.ok(completions.some((item) => item.value === "settings"));
-  assert.ok(!completions.some((item) => item.value === "runs"));
 });
 
 test("/chalin settings persists the selected memory provider", async () => {
@@ -3840,7 +4046,7 @@ test("runtime and route widgets surface inefficient late-signal evidence loops",
       toolCalls: 12,
       toolCallsByName: { read: 10, grep: 2 },
       crossStepDuplicateReadCount: 2,
-      crossStepDuplicateReads: ["src/index.ts", "src/tools.ts"],
+      crossStepDuplicateReads: ["src/index.ts", "src/tools/tools.ts"],
     },
   };
 

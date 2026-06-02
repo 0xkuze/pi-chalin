@@ -3,10 +3,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ArtifactStore } from "../src/artifacts.ts";
-import { MockWorkerRunner } from "../src/runner.ts";
-import { createRunState, loadResumableRunState } from "../src/runner-state.ts";
-import type { AgentOutput, RouteDecision, RunState } from "../src/schemas.ts";
+import { ArtifactStore } from "../src/artifacts/artifacts.ts";
+import { MockWorkerRunner } from "../src/runner/runner.ts";
+import { createRunState, loadResumableRunState } from "../src/runner/runner-state.ts";
+import type { AgentOutput, RouteDecision, RunState } from "../src/domain/schemas.ts";
 
 interface LongRunningCheck {
   id: string;

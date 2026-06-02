@@ -3,10 +3,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, test } from "bun:test";
-import { ArtifactStore } from "../src/artifacts.ts";
+import { ArtifactStore } from "../src/artifacts/artifacts.ts";
 
-import { openArtifactPanel } from "../src/ui.ts";
-import { ChalinKernel, routeFromPlan } from "../src/kernel.ts";
+import { openArtifactPanel } from "../src/ui/ui.ts";
+import { ChalinKernel, routeFromPlan } from "../src/kernel/kernel.ts";
 
 const tempDirs: string[] = [];
 afterEach(() => { while (tempDirs.length > 0) fs.rmSync(tempDirs.pop()!, { recursive: true, force: true }); });

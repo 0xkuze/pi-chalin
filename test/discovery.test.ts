@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, test } from "bun:test";
-import { buildProjectDiscoveryIndex, formatProjectDiscoveryIndex } from "../src/discovery.ts";
+import { buildProjectDiscoveryIndex, formatProjectDiscoveryIndex } from "../src/project/discovery.ts";
 
 const tempDirs: string[] = [];
 afterEach(() => { while (tempDirs.length > 0) fs.rmSync(tempDirs.pop()!, { recursive: true, force: true }); });
@@ -60,4 +60,29 @@ test("project discovery keeps generated shard noise compact", () => {
   assert.match(text, /ignored dirs:/i);
   assert.match(text, /\.\.\. 1 more/i);
   assert.ok(text.length < 900, `compact discovery should stay small, got ${text.length}`);
+});
+
+test("project discovery excludes Pi runtime artifacts from project inventory", () => {
+  const dir = tempDir("pi-chalin-discovery-runtime-");
+  fs.mkdirSync(path.join(dir, "src"), { recursive: true });
+  fs.mkdirSync(path.join(dir, ".pi-chalin", "runs"), { recursive: true });
+  fs.mkdirSync(path.join(dir, ".pi-chalin-hidden-child-sessions", "archived"), { recursive: true });
+  fs.mkdirSync(path.join(dir, ".pi-sessions", "active-session", "pi-chalin"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "src", "index.ts"), "export const value = 1;\n");
+  fs.writeFileSync(path.join(dir, ".pi-chalin", "runs", "run.json"), "{}\n");
+  fs.writeFileSync(path.join(dir, ".pi-chalin-hidden-child-sessions", "archived", "child.jsonl"), "{}\n");
+  fs.writeFileSync(path.join(dir, ".pi-sessions", "parent.jsonl"), "{}\n");
+  fs.writeFileSync(path.join(dir, ".pi-sessions", "active-session", "pi-chalin", "child.jsonl"), "{}\n");
+
+  const index = buildProjectDiscoveryIndex(dir, { maxDepth: 5, maxEntries: 100 });
+
+  assert.ok(index.entries.some((entry) => entry.path === "src/index.ts"));
+  assert.equal(index.entries.some((entry) => entry.path.includes(".pi-chalin")), false);
+  assert.equal(index.entries.some((entry) => entry.path.includes(".pi-chalin-hidden-child-sessions")), false);
+  assert.equal(index.entries.some((entry) => entry.path.includes(".pi-sessions")), false);
+  assert.deepEqual(index.ignoredDirs.filter((entry) => entry.startsWith(".pi")).sort(), [
+    ".pi-chalin",
+    ".pi-chalin-hidden-child-sessions",
+    ".pi-sessions",
+  ]);
 });

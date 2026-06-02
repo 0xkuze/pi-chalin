@@ -4,10 +4,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ArtifactStore } from "../src/artifacts.ts";
-import { createMemoryCandidate, MemoryStore } from "../src/memory.ts";
-import type { AgentDefinition } from "../src/schemas.ts";
-import { cleanupWorktrees, mergeWorktreeChanges, prepareWorktreeIsolation } from "../src/worktrees.ts";
+import { ArtifactStore } from "../src/artifacts/artifacts.ts";
+import { createMemoryCandidate, MemoryStore } from "../src/memory/memory.ts";
+import type { AgentDefinition } from "../src/domain/schemas.ts";
+import { cleanupWorktrees, mergeWorktreeChanges, prepareWorktreeIsolation } from "../src/worktrees/worktrees.ts";
 
 interface MutationEvalCheck {
   id: string;

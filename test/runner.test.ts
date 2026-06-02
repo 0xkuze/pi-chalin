@@ -5,14 +5,18 @@ import * as path from "node:path";
 import { spawnSync } from "node:child_process";
 import { afterEach, test } from "bun:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { chalinChildSessionDir, createChalinChildSessionManager, hideLegacyTopLevelChildSessions } from "../src/child-sessions.ts";
-import { policyForStep } from "../src/budget.ts";
-import { resolveAgentModel, resolveAgentThinking, resolveInheritedModelFallback } from "../src/model-resolution.ts";
-import { buildSdkPrompt, childToolNames, resolveStepCompletionStatus, toolBudgetForStep } from "../src/runner-prompt.ts";
-import { DEFAULT_SDK_STEP_IDLE_STALL_MS, MockWorkerRunner, applyStructuredHandoffContract, budgetPolicyForSdkStep, buildConflictResolverTask, extractAssistantRuntimeError, hasUnrecoverableFailedSteps, normalizeThinkingForBudget, parseAgentOutput, promptTokenomicsPhaseForStep, recoverPausedReadOnlyDagStage, reviewerHandoffNeedsRepair, runWithIdleStallMonitor, sdkStepIdleStallMs, shouldStopAfterDagStage } from "../src/runner.ts";
-import { createRunState, loadResumableRunState, prepareRunForResume } from "../src/runner-state.ts";
-import type { AgentDefinition, RouteDecision, RunState, RunStepMetrics } from "../src/schemas.ts";
-import { SkillCatalog } from "../src/skills.ts";
+import { chalinChildSessionDir, createChalinChildSessionManager, hideLegacyTopLevelChildSessions } from "../src/runtime/child-sessions.ts";
+import { policyForStep } from "../src/budget/budget.ts";
+import { resolveAgentModel, resolveAgentThinking, resolveInheritedModelFallback } from "../src/runner/model-resolution.ts";
+import { buildSdkPrompt, childToolNames, resolveStepCompletionStatus, synthesisCrossStepDuplicateReadLimit, toolBudgetForStep } from "../src/runner/runner-prompt.ts";
+import { DEFAULT_SDK_STEP_IDLE_STALL_MS, MockWorkerRunner, allowedToolsForStep, applyConflictResolverRepair, applyStructuredHandoffContract, budgetPolicyForSdkStep, buildConflictResolverTask, cleanTransientGeneratedWorkspaceOutputs, declaredFilesByIsolatedStepId, extractAssistantRuntimeError, hasBlockingCheckpointedSteps, hasUnrecoverableFailedSteps, normalizeThinkingForBudget, parseAgentOutput, promptTokenomicsPhaseForStep, reconcileDeclaredGeneratedScopeViolations, recoverPausedReadOnlyDagStage, reviewerHandoffNeedsRepair, runWithIdleStallMonitor, sanitizePromptWorkspaceText, sdkStepIdleStallMs, shouldRecordMutationLedgerEntry, shouldStopAfterDagStage, terminalRunStatusForSteps, workUnitMutationScopeForStep, workspaceDirtyEntriesFromStatus, workspaceDirtyPathsFromStatus, workspaceHygieneProblemsForDirtyPaths } from "../src/runner/runner.ts";
+import { buildContextPacket, formatContextPacket } from "../src/runner/context-packet.ts";
+import { loadFailedRunDiagnostic, markBlockedDependentsSkipped, repairOptionsFor } from "../src/runner/run-recovery.ts";
+import { createRunState, loadResumableRunState, persistRun, prepareRunForResume } from "../src/runner/runner-state.ts";
+import { expandWorkUnitsFromBestHandoff, expandWorkUnitsFromHandoff } from "../src/runner/work-units.ts";
+import { isUsableStepStatus as runtimeIsUsableStepStatus } from "../src/runtime/status.ts";
+import type { AgentDefinition, RouteDecision, RunState, RunStepMetrics, RunStepState } from "../src/domain/schemas.ts";
+import { SkillCatalog } from "../src/skills/skills.ts";
 
 const tempDirs: string[] = [];
 afterEach(() => { while (tempDirs.length > 0) fs.rmSync(tempDirs.pop()!, { recursive: true, force: true }); });
@@ -24,6 +28,17 @@ function git(cwd: string, args: string[]) {
 }
 function agent(name: string, caps: AgentDefinition["capabilities"]): AgentDefinition {
   return { name, scope: "built-in", concern: "implementation", capabilities: caps, description: name, model: "inherit", tools: [], memory: { read: false, write: "never", categories: [] }, systemPrompt: "", diagnostics: [] };
+}
+
+function emptyUsage() {
+  return {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
 }
 
 function userMessage(content: string): Parameters<SessionManager["appendMessage"]>[0] {
@@ -66,9 +81,15 @@ function stepMetrics(overrides: Partial<RunStepMetrics> = {}): RunStepMetrics {
   };
 }
 
-function reviewerOutput(verdict: "pass" | "fail" | "gap", overrides: Partial<NonNullable<ReturnType<typeof parseAgentOutput>["reviewerVerdict"]>> = {}) {
+type ReviewerOutputOverrides = Omit<Partial<NonNullable<ReturnType<typeof parseAgentOutput>["reviewerVerdict"]>>, "evidence"> & { evidence?: unknown[] };
+
+function reviewerOutput(verdict: "pass" | "fail" | "gap", overrides: ReviewerOutputOverrides = {}) {
   const blockingFindings = overrides.blockingFindings ?? (verdict === "fail" ? ["blocking implementation gap"] : []);
   const missingCoverage = overrides.missingCoverage ?? (verdict === "gap" ? ["missing permanent coverage"] : []);
+  const evidence = overrides.evidence ?? [
+    { kind: "reviewed-content", paths: ["src/parser.c", "tests/test_parser.c"], summary: "Reviewed changed implementation and tests." },
+    { kind: "verification", command: "make test", status: "pass", result: "Exited 0." },
+  ];
   return parseAgentOutput("reviewer", [
     "## Handoff",
     "- Structured reviewer handoff.",
@@ -77,7 +98,8 @@ function reviewerOutput(verdict: "pass" | "fail" | "gap", overrides: Partial<Non
       verdict,
       blockingFindings,
       missingCoverage,
-      evidence: overrides.evidence ?? ["src/parser.c", "tests/test_parser.c"],
+      evidence,
+      residualRisks: overrides.residualRisks ?? [],
       requiredRepair: overrides.requiredRepair,
     }),
   ].join("\n"));
@@ -188,6 +210,242 @@ test("parseAgentOutput extracts structured handoff and reviewer verdict contract
   assert.match(output.handoff ?? "", /Review found one blocking acceptance gap/);
 });
 
+test("parseAgentOutput preserves structured reviewer blocking finding objects", () => {
+  const output = parseAgentOutput("reviewer", [
+    "## Agent Handoff",
+    JSON.stringify({
+      summary: "Review failed with structured findings.",
+      changedFiles: [],
+      verification: ["reviewed implementation"],
+      evidenceClaims: [],
+      risks: [],
+      nextActions: ["Repair blocking findings."],
+    }),
+    "## Reviewer Verdict",
+    JSON.stringify({
+      verdict: "fail",
+      blockingFindings: [{
+        id: "BF-1",
+        severity: "high",
+        file: "src/token.ts",
+        summary: "Token lookup uses the unsafe identifier.",
+        requiredRepair: "Key lookup by the derived safe identifier.",
+      }],
+      missingCoverage: [{
+        file: "src/token.test.ts",
+        summary: "No regression covers concurrent rotation.",
+      }],
+      evidence: [{
+        kind: "reviewed-content",
+        paths: ["src/token.ts", "src/token.test.ts"],
+        summary: "Reviewed implementation and tests.",
+      }],
+      residualRisks: [],
+      requiredRepair: "Repair the unsafe lookup and add concurrency coverage.",
+    }),
+  ].join("\n"));
+
+  assert.equal(output.reviewerVerdict?.verdict, "fail");
+  assert.match(output.reviewerVerdict?.blockingFindings[0] ?? "", /BF-1/);
+  assert.match(output.reviewerVerdict?.blockingFindings[0] ?? "", /Token lookup uses the unsafe identifier/);
+  assert.match(output.reviewerVerdict?.missingCoverage[0] ?? "", /concurrent rotation/);
+  assert.deepEqual(output.reviewerVerdict?.repairFiles, ["src/token.ts", "src/token.test.ts"]);
+});
+
+test("parseAgentOutput extracts fenced Agent Handoff JSON even with leading section prose", () => {
+  const output = parseAgentOutput("planner", [
+    "## Agent Handoff",
+    "Plan JSON follows.",
+    "```json",
+    JSON.stringify({
+      summary: "Planner produced bounded units.",
+      changedFiles: [],
+      verification: [],
+      evidenceClaims: [],
+      risks: [],
+      nextActions: ["Run workers."],
+      workUnits: [
+        {
+          id: "unit-one",
+          title: "Unit one",
+          scope: { files: ["src/one.ts"], purpose: "Bounded responsibility" },
+          dependencies: [],
+          acceptanceCriteria: ["Verify unit one."],
+        },
+      ],
+    }),
+    "```",
+  ].join("\n"));
+
+  assert.equal(output.handoffContract, "structured");
+  assert.equal(output.structuredHandoff?.workUnits?.length, 1);
+  assert.deepEqual(output.structuredHandoff?.workUnits?.[0]?.files, ["src/one.ts"]);
+});
+
+test("parseAgentOutput preserves reviewer residual risks separately from blocking gaps", () => {
+  const output = parseAgentOutput("reviewer", [
+    "## Reviewer Verdict",
+    JSON.stringify({
+      verdict: "pass",
+      blockingFindings: [],
+      missingCoverage: [],
+      evidence: ["reviewed src/parser.c", "make test exited 0"],
+      residualRisks: ["Optional broader validation was not available in the fixture."],
+    }),
+    "## Handoff",
+    "- Structured reviewer contract.",
+  ].join("\n"));
+
+  assert.equal(output.reviewerVerdict?.verdict, "pass");
+  assert.deepEqual(output.reviewerVerdict?.missingCoverage, []);
+  assert.deepEqual(output.reviewerVerdict?.residualRisks, ["Optional broader validation was not available in the fixture."]);
+});
+
+test("parseAgentOutput normalizes contradictory reviewer pass verdicts with blocking fields", () => {
+  const output = parseAgentOutput("reviewer", [
+    "## Reviewer Verdict",
+    JSON.stringify({
+      verdict: "pass",
+      blockingFindings: [],
+      missingCoverage: ["Required coverage is still absent."],
+      evidence: ["reviewed src/parser.c", "make test exited 0"],
+      residualRisks: [],
+    }),
+    "## Handoff",
+    "- Structured reviewer contract.",
+  ].join("\n"));
+
+  assert.equal(output.reviewerVerdict?.verdict, "gap");
+  assert.deepEqual(output.reviewerVerdict?.missingCoverage, ["Required coverage is still absent."]);
+  assert.match(output.warnings.join("\n"), /normalized verdict/i);
+});
+
+test("parseAgentOutput accepts scalar strings for structured handoff list fields", () => {
+  const output = parseAgentOutput("worker", [
+    "## Agent Handoff",
+    JSON.stringify({
+      summary: "Patched auth validation.",
+      changedFiles: "src/auth/keycloak.ts",
+      verification: "npx vitest run src/auth/keycloak.test.ts -> pass",
+      evidenceClaims: [],
+      risks: "No known remaining risk.",
+      nextActions: "Reviewer should inspect auth boundary behavior.",
+      workUnits: [],
+    }),
+  ].join("\n"));
+
+  assert.deepEqual(output.structuredHandoff?.changedFiles, ["src/auth/keycloak.ts"]);
+  assert.deepEqual(output.structuredHandoff?.verification, ["npx vitest run src/auth/keycloak.test.ts -> pass"]);
+  assert.deepEqual(output.structuredHandoff?.risks, ["No known remaining risk."]);
+  assert.deepEqual(output.structuredHandoff?.nextActions, ["Reviewer should inspect auth boundary behavior."]);
+});
+
+test("parseAgentOutput preserves structured WorkUnit scope files", () => {
+  const output = parseAgentOutput("planner", [
+    "## Agent Handoff",
+    JSON.stringify({
+      summary: "Planned bounded work.",
+      changedFiles: [],
+      verification: ["read project files"],
+      evidenceClaims: [],
+      risks: [],
+      nextActions: [],
+      workUnits: [
+        {
+          id: "unit-a",
+          title: "Unit A",
+          scope: {
+            files: ["src/a.ts", "src/a.test.ts"],
+            purpose: "Own feature A implementation and tests.",
+          },
+          dependencies: [],
+          expectedEffects: ["read", "write", "verify"],
+          acceptanceCriteria: ["tests pass"],
+        },
+      ],
+    }),
+  ].join("\n"));
+
+  const unit = output.structuredHandoff?.workUnits?.[0];
+  assert.deepEqual(unit?.scope, ["Own feature A implementation and tests."]);
+  assert.deepEqual(unit?.files, ["src/a.ts", "src/a.test.ts"]);
+  assert.deepEqual(unit?.expectedEffects, ["read", "write", "verify"]);
+});
+
+test("parseAgentOutput extracts WorkUnit files from structured scope file objects", () => {
+  const output = parseAgentOutput("planner", [
+    "## Agent Handoff",
+    JSON.stringify({
+      summary: "Planned bounded work.",
+      changedFiles: [],
+      verification: ["read project files"],
+      evidenceClaims: [],
+      risks: [],
+      nextActions: [],
+      workUnits: [
+        {
+          id: "unit-a",
+          title: "Unit A",
+          scope: {
+            files: [
+              { path: "src/a.ts", action: "modify" },
+              { file: "src/a.test.ts", change: "add focused tests" },
+            ],
+            purpose: "Own feature A implementation and tests.",
+          },
+          dependencies: [],
+          acceptanceCriteria: ["tests pass"],
+        },
+      ],
+    }),
+  ].join("\n"));
+
+  const unit = output.structuredHandoff?.workUnits?.[0];
+  assert.deepEqual(unit?.scope, ["Own feature A implementation and tests."]);
+  assert.deepEqual(unit?.files, ["src/a.ts", "src/a.test.ts"]);
+});
+
+test("parseAgentOutput normalizes structured verification evidence objects", () => {
+  const output = parseAgentOutput("conflict-resolver", [
+    "## Agent Handoff",
+    JSON.stringify({
+      summary: "Resolved isolated worktree conflict.",
+      changedFiles: ["cmd/api/main.go"],
+      verification: [
+        { command: "go test ./...", result: "pass", evidence: ["cmd/api", "internal/auth"] },
+        { readback: ["cmd/api/main.go", "cmd/api/main_test.go"], result: "confirmed" },
+      ],
+      evidenceClaims: [],
+      risks: [],
+      nextActions: [],
+      workUnits: [],
+    }),
+  ].join("\n"));
+
+  assert.match(output.structuredHandoff?.verification[0] ?? "", /command: go test \.\/\.\.\./);
+  assert.match(output.structuredHandoff?.verification[0] ?? "", /result: pass/);
+  assert.match(output.structuredHandoff?.verification[1] ?? "", /readback: cmd\/api\/main\.go, cmd\/api\/main_test\.go/);
+});
+
+test("parseAgentOutput accepts scalar structured verification objects", () => {
+  const output = parseAgentOutput("worker", [
+    "## Agent Handoff",
+    JSON.stringify({
+      summary: "Verification-only repair completed.",
+      changedFiles: ["package.json"],
+      verification: { command: "npm run test", result: "pass" },
+      evidenceClaims: [],
+      risks: [],
+      nextActions: [],
+      workUnits: [],
+    }),
+  ].join("\n"));
+
+  assert.equal(output.structuredHandoff?.verification.length, 1);
+  assert.match(output.structuredHandoff?.verification[0] ?? "", /command: npm run test/);
+  assert.match(output.structuredHandoff?.verification[0] ?? "", /result: pass/);
+});
+
 test("parseAgentOutput rejects empty reviewer pass verdicts", () => {
   const output = parseAgentOutput("reviewer", [
     "## Handoff",
@@ -245,6 +503,79 @@ test("applyStructuredHandoffContract validates structured handoff fields by role
   assert.match(writerRun.steps[0]!.error ?? "", /changedFiles/i);
   assert.match(writerRun.steps[0]!.error ?? "", /verification/i);
 
+  const verificationRepairRun = createRunState(writerRoute, cwd);
+  verificationRepairRun.steps[0]!.status = "complete";
+  verificationRepairRun.steps[0]!.repairCycle = 1;
+  verificationRepairRun.steps[0]!.metrics = stepMetrics({ filesTouched: [] });
+  verificationRepairRun.steps[0]!.output = parseAgentOutput("worker", [
+    "## Agent Handoff",
+    JSON.stringify({
+      summary: "Repair verified the final commands; no file edits were required.",
+      changedFiles: [],
+      verification: ["npm run test and npm run build passed after dependency install."],
+      evidenceClaims: [],
+      risks: [],
+      nextActions: [],
+    }),
+  ].join("\n"));
+
+  assert.equal(applyStructuredHandoffContract(verificationRepairRun, verificationRepairRun.steps[0]!, writer), "accept");
+  assert.equal(verificationRepairRun.steps[0]!.status, "complete");
+
+  const verifiedNoopRun = createRunState(writerRoute, cwd);
+  verifiedNoopRun.steps[0]!.status = "complete";
+  verifiedNoopRun.steps[0]!.metrics = stepMetrics({ filesTouched: [] });
+  verifiedNoopRun.steps[0]!.output = parseAgentOutput("worker", [
+    "## Agent Handoff",
+    JSON.stringify({
+      summary: "The unit was already satisfied by a prior repair; no edits were required.",
+      changedFiles: [],
+      verification: [{ commands: ["npm test"], result: "pass", readback: "target file already contains the required section" }],
+      evidenceClaims: [],
+      risks: [],
+      nextActions: [],
+    }),
+  ].join("\n"));
+
+  assert.equal(applyStructuredHandoffContract(verifiedNoopRun, verifiedNoopRun.steps[0]!, writer), "accept");
+  assert.equal(verifiedNoopRun.steps[0]!.status, "complete");
+
+  const blockedNoopRun = createRunState(writerRoute, cwd);
+  blockedNoopRun.steps[0]!.status = "complete";
+  blockedNoopRun.steps[0]!.metrics = stepMetrics({ filesTouched: [] });
+  blockedNoopRun.steps[0]!.output = parseAgentOutput("worker", [
+    "## Agent Handoff",
+    JSON.stringify({
+      summary: "No edits were made because a human scope decision is still required.",
+      changedFiles: [],
+      verification: ["Workspace inspection confirmed the target does not exist."],
+      evidenceClaims: [],
+      risks: ["Proceeding would require inventing product behavior."],
+      nextActions: ["Ask the user to choose the scope before implementation."],
+    }),
+  ].join("\n"));
+
+  assert.equal(applyStructuredHandoffContract(blockedNoopRun, blockedNoopRun.steps[0]!, writer), "fail");
+  assert.match(blockedNoopRun.steps[0]!.error ?? "", /changedFiles/i);
+
+  const missingChangedFilesRun = createRunState(writerRoute, cwd);
+  missingChangedFilesRun.steps[0]!.status = "complete";
+  missingChangedFilesRun.steps[0]!.metrics = stepMetrics({ filesTouched: ["src/index.ts"] });
+  missingChangedFilesRun.steps[0]!.output = parseAgentOutput("worker", [
+    "## Agent Handoff",
+    JSON.stringify({
+      summary: "Implementation completed but changedFiles was omitted.",
+      changedFiles: [],
+      verification: ["npm test passed."],
+      evidenceClaims: [],
+      risks: [],
+      nextActions: [],
+    }),
+  ].join("\n"));
+
+  assert.equal(applyStructuredHandoffContract(missingChangedFilesRun, missingChangedFilesRun.steps[0]!, writer), "fail");
+  assert.match(missingChangedFilesRun.steps[0]!.error ?? "", /changedFiles/i);
+
   const reviewRoute: RouteDecision = {
     kind: "multi-agent-sequential",
     agents: ["reviewer"],
@@ -266,9 +597,50 @@ test("applyStructuredHandoffContract validates structured handoff fields by role
     JSON.stringify({ verdict: "gap", blockingFindings: [], missingCoverage: ["No verification evidence."], evidence: ["src/parser.c"] }),
   ].join("\n"));
 
-  assert.equal(applyStructuredHandoffContract(reviewRun, reviewRun.steps[0]!, reviewer), "checkpoint");
-  assert.equal(reviewRun.steps[0]!.status, "checkpointed");
-  assert.match(reviewRun.steps[0]!.checkpoint?.reason ?? "", /verification is required/i);
+  assert.equal(applyStructuredHandoffContract(reviewRun, reviewRun.steps[0]!, reviewer), "accept");
+  assert.equal(reviewRun.steps[0]!.status, "complete");
+  assert.equal(reviewerHandoffNeedsRepair(reviewRun.steps[0], { expectsVerify: true }), true);
+
+  const verdictOnlyReviewRun = createRunState(reviewRoute, cwd);
+  verdictOnlyReviewRun.steps[0]!.status = "complete";
+  verdictOnlyReviewRun.steps[0]!.output = parseAgentOutput("reviewer", [
+    "## Reviewer Verdict",
+    JSON.stringify({
+      verdict: "pass",
+      blockingFindings: [],
+      missingCoverage: [],
+      evidence: ["src/auth/token.ts reviewed", "bun test passed"],
+      residualRisks: ["Optional integration coverage can be expanded later."],
+    }),
+  ].join("\n"));
+
+  assert.equal(applyStructuredHandoffContract(verdictOnlyReviewRun, verdictOnlyReviewRun.steps[0]!, reviewer), "accept");
+  assert.equal(verdictOnlyReviewRun.steps[0]!.status, "complete");
+
+  const scoutRoute: RouteDecision = {
+    kind: "multi-agent-dag",
+    agents: ["scout", "worker", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "fanout discovery should not inherit final verification obligation",
+    plan: {
+      kind: "dag",
+        stages: [{ id: "discover", tasks: [{ agent: "scout", task: "Locate all review notes without editing." }] }],
+    },
+  };
+  const scoutRun = createRunState(scoutRoute, cwd);
+  const scout = readOnlyAgent("scout", "recon");
+  scoutRun.steps[0]!.status = "complete";
+  scoutRun.steps[0]!.output = parseAgentOutput("scout", [
+    "## Agent Handoff",
+    JSON.stringify({ summary: "Found review notes.", changedFiles: [], verification: [], evidenceClaims: [], risks: [], nextActions: [] }),
+  ].join("\n"));
+
+  assert.equal(applyStructuredHandoffContract(scoutRun, scoutRun.steps[0]!, scout), "accept");
+  assert.equal(scoutRun.steps[0]!.status, "complete");
 });
 
 test("applyStructuredHandoffContract degrades missing structured handoffs by role and risk", () => {
@@ -307,12 +679,38 @@ test("applyStructuredHandoffContract degrades missing structured handoffs by rol
   assert.ok(run.warnings.some((warning) => /legacy ## Handoff text/.test(warning)));
 });
 
+test("mutation ledger records real write responsibility, not planner file plans", () => {
+  assert.equal(shouldRecordMutationLedgerEntry({
+    id: "step-1",
+    agent: "planner",
+    task: "Plan files to edit.",
+    status: "complete",
+    metrics: stepMetrics({ filesTouched: [] }),
+  }), false);
+
+  assert.equal(shouldRecordMutationLedgerEntry({
+    id: "step-2",
+    agent: "planner",
+    task: "Plan files to edit.",
+    status: "complete",
+    metrics: stepMetrics({ filesTouched: ["src/planned.ts"] }),
+  }), true);
+
+  assert.equal(shouldRecordMutationLedgerEntry({
+    id: "step-3",
+    agent: "worker",
+    task: "Implement planned files.",
+    status: "complete",
+    metrics: stepMetrics({ filesTouched: [] }),
+  }), true);
+});
+
 test("buildSdkPrompt requires evidence-grade handling for transient and negative claims", () => {
   const scout = readOnlyAgent("scout", "recon");
   const planner = readOnlyAgent("planner", "planning");
   const scoutPrompt = buildSdkPrompt(scout, "Analyze project tests and Effect usage.", tempDir("pi-chalin-prompt-evidence-"), undefined, 12, "deep");
   const plannerPrompt = buildSdkPrompt(planner, "Synthesize prior handoff.", tempDir("pi-chalin-prompt-synthesis-"), "scout: claims no Schedule is used.", 12, "deep", {
-    priorFilesRead: ["src/webfetch.ts"],
+    priorFilesRead: ["src/webfetch/webfetch.ts"],
   });
 
   assert.match(scoutPrompt, /Dry-runs, inventory commands, grep counts, and partial logs are not live verification/i);
@@ -339,6 +737,50 @@ test("buildSdkPrompt carries structured claim audit context without relying on w
   assert.match(prompt, /negative-claim/i);
 });
 
+test("workspace hygiene parser flags dirty generated files not declared in changedFiles", () => {
+  const dirty = workspaceDirtyPathsFromStatus([
+    " M src/auth/keycloak.ts",
+    "?? .output/public/index.html",
+    "?? package-lock.json",
+    "?? .pi-chalin/runs/run.json",
+    "R  old/name.ts -> src/new-name.ts",
+  ].join("\n"));
+
+  assert.deepEqual(dirty, [
+    "src/auth/keycloak.ts",
+    ".output/public/index.html",
+    "package-lock.json",
+    ".pi-chalin/runs/run.json",
+    "src/new-name.ts",
+  ]);
+  assert.deepEqual(
+    workspaceHygieneProblemsForDirtyPaths(dirty, ["src/auth/keycloak.ts", "src/new-name.ts"]),
+    [".output/public/index.html", "package-lock.json"],
+  );
+});
+
+test("workspace hygiene cleans only undeclared binary outputs that were not edited directly", () => {
+  const cwd = tempDir("pi-chalin-hygiene-clean-");
+  fs.mkdirSync(path.join(cwd, "src"), { recursive: true });
+  fs.writeFileSync(path.join(cwd, "artifact"), Buffer.from([0xca, 0xfe, 0x00, 0x00]));
+  fs.writeFileSync(path.join(cwd, "src", "new.ts"), "export const value = 1;\n");
+  fs.writeFileSync(path.join(cwd, "touched-binary"), Buffer.from([0xca, 0xfe, 0x00, 0x01]));
+
+  const dirty = workspaceDirtyEntriesFromStatus([
+    "?? artifact",
+    "?? src/new.ts",
+    "?? touched-binary",
+  ].join("\n"));
+
+  assert.deepEqual(
+    cleanTransientGeneratedWorkspaceOutputs(cwd, dirty, ["touched-binary"]),
+    ["artifact"],
+  );
+  assert.equal(fs.existsSync(path.join(cwd, "artifact")), false);
+  assert.equal(fs.existsSync(path.join(cwd, "src", "new.ts")), true);
+  assert.equal(fs.existsSync(path.join(cwd, "touched-binary")), true);
+});
+
 test("reviewerHandoffNeedsRepair detects blocking implementation review gaps", () => {
   const verdictOutput = (verdict: unknown) => parseAgentOutput("reviewer", [
     "## Reviewer Verdict",
@@ -348,7 +790,15 @@ test("reviewerHandoffNeedsRepair detects blocking implementation review gaps", (
   ].join("\n"));
   const failing = verdictOutput({ verdict: "fail", blockingFindings: ["Implementation misses adjacent-token requirement."], missingCoverage: [], evidence: ["src/parser.c"], requiredRepair: "Patch parser." });
   const gap = verdictOutput({ verdict: "gap", blockingFindings: [], missingCoverage: ["Permanent tests omit EOF comments."], evidence: ["tests/test_parser.c"], requiredRepair: "Add test." });
-  const passing = verdictOutput({ verdict: "pass", blockingFindings: [], missingCoverage: [], evidence: ["src/parser.c", "make test"] });
+  const passing = verdictOutput({
+    verdict: "pass",
+    blockingFindings: [],
+    missingCoverage: [],
+    evidence: [
+      { kind: "reviewed-content", paths: ["src/parser.c"], summary: "Reviewed parser implementation." },
+      { kind: "verification", command: "make test", status: "pass", result: "Exited 0." },
+    ],
+  });
   const legacyProse = parseAgentOutput("reviewer", "## Handoff\nVerdict: FAIL — legacy prose is not a structured contract.");
 
   assert.equal(reviewerHandoffNeedsRepair({ agent: "reviewer", status: "complete", output: failing }), true);
@@ -359,12 +809,28 @@ test("reviewerHandoffNeedsRepair detects blocking implementation review gaps", (
   assert.equal(reviewerHandoffNeedsRepair({ agent: "worker", status: "complete", output: failing }), false);
 });
 
+test("reviewerHandoffNeedsRepair does not treat residual risks as repair blockers", () => {
+  const passingWithResidualRisk = reviewerOutput("pass", {
+    residualRisks: ["Optional external validation was unavailable."],
+  });
+  const contradictoryPassWithMissingCoverage = reviewerOutput("pass", {
+    evidence: ["reviewed src/parser.c implementation changes", "make test exited 0"],
+    missingCoverage: ["Required contract coverage is still absent."],
+  });
+
+  assert.equal(reviewerHandoffNeedsRepair({ agent: "reviewer", status: "complete", output: passingWithResidualRisk }, { expectsReviewedContent: true, expectsVerify: true }), false);
+  assert.equal(reviewerHandoffNeedsRepair({ agent: "reviewer", status: "complete", output: contradictoryPassWithMissingCoverage }, { expectsReviewedContent: true, expectsVerify: true }), true);
+});
+
 test("reviewerHandoffNeedsRepair requires real verification evidence when verify is expected", () => {
   const weakPass = reviewerOutput("pass", {
     evidence: ["src/parser.c", "worker said tests pass"],
   });
   const realPass = reviewerOutput("pass", {
-    evidence: ["src/parser.c", "make test exited 0"],
+    evidence: [
+      { kind: "reviewed-content", paths: ["src/parser.c"], summary: "Reviewed parser implementation." },
+      { kind: "verification", command: "make test", status: "pass", result: "Exited 0." },
+    ],
   });
 
   assert.equal(reviewerHandoffNeedsRepair({ agent: "reviewer", status: "complete", output: weakPass }, { expectsVerify: true }), true);
@@ -372,7 +838,7 @@ test("reviewerHandoffNeedsRepair requires real verification evidence when verify
   assert.equal(reviewerHandoffNeedsRepair({ agent: "reviewer", status: "complete", output: realPass }, { expectsVerify: true }), false);
 });
 
-test("reviewerHandoffNeedsRepair requires reviewed file evidence for implementation pass verdicts", () => {
+test("reviewerHandoffNeedsRepair requires structured reviewed file evidence for implementation pass verdicts", () => {
   const commandOnlyPass = reviewerOutput("pass", {
     evidence: ["make test exited 0"],
   });
@@ -388,13 +854,38 @@ test("reviewerHandoffNeedsRepair requires reviewed file evidence for implementat
   const reviewedWorkerFilePass = reviewerOutput("pass", {
     evidence: ["reviewed src/worker.ts implementation changes", "make test exited 0"],
   });
+  const structuredPass = reviewerOutput("pass", {
+    evidence: [
+      { kind: "reviewed-content", paths: ["src/worker.ts"], summary: "Reviewed worker implementation." },
+      { kind: "verification", command: "make test", status: "pass", result: "Exited 0." },
+    ],
+  });
 
   assert.equal(reviewerHandoffNeedsRepair({ agent: "reviewer", status: "complete", output: commandOnlyPass }, { expectsReviewedContent: true }), true);
   assert.match(commandOnlyPass.warnings.join("\n"), /reviewed files or content/i);
   assert.equal(reviewerHandoffNeedsRepair({ agent: "reviewer", status: "complete", output: commandWithPathPass }, { expectsReviewedContent: true }), true);
   assert.equal(reviewerHandoffNeedsRepair({ agent: "reviewer", status: "complete", output: reportedPathPass }, { expectsReviewedContent: true }), true);
-  assert.equal(reviewerHandoffNeedsRepair({ agent: "reviewer", status: "complete", output: reviewedFilePass }, { expectsReviewedContent: true, expectsVerify: true }), false);
-  assert.equal(reviewerHandoffNeedsRepair({ agent: "reviewer", status: "complete", output: reviewedWorkerFilePass }, { expectsReviewedContent: true, expectsVerify: true }), false);
+  assert.equal(reviewerHandoffNeedsRepair({ agent: "reviewer", status: "complete", output: reviewedFilePass }, { expectsReviewedContent: true, expectsVerify: true }), true);
+  assert.equal(reviewerHandoffNeedsRepair({ agent: "reviewer", status: "complete", output: reviewedWorkerFilePass }, { expectsReviewedContent: true, expectsVerify: true }), true);
+  assert.equal(reviewerHandoffNeedsRepair({ agent: "reviewer", status: "complete", output: structuredPass }, { expectsReviewedContent: true, expectsVerify: true }), false);
+});
+
+test("reviewerHandoffNeedsRepair accepts structured object evidence with reviewed files and verification", () => {
+  const output = parseAgentOutput("reviewer", [
+    "## Reviewer Verdict",
+    JSON.stringify({
+      verdict: "pass",
+      blockingFindings: [],
+      missingCoverage: [],
+      evidence: [
+        { kind: "reviewed-content", paths: ["internal/auth/refresh.go", "src/auth/keycloak.ts"], summary: "Reviewed changed auth implementations." },
+        { kind: "verification", command: "go test ./internal/auth/... && bun test", status: "pass", result: "Both commands exited 0." },
+      ],
+      residualRisks: ["Optional integration coverage can be expanded later."],
+    }),
+  ].join("\n"));
+
+  assert.equal(reviewerHandoffNeedsRepair({ agent: "reviewer", status: "complete", output }, { expectsReviewedContent: true, expectsVerify: true }), false);
 });
 
 test("buildConflictResolverTask creates a bounded surgical conflict task", () => {
@@ -409,6 +900,106 @@ test("buildConflictResolverTask creates a bounded surgical conflict task", () =>
   assert.match(task, /surgical/i);
   assert.match(task, /isolated writer change/);
   assert.match(task, /precise evidence and diffs/i);
+});
+
+test("applyConflictResolverRepair recovers a failed unit only with resolver mutation and verification evidence", () => {
+  const route: RouteDecision = {
+    kind: "multi-agent-dag",
+    agents: ["worker", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "parallel implementation",
+    plan: {
+      kind: "dag",
+      stages: [
+        { id: "work", tasks: [{ agent: "worker", task: "Implement unit." }] },
+        { id: "review", tasks: [{ agent: "reviewer", task: "Review unit." }] },
+      ],
+    },
+  };
+  const run = createRunState(route, tempDir("pi-chalin-conflict-repair-"));
+  const failedStep = run.steps[0]!;
+  failedStep.status = "failed";
+  failedStep.error = "Worktree merge conflict: patch would not apply";
+  failedStep.output = parseAgentOutput("worker", [
+    "## Agent Handoff",
+    JSON.stringify({
+      summary: "Implemented isolated change.",
+      changedFiles: ["src/auth.ts"],
+      verification: ["bun test test/auth.test.ts exited 0"],
+      risks: [],
+    }),
+  ].join("\n"));
+  const resolverStep = {
+    id: "conflict:step-1",
+    agent: "conflict-resolver",
+    task: "Resolve conflict.",
+    status: "complete",
+    workUnitId: failedStep.workUnitId,
+    output: parseAgentOutput("conflict-resolver", [
+      "## Agent Handoff",
+      JSON.stringify({
+        summary: "Applied the intended change in the primary worktree.",
+        changedFiles: ["src/auth.ts"],
+        verification: ["bun test test/auth.test.ts exited 0"],
+        risks: [],
+      }),
+    ].join("\n")),
+  } satisfies RunStepState;
+  run.steps.push(resolverStep);
+
+  const repaired = applyConflictResolverRepair(run, failedStep, resolverStep);
+
+  assert.equal(repaired, true);
+  assert.equal(failedStep.status, "complete");
+  assert.equal(failedStep.error, undefined);
+  assert.equal(failedStep.repairCycle, 1);
+  assert.match(failedStep.output?.warnings.join("\n") ?? "", /Recovered by conflict-resolver\/conflict:step-1/);
+  assert.equal(run.workUnits?.find((unit) => unit.id === failedStep.workUnitId)?.status, "complete");
+  assert.equal(run.recoveryState?.failedStepId, undefined);
+  assert.equal(run.recoveryState?.resumeKind, "none");
+});
+
+test("applyConflictResolverRepair refuses resolver handoffs without concrete mutation evidence", () => {
+  const route: RouteDecision = {
+    kind: "multi-agent-dag",
+    agents: ["worker"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "parallel implementation",
+    plan: { kind: "dag", stages: [{ id: "work", tasks: [{ agent: "worker", task: "Implement unit." }] }] },
+  };
+  const run = createRunState(route, tempDir("pi-chalin-conflict-no-evidence-"));
+  const failedStep = run.steps[0]!;
+  failedStep.status = "failed";
+  failedStep.error = "Worktree merge conflict: patch would not apply";
+  const resolverStep = {
+    id: "conflict:step-1",
+    agent: "conflict-resolver",
+    task: "Resolve conflict.",
+    status: "complete",
+    output: parseAgentOutput("conflict-resolver", [
+      "## Agent Handoff",
+      JSON.stringify({
+        summary: "Explained the conflict.",
+        changedFiles: [],
+        verification: [],
+        risks: ["Needs a human decision."],
+      }),
+    ].join("\n")),
+  } satisfies RunStepState;
+
+  const repaired = applyConflictResolverRepair(run, failedStep, resolverStep);
+
+  assert.equal(repaired, false);
+  assert.equal(failedStep.status, "failed");
+  assert.equal(failedStep.error, "Worktree merge conflict: patch would not apply");
 });
 
 test("MockWorkerRunner runs chain plans in order", async () => {
@@ -426,6 +1017,32 @@ test("MockWorkerRunner runs chain plans in order", async () => {
   assert.equal(run.status, "complete");
   assert.deepEqual(run.steps.map((step) => step.status), ["complete", "complete"]);
   assert.match(run.steps[1]?.output?.raw ?? "", /Previous handoff/);
+});
+
+test("MockWorkerRunner stops sequential routes after a failed writer step", async () => {
+  const route: RouteDecision = {
+    kind: "multi-agent-sequential",
+    agents: ["writer", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "implementation route",
+    plan: { kind: "sequential", steps: [{ agent: "writer", task: "implement" }, { agent: "reviewer", task: "review" }] },
+  };
+  const agents = new Map<string, AgentDefinition>([
+    ["writer", agent("writer", ["edit-files"])],
+    ["reviewer", { ...readOnlyAgent("reviewer", "review"), capabilities: ["inspect-files", "validate"] }],
+  ]);
+
+  const run = await new MockWorkerRunner().run(route, { cwd: tempDir("pi-chalin-sequential-failed-writer-"), agents });
+
+  assert.equal(run.status, "failed");
+  assert.equal(run.steps[0]?.status, "failed");
+  assert.match(run.steps[0]?.error ?? "", /changedFiles/i);
+  assert.equal(run.steps[1]?.status, "skipped");
+  assert.match(run.steps[1]?.skipReason ?? "", /upstream .* failed/i);
 });
 
 test("MockWorkerRunner resumes reviewer FAIL/GAP with bounded repair cycles", async () => {
@@ -460,7 +1077,293 @@ test("MockWorkerRunner resumes reviewer FAIL/GAP with bounded repair cycles", as
   assert.match(resumed.warnings.join("\n"), /queued repair cycle 1\/2/i);
 });
 
-test("MockWorkerRunner repairs implementation reviewer PASS without reviewed content evidence", async () => {
+test("DAG implementation review repair keeps target WorkUnit ownership", async () => {
+  const cwd = tempDir("pi-chalin-dag-review-repair-ownership-");
+  const route: RouteDecision = {
+    kind: "multi-agent-dag",
+    agents: ["worker", "reviewer", "context-builder"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "implementation route",
+    plan: {
+      kind: "dag",
+      stages: [
+        { id: "workers", tasks: [{ id: "feature", agent: "worker", task: "Implement bounded feature." }] },
+        { id: "reviewers", tasks: [{ id: "feature-review", agent: "reviewer", task: "Review bounded feature." }] },
+        { id: "aggregate", tasks: [{ id: "aggregate", agent: "context-builder", task: "Aggregate outcomes." }] },
+      ],
+    },
+  };
+  const run = createRunState(route, cwd, "Implement bounded feature and verify it.");
+  const workerStep = run.steps[0]!;
+  const reviewerStep = run.steps[1]!;
+  const targetUnitId = workerStep.workUnitId!;
+  reviewerStep.workUnitId = targetUnitId;
+  const targetUnit = run.workUnits?.find((unit) => unit.id === targetUnitId);
+  assert.ok(targetUnit);
+  targetUnit!.reviewerStepId = reviewerStep.id;
+  run.status = "paused";
+  workerStep.status = "complete";
+  workerStep.output = parseAgentOutput("worker", [
+    "## Agent Handoff",
+    JSON.stringify({ summary: "Implemented bounded feature.", changedFiles: ["src/parser.c"], verification: ["make test exited 0"], evidenceClaims: [], risks: [], nextActions: [] }),
+  ].join("\n"));
+  reviewerStep.status = "complete";
+  reviewerStep.output = reviewerOutput("gap", {
+    missingCoverage: ["Permanent coverage misses a required edge."],
+    requiredRepair: "Add focused regression coverage.",
+  });
+
+  const resumed = await new MockWorkerRunner().resume(run, { cwd, agents: new Map() });
+  const repairWorker = resumed.steps.find((step) => step.id === "review-repair-1-worker:step-1");
+  const repairReviewer = resumed.steps.find((step) => step.id === "review-repair-1-reviewer:step-1");
+
+  assert.equal(resumed.status, "complete");
+  assert.equal(repairWorker?.stageId, "review-repair-1-worker");
+  assert.equal(repairReviewer?.stageId, "review-repair-1-reviewer");
+  assert.equal(repairWorker?.workUnitId, targetUnitId);
+  assert.equal(repairReviewer?.workUnitId, targetUnitId);
+  assert.deepEqual(repairWorker?.dependencies, [reviewerStep.id]);
+  assert.deepEqual(repairReviewer?.dependencies, [repairWorker?.id]);
+  assert.equal(resumed.mutationLedger?.find((entry) => entry.stepId === repairWorker?.id)?.unitId, targetUnitId);
+  assert.equal(resumed.verificationLedger?.find((entry) => entry.stepId === repairReviewer?.id)?.unitId, targetUnitId);
+});
+
+test("DAG implementation repair maps reviewer gaps to the matching parallel worker unit", async () => {
+  const cwd = tempDir("pi-chalin-dag-review-repair-parallel-unit-");
+  const route: RouteDecision = {
+    kind: "multi-agent-dag",
+    agents: ["worker", "worker", "reviewer", "reviewer", "context-builder"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "parallel implementation route",
+    plan: {
+      kind: "dag",
+      stages: [
+        {
+          id: "workers",
+          tasks: [
+            { id: "unit-a", agent: "worker", task: "Implement unit A." },
+            { id: "unit-b", agent: "worker", task: "Implement unit B." },
+          ],
+        },
+        {
+          id: "reviewers",
+          tasks: [
+            { id: "unit-a-review", agent: "reviewer", task: "Review unit A." },
+            { id: "unit-b-review", agent: "reviewer", task: "Review unit B." },
+          ],
+        },
+        { id: "aggregate", tasks: [{ id: "aggregate", agent: "context-builder", task: "Aggregate outcomes." }] },
+      ],
+    },
+  };
+  const run = createRunState(route, cwd, "Implement two independent units and verify them.");
+  const [workerA, workerB, reviewerA, reviewerB] = run.steps;
+  assert.ok(workerA?.workUnitId);
+  assert.ok(workerB?.workUnitId);
+  reviewerA!.workUnitId = workerA!.workUnitId;
+  reviewerB!.workUnitId = workerB!.workUnitId;
+  run.status = "paused";
+  workerA!.status = "complete";
+  workerA!.output = parseAgentOutput("worker", `## Agent Handoff\n${JSON.stringify({ summary: "Implemented A.", changedFiles: ["src/a.ts"], verification: ["test A pass"], evidenceClaims: [], risks: [], nextActions: [] })}`);
+  workerB!.status = "complete";
+  workerB!.output = parseAgentOutput("worker", `## Agent Handoff\n${JSON.stringify({ summary: "Implemented B.", changedFiles: ["src/b.ts"], verification: ["test B pass"], evidenceClaims: [], risks: [], nextActions: [] })}`);
+  reviewerA!.status = "complete";
+  reviewerA!.output = reviewerOutput("gap", {
+    missingCoverage: ["Unit A misses an edge case."],
+    requiredRepair: "Repair unit A only.",
+  });
+  reviewerB!.status = "complete";
+  reviewerB!.output = reviewerOutput("pass");
+
+  const resumed = await new MockWorkerRunner().resume(run, { cwd, agents: new Map() });
+  const repairWorker = resumed.steps.find((step) => step.id === "review-repair-1-worker:step-1");
+  const repairReviewer = resumed.steps.find((step) => step.id === "review-repair-1-reviewer:step-1");
+
+  assert.equal(resumed.status, "complete");
+  assert.equal(repairWorker?.workUnitId, workerA!.workUnitId);
+  assert.notEqual(repairWorker?.workUnitId, workerB!.workUnitId);
+  assert.equal(repairReviewer?.workUnitId, workerA!.workUnitId);
+  assert.deepEqual(repairWorker?.dependencies, [reviewerA!.id]);
+});
+
+test("DAG implementation repair maps review-unit gaps by structured repair files", async () => {
+  const cwd = tempDir("pi-chalin-dag-review-repair-file-owner-");
+  const route: RouteDecision = {
+    kind: "multi-agent-dag",
+    agents: ["worker", "worker", "reviewer", "reviewer", "context-builder"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "parallel implementation route with independent review units",
+    plan: {
+      kind: "dag",
+      stages: [
+        {
+          id: "workers",
+          tasks: [
+            { id: "auth", agent: "worker", task: "Implement auth." },
+            { id: "billing", agent: "worker", task: "Implement billing." },
+          ],
+        },
+        {
+          id: "reviewers",
+          tasks: [
+            { id: "auth-review", agent: "reviewer", task: "Review auth." },
+            { id: "billing-review", agent: "reviewer", task: "Review billing." },
+          ],
+        },
+        { id: "aggregate", tasks: [{ id: "aggregate", agent: "context-builder", task: "Aggregate outcomes." }] },
+      ],
+    },
+  };
+  const run = createRunState(route, cwd, "Implement two independent units and verify them.");
+  const [workerA, workerB, reviewerA, reviewerB] = run.steps;
+  assert.ok(workerA?.workUnitId);
+  assert.ok(workerB?.workUnitId);
+  assert.notEqual(reviewerA?.workUnitId, workerA?.workUnitId);
+  run.status = "paused";
+  workerA!.status = "complete";
+  workerA!.output = parseAgentOutput("worker", `## Agent Handoff\n${JSON.stringify({ summary: "Implemented auth.", changedFiles: ["src/auth.ts"], verification: ["auth tests pass"], evidenceClaims: [], risks: [], nextActions: [] })}`);
+  workerB!.status = "complete";
+  workerB!.output = parseAgentOutput("worker", `## Agent Handoff\n${JSON.stringify({ summary: "Implemented billing.", changedFiles: ["src/billing.ts"], verification: ["billing tests pass"], evidenceClaims: [], risks: [], nextActions: [] })}`);
+  reviewerA!.status = "complete";
+  reviewerA!.output = reviewerOutput("gap", {
+    blockingFindings: ["src/auth.ts: Auth edge case is missing."],
+    missingCoverage: ["Auth edge case lacks coverage."],
+    requiredRepair: "Repair auth behavior.",
+  });
+  reviewerB!.status = "complete";
+  reviewerB!.output = reviewerOutput("pass");
+
+  const resumed = await new MockWorkerRunner().resume(run, { cwd, agents: new Map() });
+  const repairWorker = resumed.steps.find((step) => step.id === "review-repair-1-worker:step-1");
+  const repairReviewer = resumed.steps.find((step) => step.id === "review-repair-1-reviewer:step-1");
+
+  assert.equal(resumed.status, "complete");
+  assert.equal(repairWorker?.workUnitId, workerA!.workUnitId);
+  assert.notEqual(repairWorker?.workUnitId, workerB!.workUnitId);
+  assert.equal(repairReviewer?.workUnitId, workerA!.workUnitId);
+  assert.deepEqual(repairWorker?.dependencies, [reviewerA!.id]);
+});
+
+test("DAG implementation repair creates a bounded repair WorkUnit for cross-unit reviewer findings", async () => {
+  const cwd = tempDir("pi-chalin-dag-cross-unit-repair-");
+  const route: RouteDecision = {
+    kind: "multi-agent-dag",
+    agents: ["worker", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "bounded implementation route",
+    plan: {
+      kind: "dag",
+      stages: [
+        { id: "implement", tasks: [{ id: "http", agent: "worker", task: "Implement HTTP surface." }] },
+        { id: "review", tasks: [{ id: "http-review", agent: "reviewer", task: "Review HTTP surface." }] },
+      ],
+    },
+  };
+  const run = createRunState(route, cwd, "Implement a bounded feature and tests.");
+  const worker = run.steps[0]!;
+  const reviewer = run.steps[1]!;
+  const baseUnit = run.workUnits?.find((unit) => unit.id === worker.workUnitId);
+  assert.ok(baseUnit);
+  baseUnit!.files = ["src/handler.ts"];
+  reviewer.workUnitId = baseUnit!.id;
+  run.status = "paused";
+  worker.status = "complete";
+  worker.output = parseAgentOutput("worker", `## Agent Handoff\n${JSON.stringify({ summary: "Implemented HTTP surface.", changedFiles: ["src/handler.ts"], verification: ["test pass"], evidenceClaims: [], risks: [], nextActions: [] })}`);
+  reviewer.status = "complete";
+  reviewer.output = parseAgentOutput("reviewer", [
+    "## Agent Handoff",
+    JSON.stringify({ summary: "Review found cross-boundary gaps.", changedFiles: ["src/handler.ts"], verification: ["test fail"], evidenceClaims: [], risks: [], nextActions: ["Repair blocking findings."] }),
+    "## Reviewer Verdict",
+    JSON.stringify({
+      verdict: "gap",
+      blockingFindings: [{ file: "src/core.ts", summary: "Core ownership check is missing." }],
+      missingCoverage: [{ file: "tests/handler.test.ts", summary: "Missing regression coverage." }],
+      evidence: [{ kind: "reviewed-content", paths: ["src/handler.ts", "src/core.ts"], summary: "Reviewed implementation surfaces." }],
+      requiredRepair: "Repair the cross-boundary security gap and add regression coverage.",
+    }),
+  ].join("\n"));
+
+  const resumed = await new MockWorkerRunner().resume(run, { cwd, agents: new Map() });
+  const repairUnit = resumed.workUnits?.find((unit) => unit.kind === "repair");
+  const repairWorker = resumed.steps.find((step) => step.id === "review-repair-1-worker:step-1");
+  const repairReviewer = resumed.steps.find((step) => step.id === "review-repair-1-reviewer:step-1");
+
+  assert.equal(resumed.status, "complete");
+  assert.ok(repairUnit);
+  assert.notEqual(repairUnit!.id, baseUnit!.id);
+  assert.deepEqual(repairUnit!.files, ["src/handler.ts", "src/core.ts", "tests/handler.test.ts"]);
+  assert.equal(repairWorker?.workUnitId, repairUnit!.id);
+  assert.equal(repairReviewer?.workUnitId, repairUnit!.id);
+  assert.match(repairWorker?.task ?? "", /Repair WorkUnit scope/i);
+  assert.match(resumed.warnings.join("\n"), /Created cross-WorkUnit repair scope/i);
+});
+
+test("DAG worker WorkUnit scope gaps queue bounded repair instead of finalizing as residual risk", async () => {
+  const cwd = tempDir("pi-chalin-dag-worker-scope-gap-repair-");
+  const route: RouteDecision = {
+    kind: "multi-agent-dag",
+    agents: ["worker"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "bounded implementation route",
+    plan: {
+      kind: "dag",
+      stages: [
+        { id: "tests", tasks: [{ id: "auth-tests", agent: "worker", task: "Write bounded tests." }] },
+      ],
+    },
+  };
+  const run = createRunState(route, cwd, "Implement behavior and tests.");
+  const worker = run.steps[0]!;
+  const baseUnit = run.workUnits?.find((unit) => unit.id === worker.workUnitId);
+  assert.ok(baseUnit);
+  baseUnit!.files = ["tests/auth.test.ts"];
+  run.status = "paused";
+  worker.status = "complete";
+  worker.metrics = stepMetrics({ policyViolations: ["work_unit_scope_gap:src/auth.ts"] });
+  worker.output = parseAgentOutput("worker", `## Agent Handoff\n${JSON.stringify({
+    summary: "Tests exposed an implementation gap that needs a source repair.",
+    changedFiles: ["tests/auth.test.ts"],
+    verification: ["test command identifies source behavior gap"],
+    evidenceClaims: [],
+    risks: ["Source behavior remains incomplete until the scope gap is repaired."],
+    nextActions: ["Patch src/auth.ts and rerun the focused tests."],
+  })}`);
+
+  const resumed = await new MockWorkerRunner().resume(run, { cwd, agents: new Map() });
+  const repairUnit = resumed.workUnits?.find((unit) => unit.kind === "repair");
+  const repairWorker = resumed.steps.find((step) => step.id === "review-repair-1-worker:step-1");
+  const repairReviewer = resumed.steps.find((step) => step.id === "review-repair-1-reviewer:step-1");
+
+  assert.equal(resumed.status, "complete");
+  assert.ok(repairUnit);
+  assert.deepEqual(repairUnit!.files, ["tests/auth.test.ts", "src/auth.ts"]);
+  assert.equal(repairWorker?.workUnitId, repairUnit!.id);
+  assert.equal(repairReviewer?.workUnitId, repairUnit!.id);
+  assert.match(repairWorker?.task ?? "", /Repair the worker-reported WorkUnit scope gap/i);
+  assert.match(resumed.warnings.join("\n"), /Worker reported WorkUnit scope gap/);
+});
+
+test("MockWorkerRunner re-runs reviewer when PASS lacks contractual evidence", async () => {
   const cwd = tempDir("pi-chalin-review-pass-content-evidence-");
   const run = createRunState({
     kind: "multi-agent-sequential",
@@ -484,9 +1387,231 @@ test("MockWorkerRunner repairs implementation reviewer PASS without reviewed con
   const resumed = await new MockWorkerRunner().resume(run, { cwd, agents: new Map() });
 
   assert.equal(resumed.status, "complete");
-  assert.deepEqual(resumed.steps.map((step) => step.agent), ["worker", "reviewer", "worker", "reviewer"]);
+  assert.deepEqual(resumed.steps.map((step) => step.agent), ["worker", "reviewer", "reviewer"]);
   assert.match(resumed.steps[1]?.output?.warnings.join("\n") ?? "", /reviewed files or content/i);
-  assert.match(resumed.warnings.join("\n"), /Implementation reviewer reported a blocking gap; queued repair cycle 1\/2/i);
+  assert.match(resumed.steps[2]?.task ?? "", /Re-audit the previous implementation review evidence/i);
+  assert.match(resumed.steps[2]?.task ?? "", /Known prior verification evidence from run ledgers/i);
+  assert.match(resumed.steps[2]?.task ?? "", /make test exited 0/i);
+  assert.match(resumed.warnings.join("\n"), /reviewer pass lacked required evidence; queued reviewer evidence repair cycle 1\/2/i);
+});
+
+test("MockWorkerRunner re-runs reviewer-only routes when structured verdict is missing", async () => {
+  const cwd = tempDir("pi-chalin-review-only-missing-verdict-");
+  const run = createRunState({
+    kind: "multi-agent-sequential",
+    agents: ["scout", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "verify"],
+    reason: "read-only review route",
+    plan: { kind: "sequential", steps: [{ agent: "scout", task: "inspect config" }, { agent: "reviewer", task: "review config" }] },
+  }, cwd, "Review test commands without mutating files.");
+  run.status = "paused";
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.output = parseAgentOutput("scout", `## Agent Handoff\n${JSON.stringify({ summary: "Found configs.", changedFiles: [], verification: ["read package.json"], evidenceClaims: [], risks: [], nextActions: [] })}`);
+  run.steps[1]!.status = "complete";
+  run.steps[1]!.output = parseAgentOutput("reviewer", `## Agent Handoff\n${JSON.stringify({ summary: "Review found command gaps.", changedFiles: [], verification: ["read package.json"], evidenceClaims: [], risks: ["Missing lockfile."], nextActions: ["Report gap."] })}`);
+
+  const resumed = await new MockWorkerRunner().resume(run, { cwd, agents: new Map() });
+  const repairReviewer = resumed.steps.find((step) => step.id === "review-repair-1-reviewer");
+
+  assert.equal(resumed.status, "complete");
+  assert.deepEqual(resumed.steps.map((step) => step.agent), ["scout", "reviewer", "reviewer"]);
+  assert.ok(repairReviewer);
+  assert.equal(repairReviewer?.workUnitId, run.steps[1]!.workUnitId);
+  assert.match(repairReviewer?.task ?? "", /Re-audit the previous implementation review evidence/i);
+  assert.match(resumed.warnings.join("\n"), /Reviewer omitted the structured verdict contract; queued reviewer evidence repair cycle 1\/2/i);
+});
+
+test("MockWorkerRunner classifies exhausted reviewer evidence repair as missing evidence", async () => {
+  const cwd = tempDir("pi-chalin-review-evidence-max-");
+  const run = createRunState({
+    kind: "multi-agent-sequential",
+    agents: ["worker", "reviewer", "worker", "reviewer", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "implementation route",
+    plan: {
+      kind: "sequential",
+      steps: [
+        { agent: "worker", task: "implement" },
+        { agent: "reviewer", task: "review" },
+        { agent: "worker", task: "repair once" },
+        { agent: "reviewer", task: "review repair once" },
+        { agent: "reviewer", task: "re-audit review evidence" },
+      ],
+    },
+  }, cwd, "Implement parser behavior and verify it.");
+  const ids = ["step-1", "step-2", "review-repair-1-worker", "review-repair-1-reviewer", "review-repair-2-reviewer"];
+  run.status = "paused";
+  run.steps.forEach((step, index) => {
+    step.id = ids[index]!;
+    step.status = "complete";
+  });
+  run.steps[0]!.output = parseAgentOutput("worker", "## Handoff\nChanged: src/parser.c. Verification: `make test` exits 0.");
+  run.steps[1]!.output = reviewerOutput("gap", {
+    missingCoverage: ["Coverage is insufficient."],
+    requiredRepair: "Add coverage.",
+  });
+  run.steps[2]!.output = parseAgentOutput("worker", "## Handoff\nChanged: src/parser.c, tests/parser.test.c. Verification: `make test` exits 0.");
+  run.steps[3]!.output = reviewerOutput("pass", {
+    evidence: ["src/parser.c reviewed", "tests/parser.test.c reviewed"],
+  });
+  run.steps[4]!.output = reviewerOutput("pass", {
+    evidence: ["src/parser.c reviewed", "tests/parser.test.c reviewed"],
+  });
+
+  const resumed = await new MockWorkerRunner().resume(run, { cwd, agents: new Map() });
+  const finalStep = resumed.steps.at(-1);
+  const finalEntry = resumed.verificationLedger?.find((entry) => entry.stepId === "review-repair-2-reviewer");
+
+  assert.equal(resumed.status, "failed");
+  assert.equal(finalStep?.status, "failed");
+  assert.equal(finalStep?.reviewGate, "missing-evidence");
+  assert.equal(finalEntry?.status, "gap");
+  assert.match(finalStep?.error ?? "", /missing required review evidence/i);
+  assert.doesNotMatch(finalStep?.error ?? "", /blocking FAIL\/GAP/i);
+});
+
+test("MockWorkerRunner records reviewer missing verdict as verification gap", async () => {
+  const cwd = tempDir("pi-chalin-review-missing-verdict-ledger-");
+  const run = createRunState({
+    kind: "multi-agent-sequential",
+    agents: ["worker", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "implementation route",
+    plan: { kind: "sequential", steps: [{ agent: "worker", task: "implement" }, { agent: "reviewer", task: "review" }] },
+  }, cwd, "Implement parser behavior and verify it.");
+  run.status = "paused";
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.output = parseAgentOutput("worker", [
+    "## Agent Handoff",
+    JSON.stringify({ summary: "Implemented parser.", changedFiles: ["src/parser.c"], verification: ["make test exited 0"], evidenceClaims: [], risks: [], nextActions: [] }),
+  ].join("\n"));
+  run.steps[1]!.status = "complete";
+  run.steps[1]!.output = parseAgentOutput("reviewer", [
+    "## Agent Handoff",
+    JSON.stringify({
+      summary: "Review found a missing edge case despite green verification.",
+      changedFiles: ["src/parser.c"],
+      verification: ["make test exited 0"],
+      evidenceClaims: [],
+      risks: ["Missing EOF coverage."],
+      nextActions: ["Add EOF coverage."],
+    }),
+  ].join("\n"));
+
+  const resumed = await new MockWorkerRunner().resume(run, { cwd, agents: new Map() });
+  const reviewEntry = resumed.verificationLedger?.find((entry) => entry.stepId === "step-2");
+  const repairWorker = resumed.steps.find((step) => step.id === "review-repair-1-worker");
+  const repairReviewer = resumed.steps.find((step) => step.id === "review-repair-1-reviewer");
+
+  assert.equal(reviewEntry?.status, "gap");
+  assert.equal(resumed.steps[1]?.reviewGate, "gap");
+  assert.equal(repairWorker, undefined);
+  assert.equal(repairReviewer?.agent, "reviewer");
+  assert.match(resumed.warnings.join("\n"), /omitted the structured verdict contract; queued reviewer evidence repair cycle 1\/2/i);
+});
+
+test("MockWorkerRunner ignores out-of-scope gaps from reviewer evidence repair", async () => {
+  const cwd = tempDir("pi-chalin-review-evidence-out-of-scope-");
+  const run = createRunState({
+    kind: "multi-agent-sequential",
+    agents: ["worker", "reviewer", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "implementation route",
+    plan: { kind: "sequential", steps: [{ agent: "worker", task: "implement W1" }, { agent: "reviewer", task: "review W1" }, { agent: "reviewer", task: "repair W1 review evidence" }] },
+  }, cwd, "Implement independent work units.");
+  run.status = "paused";
+  run.workUnits = [{
+    id: "unit-w1",
+    title: "Go auth",
+    kind: "implementation",
+    status: "complete",
+    scope: ["Harden RefreshURL."],
+    files: ["internal/auth/refresh.go", "internal/auth/refresh_test.go"],
+    dependencies: [],
+    expectedEffects: ["read", "write", "verify"],
+    acceptanceCriteria: ["go test ./internal/auth/... passes"],
+    createdFrom: "fanout",
+  }];
+  const ids = ["step-1", "step-2", "review-repair-1-reviewer"];
+  run.steps.forEach((step, index) => {
+    step.id = ids[index]!;
+    step.workUnitId = "unit-w1";
+    step.status = "complete";
+  });
+  run.steps[0]!.output = parseAgentOutput("worker", [
+    "## Agent Handoff",
+    JSON.stringify({ summary: "Implemented W1.", changedFiles: ["internal/auth/refresh.go", "internal/auth/refresh_test.go"], verification: ["go test ./internal/auth/... passed"], evidenceClaims: [], risks: [], nextActions: [] }),
+  ].join("\n"));
+  run.steps[1]!.output = parseAgentOutput("reviewer", "## Agent Handoff\nW1 looks good but reviewer omitted structured verdict.");
+  run.steps[2]!.output = reviewerOutput("gap", {
+    missingCoverage: ["cmd/api/main.go has no behavior", "README.md has no documentation"],
+    evidence: [
+      { kind: "verification", command: "go test ./internal/auth/...", status: "pass", result: "PASS" },
+      { kind: "reviewed-content", paths: ["internal/auth/refresh.go", "internal/auth/refresh_test.go"], summary: "W1 implementation reviewed and correct." },
+      { kind: "verification", command: "go test ./cmd/api/...", status: "fail", result: "no test files" },
+      { kind: "reviewed-content", paths: ["cmd/api/main.go", "README.md"], summary: "Unrelated pending units are incomplete." },
+    ],
+  });
+
+  const resumed = await new MockWorkerRunner().resume(run, { cwd, agents: new Map() });
+  const secondRepairWorker = resumed.steps.find((step) => step.id === "review-repair-2-worker");
+  const evidenceRepair = resumed.steps.find((step) => step.id === "review-repair-1-reviewer");
+
+  assert.equal(secondRepairWorker, undefined);
+  assert.equal(evidenceRepair?.output?.reviewerVerdict?.verdict, "pass");
+  assert.deepEqual(evidenceRepair?.output?.reviewerVerdict?.missingCoverage, []);
+  assert.match(resumed.warnings.join("\n"), /out-of-scope gap/i);
+});
+
+test("verification ledger records handoff risks separately from blocking gaps", async () => {
+  const cwd = tempDir("pi-chalin-ledger-risks-");
+  const run = createRunState({
+    kind: "multi-agent-sequential",
+    agents: ["worker"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "implementation route",
+    plan: { kind: "sequential", steps: [{ agent: "worker", task: "implement" }] },
+  }, cwd, "Implement parser behavior and verify it.");
+  run.status = "paused";
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.output = parseAgentOutput("worker", [
+    "## Agent Handoff",
+    JSON.stringify({
+      summary: "Implemented parser behavior.",
+      changedFiles: ["src/parser.c"],
+      verification: ["make test exited 0"],
+      evidenceClaims: [],
+      risks: ["Optional broader integration validation is not available locally."],
+      nextActions: [],
+    }),
+  ].join("\n"));
+
+  const resumed = await new MockWorkerRunner().resume(run, { cwd, agents: new Map() });
+  const entry = resumed.verificationLedger?.find((candidate) => candidate.stepId === "step-1");
+
+  assert.equal(entry?.status, "pass");
+  assert.deepEqual(entry?.gaps, []);
+  assert.deepEqual(entry?.risks, ["Optional broader integration validation is not available locally."]);
 });
 
 test("MockWorkerRunner repairs implementation routes that changed code without permanent tests", async () => {
@@ -658,6 +1783,60 @@ test("MockWorkerRunner queues reviewer repair stages for DAG implementation rout
     "review-repair-1-worker:step-1",
     "review-repair-1-reviewer:step-1",
   ]);
+  assert.match(resumed.steps[2]?.task ?? "", /check workspace status and clean transient generated outputs/i);
+  assert.match(resumed.steps[2]?.task ?? "", /intentional deliverables listed in changedFiles/i);
+  assert.match(resumed.steps[3]?.task ?? "", /Verify workspace hygiene/i);
+});
+
+test("MockWorkerRunner inserts DAG reviewer repair before downstream fan-in stages", async () => {
+  const cwd = tempDir("pi-chalin-review-repair-dag-order-");
+  const run = createRunState({
+    kind: "multi-agent-dag",
+    agents: ["worker", "reviewer", "context-builder", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    reason: "dag implementation route with downstream synthesis",
+    plan: {
+      kind: "dag",
+      stages: [
+        { id: "implement", tasks: [{ agent: "worker", task: "implement" }] },
+        { id: "unit-review", tasks: [{ agent: "reviewer", task: "review unit" }] },
+        { id: "aggregate", tasks: [{ agent: "context-builder", task: "aggregate units" }] },
+        { id: "final-review", tasks: [{ agent: "reviewer", task: "final review" }] },
+      ],
+    },
+  }, cwd, "Implement parser behavior and tests.");
+  run.status = "paused";
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.output = parseAgentOutput("worker", "## Handoff\nChanged: src/parser.c. Verification: `make test` exits 0.");
+  run.steps[1]!.status = "complete";
+  run.steps[1]!.output = reviewerOutput("gap", {
+    missingCoverage: ["Coverage is insufficient for EOF comments."],
+    requiredRepair: "Add EOF coverage before aggregate/final review.",
+  });
+
+  const resumed = await new MockWorkerRunner().resume(run, { cwd, agents: new Map() });
+
+  assert.equal(resumed.status, "complete");
+  assert.deepEqual(resumed.route.plan?.kind === "dag" ? resumed.route.plan.stages.map((stage) => stage.id) : [], [
+    "implement",
+    "unit-review",
+    "review-repair-1-worker",
+    "review-repair-1-reviewer",
+    "aggregate",
+    "final-review",
+  ]);
+  assert.deepEqual(resumed.steps.map((step) => step.id), [
+    "implement:step-1",
+    "unit-review:step-1",
+    "review-repair-1-worker:step-1",
+    "review-repair-1-reviewer:step-1",
+    "aggregate:step-1",
+    "final-review:step-1",
+  ]);
+  assert.deepEqual(resumed.steps.map((step) => step.status), ["complete", "complete", "complete", "complete", "complete", "complete"]);
 });
 
 test("MockWorkerRunner stops promptly when Pi abort signal is raised", async () => {
@@ -883,6 +2062,732 @@ test("createRunState preserves single-step sequential budget metadata", () => {
   assert.equal(run.steps[0]?.budget, "deep");
 });
 
+test("createRunState records schema v3 work units and intent contract metadata", () => {
+  const route: RouteDecision = {
+    kind: "multi-agent-dag",
+    agents: ["scout"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "structured discovery route",
+    plan: { kind: "dag", stages: [{ id: "discover", tasks: [{ id: "discover", agent: "scout", task: "Map work units from the route contract." }] }] },
+  };
+
+  const run = createRunState(route, tempDir("pi-chalin-work-units-"), "Use the structured route contract.");
+
+  assert.equal(run.schemaVersion, 3);
+  assert.equal(run.intentContract?.workUnitDiscoveryRequested, true);
+  assert.equal(run.intentContract?.decompositionTarget, "work unit");
+  assert.equal(run.intentContract?.explicitFanoutRequest, undefined);
+  assert.deepEqual(run.intentContract?.forbiddenPaths, []);
+  assert.equal(run.workUnits?.length, 1);
+  assert.equal(run.steps[0]?.workUnitId, run.workUnits?.[0]?.id);
+});
+
+test("expandWorkUnitsFromHandoff materializes requested work unit discovery only once", () => {
+  const route: RouteDecision = {
+    kind: "multi-agent-dag",
+    agents: ["scout", "worker", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "structured work unit discovery",
+    plan: {
+      kind: "dag",
+      stages: [{ id: "discover", tasks: [{ agent: "scout", task: "Find independent work units." }] }],
+    },
+  };
+  const run = createRunState(route, tempDir("pi-chalin-fanout-once-"), "Use one worker per unit and reviewer per unit.");
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.output = parseAgentOutput("scout", [
+    "## Agent Handoff",
+    JSON.stringify({
+      summary: "Discovered bounded units for independent execution.",
+      changedFiles: [],
+      verification: [],
+      evidenceClaims: [],
+      risks: [],
+      nextActions: [],
+      workUnits: [
+        {
+          title: "Unit Alpha",
+          scope: ["Alpha ownership boundary"],
+          dependencies: [],
+          acceptanceCriteria: ["Alpha is implemented and verified independently."],
+        },
+        {
+          title: "Unit Beta",
+          scope: ["Beta ownership boundary"],
+          dependencies: [],
+          acceptanceCriteria: ["Beta is implemented and verified independently."],
+        },
+      ],
+    }),
+  ].join("\n"));
+
+  assert.equal(expandWorkUnitsFromHandoff(run, run.steps[0]!), true);
+  const firstStepCount = run.steps.length;
+  const firstFanoutUnitCount = run.workUnits?.filter((unit) => unit.createdFrom === "fanout").length;
+  const aggregateStep = run.steps.find((step) => step.agent === "context-builder" && step.stageId?.includes("aggregate"));
+  assert.ok(aggregateStep);
+  aggregateStep!.status = "complete";
+  aggregateStep!.output = parseAgentOutput("context-builder", [
+    "## Agent Handoff",
+    JSON.stringify({
+      summary: "Aggregate output is not another decomposition request.",
+      changedFiles: [],
+      verification: [],
+      evidenceClaims: [],
+      risks: [],
+      nextActions: [],
+      workUnits: [
+        {
+          title: "Aggregate Unit",
+          scope: ["Aggregate-only responsibility"],
+          dependencies: [],
+          acceptanceCriteria: ["Aggregation is complete."],
+        },
+      ],
+    }),
+  ].join("\n"));
+
+  assert.equal(expandWorkUnitsFromHandoff(run, aggregateStep!), false);
+  assert.equal(run.steps.length, firstStepCount);
+  assert.equal(run.workUnits?.filter((unit) => unit.createdFrom === "fanout").length, firstFanoutUnitCount);
+  assert.equal(run.warnings.filter((warning) => /Expanded fanout\/decomposition/i.test(warning)).length, 1);
+});
+
+test("expandWorkUnitsFromBestHandoff prefers later planning contracts over early scouting contracts in a stage", () => {
+  const route: RouteDecision = {
+    kind: "multi-agent-dag",
+    agents: ["scout", "planner", "worker", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    workUnitStrategy: "discover",
+    reason: "stage has discovery and planning contracts",
+    plan: {
+      kind: "dag",
+      stages: [{ id: "discover", tasks: [{ agent: "scout", task: "Discover rough units." }, { agent: "planner", task: "Refine units." }] }],
+    },
+  };
+  const run = createRunState(route, tempDir("pi-chalin-best-fanout-source-"), "Use bounded decomposition.");
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.output = parseAgentOutput("scout", [
+    "## Agent Handoff",
+    JSON.stringify({
+      summary: "Rough discovery units.",
+      changedFiles: [],
+      verification: [],
+      evidenceClaims: [],
+      risks: [],
+      nextActions: [],
+      workUnits: [
+        { id: "rough-a", title: "Rough A", scope: { files: ["src/rough-a.ts"], purpose: "rough A" }, dependencies: [], acceptanceCriteria: ["rough A"] },
+        { id: "rough-b", title: "Rough B", scope: { files: ["src/rough-b.ts"], purpose: "rough B" }, dependencies: [], acceptanceCriteria: ["rough B"] },
+      ],
+    }),
+  ].join("\n"));
+  run.steps[1]!.status = "complete";
+  run.steps[1]!.output = parseAgentOutput("planner", [
+    "## Agent Handoff",
+    JSON.stringify({
+      summary: "Refined planning units.",
+      changedFiles: [],
+      verification: ["planning contract reviewed"],
+      evidenceClaims: [],
+      risks: [],
+      nextActions: [],
+      workUnits: [
+        { id: "planned-a", title: "Planned A", scope: { files: ["src/planned-a.ts"], purpose: "planned A" }, dependencies: [], acceptanceCriteria: ["planned A"] },
+        { id: "planned-b", title: "Planned B", scope: { files: ["src/planned-b.ts"], purpose: "planned B" }, dependencies: [], acceptanceCriteria: ["planned B"] },
+      ],
+    }),
+  ].join("\n"));
+
+  assert.equal(expandWorkUnitsFromBestHandoff(run, run.steps), true);
+
+  const fanoutTitles = run.workUnits?.filter((unit) => unit.createdFrom === "fanout" && unit.kind === "implementation").map((unit) => unit.title) ?? [];
+  assert.deepEqual(fanoutTitles, ["Planned A", "Planned B"]);
+  assert.match(run.warnings.at(-1) ?? "", /planner\/discover:step-2/);
+});
+
+test("expandWorkUnitsFromBestHandoff defers scout fanout while a planner contract is still pending", () => {
+  const route: RouteDecision = {
+    kind: "multi-agent-dag",
+    agents: ["scout", "planner", "worker", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    workUnitStrategy: "discover",
+    reason: "planner should refine scout units",
+    plan: {
+      kind: "dag",
+      stages: [
+        { id: "recon", tasks: [{ agent: "scout", task: "Discover rough units." }] },
+        { id: "planning", tasks: [{ agent: "planner", task: "Refine units." }] },
+      ],
+    },
+  };
+  const run = createRunState(route, tempDir("pi-chalin-defer-scout-fanout-"), "Use bounded decomposition.");
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.output = parseAgentOutput("scout", [
+    "## Agent Handoff",
+    JSON.stringify({
+      summary: "Rough discovery units.",
+      changedFiles: [],
+      verification: [],
+      evidenceClaims: [],
+      risks: [],
+      nextActions: [],
+      workUnits: [
+        { id: "rough-a", title: "Rough A", scope: { files: ["src/rough-a.ts"], purpose: "rough A" }, dependencies: [], acceptanceCriteria: ["rough A"] },
+        { id: "rough-b", title: "Rough B", scope: { files: ["src/rough-b.ts"], purpose: "rough B" }, dependencies: [], acceptanceCriteria: ["rough B"] },
+      ],
+    }),
+  ].join("\n"));
+
+  assert.equal(expandWorkUnitsFromBestHandoff(run, [run.steps[0]!]), false);
+  assert.equal(run.workUnits?.filter((unit) => unit.createdFrom === "fanout").length, 0);
+
+  run.steps[1]!.status = "complete";
+  run.steps[1]!.output = parseAgentOutput("planner", [
+    "## Agent Handoff",
+    JSON.stringify({
+      summary: "Refined planning units.",
+      changedFiles: [],
+      verification: ["planning contract reviewed"],
+      evidenceClaims: [],
+      risks: [],
+      nextActions: [],
+      workUnits: [
+        { id: "planned-a", title: "Planned A", scope: { files: ["src/planned-a.ts"], purpose: "planned A" }, dependencies: [], acceptanceCriteria: ["planned A"] },
+        { id: "planned-b", title: "Planned B", scope: { files: ["src/planned-b.ts"], purpose: "planned B" }, dependencies: [], acceptanceCriteria: ["planned B"] },
+      ],
+    }),
+  ].join("\n"));
+
+  assert.equal(expandWorkUnitsFromBestHandoff(run, [run.steps[1]!]), true);
+  const fanoutTitles = run.workUnits?.filter((unit) => unit.createdFrom === "fanout" && unit.kind === "implementation").map((unit) => unit.title) ?? [];
+  assert.deepEqual(fanoutTitles, ["Planned A", "Planned B"]);
+});
+
+test("expandWorkUnitsFromHandoff materializes structured WorkUnit dependencies as ordered stages", () => {
+  const route: RouteDecision = {
+    kind: "multi-agent-dag",
+    agents: ["planner", "worker", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    workUnitStrategy: "discover",
+    reason: "dependent fanout units",
+    plan: { kind: "dag", stages: [{ id: "discover", tasks: [{ agent: "planner", task: "Plan dependent units." }] }] },
+  };
+  const run = createRunState(route, tempDir("pi-chalin-fanout-dependencies-"), "Use bounded decomposition with dependencies.");
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.output = parseAgentOutput("planner", [
+    "## Agent Handoff",
+    JSON.stringify({
+      summary: "Planned dependent units.",
+      changedFiles: [],
+      verification: ["dependency contract reviewed"],
+      evidenceClaims: [],
+      risks: [],
+      nextActions: [],
+      workUnits: [
+        { id: "base", title: "Base Unit", scope: { files: ["src/base.ts", "test/base.test.ts"], purpose: "base" }, dependencies: [], acceptanceCriteria: ["base done"] },
+        { id: "dependent", title: "Dependent Unit", scope: { files: ["src/dependent.ts"], purpose: "dependent" }, dependencies: ["base"], acceptanceCriteria: ["dependent done"] },
+      ],
+    }),
+  ].join("\n"));
+
+  assert.equal(expandWorkUnitsFromHandoff(run, run.steps[0]!), true);
+
+  const base = run.workUnits?.find((unit) => unit.title === "Base Unit");
+  const dependent = run.workUnits?.find((unit) => unit.title === "Dependent Unit");
+  assert.ok(base?.reviewerStepId);
+  assert.deepEqual(base?.files, ["src/base.ts", "test/base.test.ts"]);
+  assert.ok(dependent?.workerStepId);
+  assert.deepEqual(dependent?.dependencies, [run.steps[0]?.workUnitId, base?.id]);
+  const dependentWorker = run.steps.find((step) => step.id === dependent?.workerStepId);
+  assert.deepEqual(dependentWorker?.dependencies, [run.steps[0]?.id, base?.reviewerStepId]);
+  assert.match(dependentWorker?.task ?? "", /Scope: dependent\./);
+  assert.match(dependentWorker?.task ?? "", /Change only files in this WorkUnit scope/i);
+  const baseWorker = run.steps.find((step) => step.id === base?.workerStepId);
+  assert.ok((baseWorker?.task ?? "").includes("Files: src/base.ts; test/base.test.ts."));
+  assert.ok((baseWorker?.task ?? "").includes("Use edit for listed files that already exist"));
+  const stageIds = run.route.plan?.kind === "dag" ? run.route.plan.stages.map((stage) => stage.id) : [];
+  assert.ok(stageIds.indexOf("fanout-discover-step-1-workers-1") < stageIds.indexOf("fanout-discover-step-1-workers-2"));
+});
+
+test("expandWorkUnitsFromHandoff serializes work units that declare overlapping files", () => {
+  const route: RouteDecision = {
+    kind: "multi-agent-dag",
+    agents: ["planner", "worker", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    workUnitStrategy: "discover",
+    reason: "overlap-aware fanout units",
+    plan: { kind: "dag", stages: [{ id: "discover", tasks: [{ agent: "planner", task: "Plan units." }] }] },
+  };
+  const run = createRunState(route, tempDir("pi-chalin-fanout-overlap-"), "Use bounded decomposition with no file overlap.");
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.output = parseAgentOutput("planner", [
+    "## Agent Handoff",
+    JSON.stringify({
+      summary: "Planned units with a shared documentation file.",
+      changedFiles: [],
+      verification: [],
+      evidenceClaims: [],
+      risks: [],
+      nextActions: [],
+      workUnits: [
+        { id: "a", title: "Unit A", scope: { files: ["src/a.ts", "README.md"], purpose: "A" }, dependencies: [], acceptanceCriteria: ["A done"] },
+        { id: "b", title: "Unit B", scope: { files: ["src/b.ts", "./README.md"], purpose: "B" }, dependencies: [], acceptanceCriteria: ["B done"] },
+        { id: "c", title: "Unit C", scope: { files: ["src/c.ts"], purpose: "C" }, dependencies: [], acceptanceCriteria: ["C done"] },
+      ],
+    }),
+  ].join("\n"));
+
+  assert.equal(expandWorkUnitsFromHandoff(run, run.steps[0]!), true);
+
+  const unitA = run.workUnits?.find((unit) => unit.title === "Unit A");
+  const unitB = run.workUnits?.find((unit) => unit.title === "Unit B");
+  const unitC = run.workUnits?.find((unit) => unit.title === "Unit C");
+  assert.ok(unitA?.reviewerStepId);
+  assert.deepEqual(unitB?.dependencies, [run.steps[0]?.workUnitId, unitA?.id]);
+  assert.deepEqual(unitC?.dependencies, [run.steps[0]?.workUnitId]);
+  const unitBWorker = run.steps.find((step) => step.id === unitB?.workerStepId);
+  assert.deepEqual(unitBWorker?.dependencies, [run.steps[0]?.id, unitA?.reviewerStepId]);
+  assert.match(run.warnings.join("\n"), /overlapping declared files/i);
+});
+
+test("expandWorkUnitsFromHandoff supports review units without forcing workspace mutation", () => {
+  const route: RouteDecision = {
+    kind: "multi-agent-sequential",
+    agents: ["scout"],
+    risk: "low",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "verify"],
+    workUnitStrategy: "discover",
+    reason: "large review needs discovered units",
+    plan: { kind: "sequential", steps: [{ agent: "scout", task: "Discover review units." }] },
+  };
+  const run = createRunState(route, tempDir("pi-chalin-review-units-"), "Review a large scope by bounded units.");
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.output = parseAgentOutput("scout", [
+    "## Agent Handoff",
+    JSON.stringify({
+      summary: "Discovered bounded review units.",
+      changedFiles: [],
+      verification: [],
+      evidenceClaims: [],
+      risks: [],
+      nextActions: [],
+      workUnits: [
+        {
+          title: "Unit Alpha",
+          scope: ["Alpha review boundary"],
+          dependencies: [],
+          acceptanceCriteria: ["Alpha has explicit evidence and gaps."],
+        },
+        {
+          title: "Unit Beta",
+          scope: ["Beta review boundary"],
+          dependencies: [],
+          acceptanceCriteria: ["Beta has explicit evidence and gaps."],
+        },
+      ],
+    }),
+  ].join("\n"));
+
+  assert.equal(expandWorkUnitsFromHandoff(run, run.steps[0]!), true);
+  const fanoutSteps = run.steps.filter((step) => step.id.startsWith("fanout-"));
+
+  assert.ok(fanoutSteps.some((step) => step.agent === "reviewer"));
+  assert.equal(fanoutSteps.some((step) => step.agent === "worker"), false);
+  assert.deepEqual(run.route.expectedEffects, ["read", "verify"]);
+});
+
+test("expandWorkUnitsFromHandoff keeps verification-only units read-only inside mutating routes", () => {
+  const route: RouteDecision = {
+    kind: "multi-agent-dag",
+    agents: ["planner", "worker", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    workUnitStrategy: "discover",
+    reason: "mixed implementation and verification units",
+    plan: { kind: "dag", stages: [{ id: "discover", tasks: [{ agent: "planner", task: "Plan bounded units." }] }] },
+  };
+  const run = createRunState(route, tempDir("pi-chalin-mixed-unit-effects-"), "Decompose a broad implementation.");
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.output = parseAgentOutput("planner", [
+    "## Agent Handoff",
+    JSON.stringify({
+      summary: "Planned implementation units plus a final validation unit.",
+      changedFiles: [],
+      verification: ["planning contract reviewed"],
+      evidenceClaims: [],
+      risks: [],
+      nextActions: [],
+      workUnits: [
+        {
+          id: "implementation-a",
+          title: "Implementation A",
+          scope: { files: ["src/a.ts", "src/a.test.ts"], purpose: "A implementation boundary" },
+          dependencies: [],
+          expectedEffects: ["read", "write", "verify"],
+          acceptanceCriteria: ["A is implemented and verified."],
+        },
+        {
+          id: "global-validation",
+          title: "Global validation",
+          scope: ["Validate integrated behavior after unit work."],
+          dependencies: ["implementation-a"],
+          expectedEffects: ["read", "verify"],
+          acceptanceCriteria: ["Integrated checks have evidence."],
+        },
+      ],
+    }),
+  ].join("\n"));
+
+  assert.equal(expandWorkUnitsFromHandoff(run, run.steps[0]!), true);
+
+  const implementation = run.workUnits?.find((unit) => unit.title === "Implementation A");
+  const validation = run.workUnits?.find((unit) => unit.title === "Global validation");
+  assert.deepEqual(implementation?.expectedEffects, ["read", "write", "verify"]);
+  assert.equal(implementation?.kind, "implementation");
+  assert.ok(implementation?.reviewerStepId);
+  assert.deepEqual(validation?.expectedEffects, ["read", "verify"]);
+  assert.equal(validation?.kind, "review");
+  assert.equal(validation?.reviewerStepId, undefined);
+  const validationStep = run.steps.find((step) => step.id === validation?.workerStepId);
+  assert.equal(validationStep?.agent, "reviewer");
+  assert.deepEqual(validationStep?.dependencies, [run.steps[0]?.id, implementation?.reviewerStepId]);
+  assert.deepEqual(run.workUnits?.find((unit) => unit.title === "Aggregate fanout results")?.dependencies, [implementation?.reviewerStepId, validation?.workerStepId]);
+});
+
+test("expandWorkUnitsFromHandoff does not infer work units from prose or evidence claims", () => {
+  const route: RouteDecision = {
+    kind: "multi-agent-dag",
+    agents: ["scout", "worker", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    workUnitStrategy: "discover",
+    reason: "decomposition requires structured units",
+    plan: {
+      kind: "dag",
+      stages: [{ id: "discover", tasks: [{ agent: "scout", task: "Discover bounded work units." }] }],
+    },
+  };
+  const run = createRunState(route, tempDir("pi-chalin-fanout-structured-only-"), "Use bounded decomposition.");
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.output = parseAgentOutput("scout", [
+    "## Agent Handoff",
+    JSON.stringify({
+      summary: "The analysis contains several markdown sections and candidate observations, but no structured units.",
+      changedFiles: [],
+      verification: [],
+      evidenceClaims: [
+        {
+          kind: "stable-fact",
+          subject: "Candidate A",
+          summary: "A possible ownership area exists.",
+          evidence: ["scout evidence"],
+          confidence: 0.8,
+        },
+        {
+          kind: "stable-fact",
+          subject: "Candidate B",
+          summary: "Another possible ownership area exists.",
+          evidence: ["scout evidence"],
+          confidence: 0.8,
+        },
+      ],
+      risks: [],
+      nextActions: [],
+      workUnits: [],
+    }),
+    "## Findings",
+    "- Candidate A",
+    "- Candidate B",
+  ].join("\n"));
+
+  assert.equal(expandWorkUnitsFromHandoff(run, run.steps[0]!), false);
+  assert.equal(run.workUnits?.filter((unit) => unit.createdFrom === "fanout").length, 0);
+  assert.equal(run.recoveryState?.blockedByHumanInput, true);
+  assert.deepEqual(run.recoveryState?.repairOptions, ["Ask the user to clarify or approve the bounded work units before launching implementation workers."]);
+});
+
+test("createRunState records routed parallel work without inventing discovery intent", () => {
+  const route: RouteDecision = {
+    kind: "multi-agent-dag",
+    agents: ["worker", "worker", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "route decomposes independently owned work",
+    plan: {
+      kind: "dag",
+      stages: [
+        { id: "implement", tasks: [{ agent: "worker", task: "Implement unit A." }, { agent: "worker", task: "Implement unit B." }] },
+        { id: "review", tasks: [{ agent: "reviewer", task: "Review fan-in." }] },
+      ],
+    },
+  };
+
+  const run = createRunState(route, tempDir("pi-chalin-routed-decomposition-"), "Implement the routed plan.");
+
+  assert.notEqual(run.intentContract?.explicitFanoutRequest, true);
+  assert.notEqual(run.intentContract?.workUnitDiscoveryRequested, true);
+  assert.equal(run.workUnits?.length, 3);
+  assert.equal(run.steps[0]?.dependencies?.length, 0);
+  assert.deepEqual(run.steps[2]?.dependencies, ["implement:step-1", "implement:step-2"]);
+});
+
+test("createRunState scopes planned WorkUnit effects by step responsibility", () => {
+  const route: RouteDecision = {
+    kind: "multi-agent-dag",
+    agents: ["worker", "reviewer", "context-builder"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "planned effects by responsibility",
+    plan: {
+      kind: "dag",
+      stages: [
+        { id: "implement", tasks: [{ id: "worker", agent: "worker", task: "Implement." }] },
+        { id: "review", tasks: [{ id: "reviewer", agent: "reviewer", task: "Review." }] },
+        { id: "aggregate", tasks: [{ id: "aggregate", agent: "context-builder", task: "Aggregate." }] },
+      ],
+    },
+  };
+
+  const run = createRunState(route, tempDir("pi-chalin-planned-effects-"), "Implement and review.");
+
+  const workerUnit = run.workUnits?.find((unit) => unit.title === "worker");
+  const reviewerUnit = run.workUnits?.find((unit) => unit.title === "reviewer");
+  const aggregateUnit = run.workUnits?.find((unit) => unit.title === "aggregate");
+  assert.deepEqual(workerUnit?.expectedEffects, ["read", "write", "verify"]);
+  assert.deepEqual(reviewerUnit?.expectedEffects, ["read", "verify"]);
+  assert.deepEqual(aggregateUnit?.expectedEffects, ["read"]);
+});
+
+test("skipped steps are not usable handoffs and recovery records reviewers not run", () => {
+  assert.equal(runtimeIsUsableStepStatus("complete"), true);
+  assert.equal(runtimeIsUsableStepStatus("checkpointed"), true);
+  assert.equal(runtimeIsUsableStepStatus("skipped"), false);
+
+  const route: RouteDecision = {
+    kind: "multi-agent-sequential",
+    agents: ["worker", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "implementation with reviewer",
+    plan: { kind: "sequential", steps: [{ agent: "worker", task: "Implement." }, { agent: "reviewer", task: "Review." }] },
+  };
+  const run = createRunState(route, tempDir("pi-chalin-skipped-"));
+  run.steps[0]!.status = "failed";
+  run.steps[0]!.error = "handoff missing verification";
+  run.steps[0]!.metrics = stepMetrics({ policyViolations: ["outside_work_unit_scope:config/test-support.ts"] });
+
+  const skipped = markBlockedDependentsSkipped(run, run.steps[0]);
+
+  assert.equal(skipped, 1);
+  assert.equal(run.steps[1]?.status, "skipped");
+  assert.match(run.steps[1]?.skipReason ?? "", /upstream worker\/step-1 failed/i);
+  assert.deepEqual(run.recoveryState?.reviewersNotRun, ["step-2"]);
+  assert.equal(run.recoveryState?.resumeKind, "repair");
+  assert.match(run.recoveryState?.repairOptions.join("\n") ?? "", /scope repair route/i);
+});
+
+test("repair options identify WorkUnit scope contract failures", () => {
+  const route: RouteDecision = {
+    kind: "multi-agent-sequential",
+    agents: ["worker"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "implementation",
+    plan: { kind: "sequential", steps: [{ agent: "worker", task: "Implement." }] },
+  };
+  const run = createRunState(route, tempDir("pi-chalin-repair-scope-"));
+  const step = run.steps[0]!;
+  step.status = "failed";
+  step.error = "Tool policy violation(s): outside_work_unit_scope:config/test-support.ts.";
+  step.metrics = stepMetrics({ policyViolations: ["outside_work_unit_scope:config/test-support.ts"] });
+
+  assert.match(repairOptionsFor(run, step).join("\n"), /updates or splits the failed WorkUnit contract/i);
+});
+
+test("skipped propagation follows dependencies without skipping independent DAG siblings", () => {
+  const route: RouteDecision = {
+    kind: "multi-agent-dag",
+    agents: ["worker", "worker", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "parallel work with fan-in review",
+    plan: {
+      kind: "dag",
+      stages: [
+        { id: "work", tasks: [{ agent: "worker", task: "Implement unit A." }, { agent: "worker", task: "Implement unit B." }] },
+        { id: "review", tasks: [{ agent: "reviewer", task: "Review fan-in." }] },
+      ],
+    },
+  };
+  const run = createRunState(route, tempDir("pi-chalin-skip-dag-"));
+  run.steps[0]!.status = "failed";
+  run.steps[0]!.error = "unit A failed";
+
+  const skipped = markBlockedDependentsSkipped(run, run.steps[0]);
+
+  assert.equal(skipped, 1);
+  assert.equal(run.steps[1]?.status, "pending");
+  assert.equal(run.steps[2]?.status, "skipped");
+  assert.deepEqual(run.recoveryState?.reviewersNotRun, ["review:step-1"]);
+});
+
+test("ContextPacket carries completed and checkpointed evidence without treating skipped as usable", () => {
+  const route: RouteDecision = {
+    kind: "multi-agent-sequential",
+    agents: ["scout", "planner", "reviewer", "worker"],
+    risk: "low",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "context packet",
+    plan: {
+      kind: "sequential",
+      steps: [
+        { agent: "scout", task: "Map repo." },
+        { agent: "planner", task: "Plan." },
+        { agent: "reviewer", task: "Review." },
+        { agent: "worker", task: "Implement." },
+      ],
+    },
+  };
+  const run = createRunState(route, tempDir("pi-chalin-context-packet-"));
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.output = parseAgentOutput("scout", `## Agent Handoff\n${JSON.stringify({ summary: "Mapped src/index.ts.", changedFiles: [], verification: [], evidenceClaims: [], risks: [], nextActions: [] })}`);
+  run.steps[0]!.metrics = { durationMs: 1, usage: emptyUsage(), toolCalls: 1, toolCallsByName: {}, filesRead: ["src/index.ts"] };
+  run.steps[1]!.status = "checkpointed";
+  run.steps[1]!.output = parseAgentOutput("planner", `## Agent Handoff\n${JSON.stringify({ summary: "Plan requires tests.", changedFiles: [], verification: [], evidenceClaims: [], risks: ["tests unknown"], nextActions: [] })}`);
+  run.steps[2]!.status = "skipped";
+  run.steps[2]!.skipReason = "Skipped because upstream failed.";
+
+  const packet = buildContextPacket(run, run.steps[3]!, "prior compact handoff");
+
+  assert.ok(packet);
+  assert.match(packet!.summary, /prior compact handoff/);
+  assert.deepEqual(packet!.filesRead, ["src/index.ts"]);
+  assert.deepEqual(packet!.knownGaps, ["tests unknown", "Skipped because upstream failed."]);
+  assert.ok(packet!.workUnitIds.includes(run.steps[0]!.workUnitId!));
+});
+
+test("ContextPacket sanitizes absolute paths outside the active workspace", () => {
+  const cwd = tempDir("pi-chalin-context-paths-");
+  const outsidePath = path.join(path.dirname(cwd), "other-project", "src/index.ts");
+  const insidePath = path.join(cwd, "src/index.ts");
+  const route: RouteDecision = {
+    kind: "multi-agent-sequential",
+    agents: ["scout", "worker"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "context packet path hygiene",
+    plan: { kind: "sequential", steps: [{ agent: "scout", task: "Map repo." }, { agent: "worker", task: "Implement." }] },
+  };
+  const run = createRunState(route, cwd);
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.metrics = { durationMs: 1, usage: emptyUsage(), toolCalls: 1, toolCallsByName: {}, filesRead: [insidePath, outsidePath] };
+  run.steps[0]!.output = parseAgentOutput("scout", `## Agent Handoff\n${JSON.stringify({ summary: "Mapped paths.", changedFiles: [insidePath, outsidePath], verification: [], evidenceClaims: [], risks: [], nextActions: [] })}`);
+
+  const packet = buildContextPacket(run, run.steps[1]!, `Read src/auth/keycloak.ts, ${insidePath}, and ${outsidePath}.`, 900, cwd);
+
+  assert.ok(packet);
+  assert.deepEqual(packet!.filesRead, ["src/index.ts"]);
+  assert.deepEqual(packet!.changedFiles, ["src/index.ts"]);
+  assert.match(packet!.summary, /src\/index\.ts/);
+  assert.match(packet!.summary, /src\/auth\/keycloak\.ts/);
+  assert.match(packet!.summary, /\[outside-workspace-path\]/);
+  assert.doesNotMatch(packet!.summary, new RegExp(outsidePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
+test("ContextPacket sanitizes original workspace paths for isolated worker handoffs", () => {
+  const original = tempDir("pi-chalin-context-original-");
+  const worktree = tempDir("pi-chalin-context-worktree-");
+  const outside = tempDir("pi-chalin-context-outside-");
+  const originalGoMod = path.join(original, "go.mod");
+  const worktreeGoMod = path.join(worktree, "go.mod");
+  fs.writeFileSync(originalGoMod, "module example.com/original\n");
+  fs.writeFileSync(worktreeGoMod, "module example.com/worktree\n");
+  const route: RouteDecision = {
+    kind: "multi-agent-sequential",
+    agents: ["scout", "worker"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "context packet isolated path hygiene",
+    plan: { kind: "sequential", steps: [{ agent: "scout", task: "Map repo." }, { agent: "worker", task: "Implement." }] },
+  };
+  const run = createRunState(route, original);
+  run.steps[0]!.status = "complete";
+  run.steps[0]!.output = parseAgentOutput("scout", `## Agent Handoff\n${JSON.stringify({
+    summary: `Mapped ${originalGoMod}.`,
+    changedFiles: [],
+    verification: [`cd ${original} && go test ./...`],
+    evidenceClaims: [],
+    risks: [`Original workspace command mentioned ${originalGoMod}; unrelated ${path.join(outside, "secret.txt")}`],
+    nextActions: [],
+  })}`);
+
+  const packet = buildContextPacket(run, run.steps[1]!, `Previous used ${originalGoMod}.`, 900, worktree, original);
+
+  assert.ok(packet);
+  assert.deepEqual(packet!.verification, ["cd . && go test ./..."]);
+  assert.match(packet!.knownGaps.join("\n"), /go\.mod/);
+  assert.match(packet!.knownGaps.join("\n"), /\[outside-workspace-path\]/);
+  assert.doesNotMatch(formatContextPacket(packet) ?? "", new RegExp(original.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
 test("MockWorkerRunner resumes paused DAG runs without rerunning completed steps", async () => {
   const cwd = tempDir("pi-chalin-runner-resume-dag-");
   const route: RouteDecision = {
@@ -969,6 +2874,33 @@ test("loadResumableRunState recovers latest paused or stale running run from dis
   const loadedCompletedStale = loadResumableRunState({ cwd, runId: completedStale.id });
   assert.equal(loadedCompletedStale?.status, "paused");
   assert.deepEqual(loadedCompletedStale?.steps.map((step) => step.status), ["complete", "complete"]);
+});
+
+test("loadFailedRunDiagnostic explains failed runs instead of pretending no run exists", () => {
+  const cwd = tempDir("pi-chalin-failed-diagnostic-");
+  const route: RouteDecision = {
+    kind: "multi-agent-sequential",
+    agents: ["worker", "reviewer"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "failed route",
+    plan: { kind: "sequential", steps: [{ agent: "worker", task: "Implement." }, { agent: "reviewer", task: "Review." }] },
+  };
+  const run = createRunState(route, cwd);
+  run.status = "failed";
+  run.steps[0]!.status = "failed";
+  run.steps[0]!.error = "structured handoff missing verification";
+  persistRun(run);
+
+  const diagnostic = loadFailedRunDiagnostic({ cwd });
+
+  assert.equal(diagnostic?.run.id, run.id);
+  assert.match(diagnostic?.message ?? "", /Latest matching run failed/);
+  assert.match(diagnostic?.message ?? "", /worker\/step-1/);
+  assert.match(diagnostic?.message ?? "", /repair options/i);
 });
 
 test("prepareRunForResume resets interrupted work but keeps completed handoffs", () => {
@@ -1114,15 +3046,18 @@ test("SDK child idle guard rejects when no tool or message activity occurs", asy
   );
 });
 
-test("SDK child idle stall window defaults to 120s and uses only the idle-stall env knob", () => {
+test("SDK child idle stall window defaults to 120s and scales with thinking inside step budget", () => {
   const previousStall = process.env.PI_CHALIN_SDK_STEP_IDLE_STALL_MS;
   try {
     delete process.env.PI_CHALIN_SDK_STEP_IDLE_STALL_MS;
     assert.equal(DEFAULT_SDK_STEP_IDLE_STALL_MS, 120_000);
     assert.equal(sdkStepIdleStallMs(), DEFAULT_SDK_STEP_IDLE_STALL_MS);
+    assert.equal(sdkStepIdleStallMs({ thinkingLevel: "minimal", budgetMaxSeconds: 900 }), DEFAULT_SDK_STEP_IDLE_STALL_MS);
+    assert.equal(sdkStepIdleStallMs({ thinkingLevel: "high", budgetMaxSeconds: 900 }), 480_000);
+    assert.equal(sdkStepIdleStallMs({ thinkingLevel: "high", budgetMaxSeconds: 180 }), 180_000);
 
     process.env.PI_CHALIN_SDK_STEP_IDLE_STALL_MS = "45000";
-    assert.equal(sdkStepIdleStallMs(), 45_000);
+    assert.equal(sdkStepIdleStallMs({ thinkingLevel: "high", budgetMaxSeconds: 900 }), 45_000);
   } finally {
     if (previousStall === undefined) delete process.env.PI_CHALIN_SDK_STEP_IDLE_STALL_MS;
     else process.env.PI_CHALIN_SDK_STEP_IDLE_STALL_MS = previousStall;
@@ -1145,6 +3080,35 @@ test("SDK DAG stops after writer failures to avoid unsafe partial merges", () =>
   ], agents);
 
   assert.equal(shouldStop, true);
+});
+
+test("isolated worktree merge declarations exclude failed or fatal-policy steps", () => {
+  const complete = {
+    id: "fanout:step-1",
+    agent: "worker",
+    task: "Implement safe unit.",
+    status: "complete",
+    output: parseAgentOutput("worker", `## Agent Handoff\n${JSON.stringify({ summary: "done", changedFiles: ["src/ok.ts"], verification: ["readback"], evidenceClaims: [], risks: [], nextActions: [] })}`),
+  } satisfies RunStepState;
+  const failed = {
+    id: "fanout:step-2",
+    agent: "worker",
+    task: "Failed unit.",
+    status: "failed",
+    output: parseAgentOutput("worker", `## Agent Handoff\n${JSON.stringify({ summary: "failed", changedFiles: ["src/failed.ts"], verification: ["readback"], evidenceClaims: [], risks: [], nextActions: [] })}`),
+  } satisfies RunStepState;
+  const fatalPolicy = {
+    id: "fanout:step-3",
+    agent: "worker",
+    task: "Fatal policy unit.",
+    status: "complete",
+    metrics: stepMetrics({ policyViolations: ["outside_work_unit_scope:generated.lock"] }),
+    output: parseAgentOutput("worker", `## Agent Handoff\n${JSON.stringify({ summary: "done", changedFiles: ["generated.lock"], verification: ["readback"], evidenceClaims: [], risks: [], nextActions: [] })}`),
+  } satisfies RunStepState;
+
+  const declared = declaredFilesByIsolatedStepId([complete, failed, fatalPolicy]);
+
+  assert.deepEqual([...declared.entries()], [["step-1", ["src/ok.ts"]]]);
 });
 
 test("recovered read-only DAG failures do not poison the final run status", () => {
@@ -1175,6 +3139,54 @@ test("unrecovered read-only DAG failures remain failed until a downstream stage 
   };
 
   assert.equal(hasUnrecoverableFailedSteps(run, agents), true);
+});
+
+test("terminalRunStatusForSteps completes when an early checkpoint is superseded by later usable handoffs", () => {
+  const agents = new Map([
+    ["scout", readOnlyAgent("scout")],
+    ["planner", readOnlyAgent("planner", "planning")],
+    ["worker", agent("worker", ["edit-files"])],
+    ["reviewer", readOnlyAgent("reviewer", "review")],
+  ]);
+  const run: Pick<RunState, "steps"> = {
+    steps: [
+      {
+        id: "discover:step-1",
+        agent: "scout",
+        task: "Scout workspace.",
+        status: "checkpointed",
+        checkpoint: { kind: "handoff-contract", continuation: "resume", reason: "Missing structured handoff." },
+      },
+      { id: "plan:step-1", agent: "planner", task: "Plan work units.", status: "complete", output: { agent: "planner", text: "plan", handoff: "plan", memoryCandidates: [], raw: "", warnings: [] } },
+      { id: "implement:step-1", agent: "worker", task: "Implement unit.", status: "complete", output: { agent: "worker", text: "done", handoff: "done", memoryCandidates: [], raw: "", warnings: [] } },
+      { id: "review:step-1", agent: "reviewer", task: "Review unit.", status: "complete", output: { agent: "reviewer", text: "pass", handoff: "pass", memoryCandidates: [], raw: "", warnings: [] } },
+    ],
+  };
+
+  assert.equal(hasBlockingCheckpointedSteps(run), false);
+  assert.equal(terminalRunStatusForSteps(run, agents), "complete");
+});
+
+test("terminalRunStatusForSteps pauses when the final useful handoff is checkpointed", () => {
+  const agents = new Map([
+    ["worker", agent("worker", ["edit-files"])],
+    ["reviewer", readOnlyAgent("reviewer", "review")],
+  ]);
+  const run: Pick<RunState, "steps"> = {
+    steps: [
+      { id: "implement:step-1", agent: "worker", task: "Implement unit.", status: "complete", output: { agent: "worker", text: "done", handoff: "done", memoryCandidates: [], raw: "", warnings: [] } },
+      {
+        id: "review:step-1",
+        agent: "reviewer",
+        task: "Review unit.",
+        status: "checkpointed",
+        checkpoint: { kind: "budget-cap", continuation: "continue", reason: "Review hit budget before verdict." },
+      },
+    ],
+  };
+
+  assert.equal(hasBlockingCheckpointedSteps(run), true);
+  assert.equal(terminalRunStatusForSteps(run, agents), "paused");
 });
 
 test("parseAgentOutput accepts richer memory categories for long-running work", () => {
@@ -1235,7 +3247,9 @@ test("buildSdkPrompt injects compact memory context without bloating discovery",
     { memoryContext: "Memory context (1 records, <=120 token budget). Treat as guidance; current repo evidence wins.\n- [memory-1 · testing · 95%] Project tests use Bun and avoid setTimeout sleeps." },
   );
 
-  assert.match(prompt, /edit existing files; write new paths only/i);
+  assert.match(prompt, /edit existing; write new paths/i);
+  assert.match(prompt, /git; edit existing/i);
+  assert.match(prompt, /block git mutate/i);
   assert.match(prompt, /autonomous memory policy/i);
   assert.match(prompt, /Compact Memory Context/);
   assert.match(prompt, /Changed:/);
@@ -1245,7 +3259,9 @@ test("buildSdkPrompt injects compact memory context without bloating discovery",
   assert.match(prompt, /derive the contract from prompt\+repo evidence/i);
   assert.match(prompt, /Tests are contract oracles/i);
   assert.match(prompt, /one meaningful boundary\/counterexample/i);
-  assert.match(prompt, /Domain-specific edge contracts belong in active Skills/i);
+  assert.match(prompt, /Domain contracts/i);
+  assert.match(prompt, /use active Skills/i);
+  assert.match(prompt, /do not invent/i);
   assert.match(prompt, /Preserve public compatibility/i);
   assert.match(prompt, /Code behavior changes update nearest tests/i);
   assert.match(prompt, /Coverage breadth/i);
@@ -1427,7 +3443,9 @@ test("buildSdkPrompt includes sorting contracts only through active skills", () 
   assert.doesNotMatch(basePrompt, /Sorting\/normalization contracts/i);
   assert.doesNotMatch(basePrompt, /language's normal lexicographic\/ordinal comparison/i);
   assert.doesNotMatch(basePrompt, /Do not lowercase\/casefold a preserved value/i);
-  assert.match(basePrompt, /Domain-specific edge contracts belong in active Skills/i);
+  assert.match(basePrompt, /Domain contracts/i);
+  assert.match(basePrompt, /use active Skills/i);
+  assert.match(basePrompt, /do not invent/i);
 
   const activeSkills = activeSkillsFor(task, agent);
   const skilledPrompt = buildSdkPrompt(agent, task, tempDir("pi-chalin-impl-sort-skill-contract-"), undefined, 80, "normal", {
@@ -1437,6 +3455,25 @@ test("buildSdkPrompt includes sorting contracts only through active skills", () 
   assert.match(skilledPrompt, /Normalization, sorting, filtering, and key-builder work separates trim\/blank handling/i);
   assert.match(skilledPrompt, /preservation, duplicates, ordering, no-op\/invalid behavior, and composition\/determinism/i);
   assert.match(skilledPrompt, /Public API contract comments/i);
+});
+
+test("review-only final gate does not activate for implementation workers from routed root goals", () => {
+  const worker: AgentDefinition = {
+    name: "worker",
+    scope: "built-in",
+    concern: "implementation",
+    capabilities: ["inspect-files", "search-files", "edit-files", "write-new-files", "run-safe-bash", "validate"],
+    description: "Implements bounded changes.",
+    model: "inherit",
+    tools: [],
+    memory: { read: false, write: "never", categories: [] },
+    systemPrompt: "",
+    diagnostics: [],
+  };
+
+  const activeSkills = activeSkillsFor("Implement a bounded unit, then review each unit and synthesize fan-in.", worker);
+
+  assert.equal(activeSkills.some(({ skill }) => skill.name === "review-final-gate"), false);
 });
 
 test("buildSdkPrompt makes implementation scouting and worker handoffs audit test sufficiency", () => {
@@ -1477,6 +3514,39 @@ test("buildSdkPrompt makes implementation scouting and worker handoffs audit tes
   assert.match(workerPrompt, /compare Original User Goal criteria/i);
 });
 
+test("buildSdkPrompt injects write and verification handoff contracts from route effects", () => {
+  const worker: AgentDefinition = {
+    name: "worker",
+    scope: "built-in",
+    concern: "implementation",
+    capabilities: ["inspect-files", "search-files", "edit-files", "write-new-files", "run-safe-bash", "validate"],
+    description: "Implements scoped changes.",
+    model: "inherit",
+    tools: [],
+    memory: { read: false, write: "never", categories: [] },
+    systemPrompt: "",
+    diagnostics: [],
+  };
+
+  const readOnlyPrompt = buildSdkPrompt(worker, "Implement and verify the assigned unit.", tempDir("pi-chalin-worker-read-contract-"), undefined, 40, "normal", { expectedEffects: ["read"] });
+  const mutatingPrompt = buildSdkPrompt(worker, "Implement the assigned unit.", tempDir("pi-chalin-worker-route-contract-"), undefined, 40, "normal", { expectedEffects: ["read", "write", "verify"] });
+
+  assert.doesNotMatch(readOnlyPrompt, /Runtime write contract/i);
+  assert.doesNotMatch(readOnlyPrompt, /Runtime verification contract/i);
+  assert.match(mutatingPrompt, /Runtime write contract/i);
+  assert.match(mutatingPrompt, /changedFiles` lists every path personally edited/i);
+  assert.match(mutatingPrompt, /Runtime verification contract/i);
+  assert.match(mutatingPrompt, /empty verification fails verification-responsible steps/i);
+  assert.match(mutatingPrompt, /Verification setup hygiene/i);
+  assert.match(mutatingPrompt, /Clean transient outputs before handoff/i);
+  assert.match(mutatingPrompt, /dependency manifests, lockfiles, and checksum artifacts/i);
+  assert.match(mutatingPrompt, /behavior\/API is missing/i);
+  assert.match(mutatingPrompt, /next human decision/i);
+  assert.match(mutatingPrompt, /do not invent/i);
+  assert.match(mutatingPrompt, /do not weaken tests or downgrade unmet required behavior to residual risk/i);
+  assert.match(mutatingPrompt, /scratch in cwd/i);
+});
+
 test("buildSdkPrompt makes implementation reviewers audit plan gaps instead of rubber-stamping tests", () => {
   const agent: AgentDefinition = {
     name: "reviewer",
@@ -1510,12 +3580,43 @@ test("buildSdkPrompt makes implementation reviewers audit plan gaps instead of r
   assert.match(prompt, /re-read only changed\/high-risk files/i);
   assert.match(prompt, /Reviewer verdict is structured/i);
   assert.match(prompt, /## Agent Handoff` is a REQUIRED runtime contract/i);
-  assert.match(prompt, /Writer\/write handoffs must populate changedFiles; verify handoffs must populate verification/i);
+  assert.match(prompt, /Writers fill changedFiles; verify steps fill verification/i);
   assert.doesNotMatch(prompt, /Return a concise result with these sections when useful/i);
   assert.match(prompt, /## Reviewer Verdict/i);
-  assert.match(prompt, /blockingFindings, missingCoverage, evidence, and requiredRepair/i);
-  assert.match(prompt, /evidence must include reviewed file\/content paths/i);
-  assert.match(prompt, /command\/result evidence/i);
+  assert.match(prompt, /blockingFindings, missingCoverage, evidence, residualRisks, and requiredRepair/i);
+  assert.match(prompt, /blockingFindings, missingCoverage, and requiredRepair MUST be empty/i);
+  assert.match(prompt, /Evidence items are structured records/i);
+  assert.match(prompt, /kind:"reviewed-content"/i);
+  assert.match(prompt, /kind:"verification"/i);
+  assert.match(prompt, /Review unavailable optional verification carefully/i);
+  assert.match(prompt, /block only when the Original User Goal, planner acceptance criteria, or discovered repo commands require it/i);
+  assert.match(prompt, /non-blocking concern in residualRisks/i);
+  assert.match(prompt, /Residual risks are only for optional or future-hardening concerns/i);
+  assert.match(prompt, /contradicts an explicit Original User Goal guarantee/i);
+});
+
+test("buildSdkPrompt asks discovery planners for verifiable WorkUnits without case-specific fanout rules", () => {
+  const planner: AgentDefinition = {
+    name: "planner",
+    scope: "built-in",
+    concern: "planning",
+    capabilities: ["inspect-files", "search-files"],
+    description: "Plans bounded work.",
+    model: "inherit",
+    tools: [],
+    memory: { read: false, write: "never", categories: [] },
+    systemPrompt: "",
+    diagnostics: [],
+  };
+
+  const prompt = buildSdkPrompt(planner, "Plan a large implementation from discovered evidence.", tempDir("pi-chalin-discover-verifiable-units-"), "Workspace inventory handoff.", 80, "normal", { workUnitStrategy: "discover" });
+
+  assert.match(prompt, /Discovery contract/i);
+  assert.match(prompt, /expectedEffects is per unit/i);
+  assert.match(prompt, /Mutation units need a credible verification path/i);
+  assert.match(prompt, /discovered repo commands, direct readback, or an explicitly planned verification artifact/i);
+  assert.doesNotMatch(prompt, /one subagent per comment/i);
+  assert.doesNotMatch(prompt, /por comentario/i);
 });
 
 test("buildSdkPrompt adds a coverage and evidence contract for deep project analysis", () => {
@@ -1563,10 +3664,11 @@ test("childToolNames removes inspection tools for handoff-only synthesis steps",
   };
 
   assert.deepEqual(childToolNames(agent, "Synthesize scout findings into final answer material.", true, true), []);
+  assert.deepEqual(childToolNames(agent, "Aggregate WorkUnit handoffs into a compact summary.", true, true, { routeKind: "multi-agent-dag" }), []);
   assert.ok(childToolNames(agent, "Save a checkpoint for this long-running feature.", true, true, { budgetProfile: "extended" }).includes("chalin_artifact_write"));
 });
 
-test("childToolNames keeps inspection tools for critical handoff claim checks", () => {
+test("childToolNames keeps inspection tools for structured handoff claim audits", () => {
   const agent: AgentDefinition = {
     name: "context-builder",
     scope: "built-in",
@@ -1580,11 +3682,453 @@ test("childToolNames keeps inspection tools for critical handoff claim checks", 
     diagnostics: [],
   };
 
-  const tools = childToolNames(agent, "Reconcile contradiction: scout says no web fetch exists but researcher found src/webfetch.ts.", true, true);
+  const lexicalOnly = childToolNames(agent, "Reconcile contradiction in previous handoff.", true, true);
+  const tools = childToolNames(agent, "Synthesize final answer material.", true, true, { previousClaimsNeedAudit: true } as never);
 
+  assert.deepEqual(lexicalOnly, []);
   assert.ok(tools.includes("read"));
   assert.ok(tools.includes("grep"));
   assert.ok(tools.includes("find"));
+});
+
+test("synthesisCrossStepDuplicateReadLimit gives reviewers room for sampled audit", () => {
+  const reviewer: AgentDefinition = {
+    name: "reviewer",
+    scope: "built-in",
+    concern: "review",
+    capabilities: ["inspect-files"],
+    description: "Review implementation evidence.",
+    model: "inherit",
+    tools: [],
+    memory: { read: false, write: "never", categories: [] },
+    systemPrompt: "",
+    diagnostics: [],
+  };
+
+  assert.equal(synthesisCrossStepDuplicateReadLimit(reviewer), 8);
+});
+
+test("createRunState excludes pi-chalin runtime artifacts from local git status", () => {
+  const cwd = tempDir("pi-chalin-git-exclude-");
+  git(cwd, ["init"]);
+  const route: RouteDecision = {
+    kind: "multi-agent-sequential",
+    agents: ["worker"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: false,
+    expectedEffects: ["read", "write"],
+    reason: "write in a git repo",
+    plan: { kind: "sequential", steps: [{ agent: "worker", task: "Edit existing files." }] },
+  };
+
+  createRunState(route, cwd);
+
+  const exclude = fs.readFileSync(path.join(cwd, ".git", "info", "exclude"), "utf-8");
+  assert.ok(exclude.split(/\r?\n/).includes(".pi-chalin/"));
+});
+
+test("allowedToolsForStep removes write when structured WorkUnit files already exist", () => {
+  const cwd = tempDir("pi-chalin-existing-unit-files-");
+  fs.mkdirSync(path.join(cwd, "src"), { recursive: true });
+  fs.writeFileSync(path.join(cwd, "src/a.ts"), "export const a = 1;\n");
+  const run: Pick<RunState, "workUnits"> = {
+    workUnits: [{
+      id: "unit-a",
+      title: "Unit A",
+      kind: "implementation",
+      status: "pending",
+      scope: ["A"],
+      files: ["src/a.ts"],
+      dependencies: [],
+      expectedEffects: ["read", "write", "verify"],
+      acceptanceCriteria: ["done"],
+      createdFrom: "fanout",
+    }],
+  };
+
+  assert.deepEqual(allowedToolsForStep(["read", "edit", "write"], run, { workUnitId: "unit-a" }, cwd), ["read", "edit"]);
+});
+
+test("allowedToolsForStep keeps write when structured WorkUnit includes a new file", () => {
+  const cwd = tempDir("pi-chalin-new-unit-files-");
+  const run: Pick<RunState, "workUnits"> = {
+    workUnits: [{
+      id: "unit-a",
+      title: "Unit A",
+      kind: "implementation",
+      status: "pending",
+      scope: ["A"],
+      files: ["src/new.ts"],
+      dependencies: [],
+      expectedEffects: ["read", "write", "verify"],
+      acceptanceCriteria: ["done"],
+      createdFrom: "fanout",
+    }],
+  };
+
+  assert.deepEqual(allowedToolsForStep(["read", "edit", "write"], run, { workUnitId: "unit-a" }, cwd), ["read", "edit", "write"]);
+});
+
+test("workUnitMutationScopeForStep derives strict mutation scope from WorkUnit files", () => {
+  const run: Pick<RunState, "workUnits"> = {
+    workUnits: [{
+      id: "unit-a",
+      title: "Unit A",
+      kind: "implementation",
+      status: "pending",
+      scope: ["A"],
+      files: ["src/a.ts", "src/a.test.ts"],
+      dependencies: [],
+      expectedEffects: ["read", "write", "verify"],
+      acceptanceCriteria: ["done"],
+      createdFrom: "fanout",
+    }],
+  };
+
+  assert.deepEqual(workUnitMutationScopeForStep(run, { workUnitId: "unit-a" }), {
+    files: ["src/a.ts", "src/a.test.ts"],
+    mode: "strict",
+    bash: "allow-with-postcheck",
+  });
+  assert.equal(workUnitMutationScopeForStep(run, { workUnitId: "missing" }), undefined);
+});
+
+test("reconcileDeclaredGeneratedScopeViolations expands only verified generated outputs", () => {
+  const route: RouteDecision = {
+    kind: "multi-agent-sequential",
+    agents: ["worker"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "implementation",
+    plan: { kind: "sequential", steps: [{ agent: "worker", task: "Implement unit." }] },
+  };
+  const run = createRunState(route, tempDir("pi-chalin-reconcile-generated-scope-"));
+  run.workUnits = [{
+    id: "unit-a",
+    title: "Unit A",
+    kind: "implementation",
+    status: "pending",
+    scope: ["A"],
+    files: ["package.json"],
+    dependencies: [],
+    expectedEffects: ["read", "write", "verify"],
+    acceptanceCriteria: ["done"],
+    createdFrom: "fanout",
+  }];
+  const step = run.steps[0]!;
+  step.workUnitId = "unit-a";
+  step.status = "complete";
+  step.metrics = stepMetrics({
+    filesTouched: ["package.json"],
+    policyViolations: ["outside_work_unit_scope:generated.lock", "work_unit_scope_gap:tooling.toml"],
+  });
+  step.output = parseAgentOutput("worker", `## Agent Handoff\n${JSON.stringify({
+    summary: "Generated dependency artifact from setup.",
+    changedFiles: ["package.json", "generated.lock"],
+    verification: ["test command passed"],
+    evidenceClaims: [],
+    risks: [],
+    nextActions: [],
+  })}`);
+
+  const resolved = reconcileDeclaredGeneratedScopeViolations(run, step);
+
+  assert.deepEqual(resolved, ["generated.lock"]);
+  assert.deepEqual(step.metrics.policyViolations, ["work_unit_scope_gap:tooling.toml"]);
+  assert.deepEqual(run.workUnits[0]?.files, ["package.json", "generated.lock"]);
+  assert.match(step.output.warnings.join("\n"), /Expanded WorkUnit scope from declared generated output/);
+});
+
+test("reconcileDeclaredGeneratedScopeViolations adopts observed generated paths when handoff names them incorrectly", () => {
+  const route: RouteDecision = {
+    kind: "multi-agent-sequential",
+    agents: ["worker"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "implementation",
+    plan: { kind: "sequential", steps: [{ agent: "worker", task: "Implement setup." }] },
+  };
+  const run = createRunState(route, tempDir("pi-chalin-reconcile-observed-scope-"));
+  run.workUnits = [{
+    id: "unit-a",
+    title: "Unit A",
+    kind: "implementation",
+    status: "pending",
+    scope: ["A"],
+    files: ["package.json"],
+    dependencies: [],
+    expectedEffects: ["read", "write", "verify"],
+    acceptanceCriteria: ["done"],
+    createdFrom: "fanout",
+  }];
+  const step = run.steps[0]!;
+  step.workUnitId = "unit-a";
+  step.status = "complete";
+  step.metrics = stepMetrics({
+    filesTouched: ["package.json"],
+    policyViolations: ["outside_work_unit_scope:generated.lock"],
+  });
+  step.output = parseAgentOutput("worker", `## Agent Handoff\n${JSON.stringify({
+    summary: "Generated dependency artifact from setup.",
+    changedFiles: ["package.json", "generated.lock.old"],
+    verification: ["test command passed"],
+    evidenceClaims: [],
+    risks: [],
+    nextActions: [],
+  })}`);
+
+  assert.deepEqual(reconcileDeclaredGeneratedScopeViolations(run, step), ["generated.lock"]);
+  assert.deepEqual(step.metrics.policyViolations, []);
+  assert.deepEqual(run.workUnits[0]?.files, ["package.json", "generated.lock"]);
+  assert.deepEqual(step.output.structuredHandoff?.changedFiles, ["package.json", "generated.lock.old", "generated.lock"]);
+});
+
+test("reconcileDeclaredGeneratedScopeViolations keeps conflicting ownership fatal", () => {
+  const route: RouteDecision = {
+    kind: "multi-agent-sequential",
+    agents: ["worker"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "implementation",
+    plan: { kind: "sequential", steps: [{ agent: "worker", task: "Implement unit." }] },
+  };
+  const run = createRunState(route, tempDir("pi-chalin-reconcile-conflict-scope-"));
+  run.workUnits = [
+    {
+      id: "unit-a",
+      title: "Unit A",
+      kind: "implementation",
+      status: "pending",
+      scope: ["A"],
+      files: ["package.json"],
+      dependencies: [],
+      expectedEffects: ["read", "write", "verify"],
+      acceptanceCriteria: ["done"],
+      createdFrom: "fanout",
+    },
+    {
+      id: "unit-b",
+      title: "Unit B",
+      kind: "implementation",
+      status: "pending",
+      scope: ["B"],
+      files: ["generated.lock"],
+      dependencies: [],
+      expectedEffects: ["read", "write", "verify"],
+      acceptanceCriteria: ["done"],
+      createdFrom: "fanout",
+    },
+  ];
+  const step = run.steps[0]!;
+  step.workUnitId = "unit-a";
+  step.status = "complete";
+  step.metrics = stepMetrics({ policyViolations: ["outside_work_unit_scope:generated.lock"] });
+  step.output = parseAgentOutput("worker", `## Agent Handoff\n${JSON.stringify({
+    summary: "Generated dependency artifact from setup.",
+    changedFiles: ["generated.lock"],
+    verification: ["test command passed"],
+    evidenceClaims: [],
+    risks: [],
+    nextActions: [],
+  })}`);
+
+  assert.deepEqual(reconcileDeclaredGeneratedScopeViolations(run, step), []);
+  assert.deepEqual(step.metrics.policyViolations, ["outside_work_unit_scope:generated.lock"]);
+  assert.deepEqual(run.workUnits[0]?.files, ["package.json"]);
+});
+
+test("reconcileDeclaredGeneratedScopeViolations ignores transient dependency artifacts without manifest ownership", () => {
+  const route: RouteDecision = {
+    kind: "multi-agent-sequential",
+    agents: ["worker"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "implementation",
+    plan: { kind: "sequential", steps: [{ agent: "worker", task: "Implement unit." }] },
+  };
+  const run = createRunState(route, tempDir("pi-chalin-reconcile-transient-lock-"));
+  run.workUnits = [
+    {
+      id: "unit-a",
+      title: "Unit A",
+      kind: "implementation",
+      status: "pending",
+      scope: ["A"],
+      files: ["src/auth/keycloak.ts", "src/auth/keycloak.test.ts"],
+      dependencies: [],
+      expectedEffects: ["read", "write", "verify"],
+      acceptanceCriteria: ["done"],
+      createdFrom: "fanout",
+    },
+    {
+      id: "unit-b",
+      title: "Unit B",
+      kind: "implementation",
+      status: "pending",
+      scope: ["B"],
+      files: ["components/LegacyWidget.vue", "components/LegacyWidget.test.ts", "package.json"],
+      dependencies: [],
+      expectedEffects: ["read", "write", "verify"],
+      acceptanceCriteria: ["done"],
+      createdFrom: "fanout",
+    },
+  ];
+  const step = run.steps[0]!;
+  step.workUnitId = "unit-a";
+  step.status = "complete";
+  step.metrics = stepMetrics({
+    filesTouched: ["src/auth/keycloak.ts"],
+    policyViolations: ["outside_work_unit_scope:bun.lock"],
+  });
+  step.output = parseAgentOutput("worker", `## Agent Handoff\n${JSON.stringify({
+    summary: "Installed dependencies only to verify this unit.",
+    changedFiles: ["src/auth/keycloak.ts", "src/auth/keycloak.test.ts", "bun.lock"],
+    verification: ["bun test src/auth/keycloak.test.ts passed"],
+    evidenceClaims: [],
+    risks: [],
+    nextActions: [],
+  })}`);
+
+  assert.deepEqual(reconcileDeclaredGeneratedScopeViolations(run, step), []);
+  assert.deepEqual(step.metrics.policyViolations, []);
+  assert.deepEqual(run.workUnits[0]?.files, ["src/auth/keycloak.ts", "src/auth/keycloak.test.ts"]);
+  assert.deepEqual(step.output.structuredHandoff?.changedFiles, ["src/auth/keycloak.ts", "src/auth/keycloak.test.ts"]);
+  assert.match(step.output.warnings.join("\n"), /Ignored transient dependency artifact/);
+});
+
+test("reconcileDeclaredGeneratedScopeViolations expands dependency artifacts for manifest-owning units", () => {
+  const route: RouteDecision = {
+    kind: "multi-agent-sequential",
+    agents: ["worker"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "implementation",
+    plan: { kind: "sequential", steps: [{ agent: "worker", task: "Implement unit." }] },
+  };
+  const run = createRunState(route, tempDir("pi-chalin-reconcile-owned-lock-"));
+  run.workUnits = [{
+    id: "unit-a",
+    title: "Unit A",
+    kind: "implementation",
+    status: "pending",
+    scope: ["A"],
+    files: ["components/LegacyWidget.vue", "components/LegacyWidget.test.ts", "package.json"],
+    dependencies: [],
+    expectedEffects: ["read", "write", "verify"],
+    acceptanceCriteria: ["done"],
+    createdFrom: "fanout",
+  }];
+  const step = run.steps[0]!;
+  step.workUnitId = "unit-a";
+  step.status = "complete";
+  step.metrics = stepMetrics({
+    filesTouched: ["components/LegacyWidget.test.ts", "package.json"],
+    policyViolations: ["outside_work_unit_scope:bun.lock"],
+  });
+  step.output = parseAgentOutput("worker", `## Agent Handoff\n${JSON.stringify({
+    summary: "Added dependency and verified component tests.",
+    changedFiles: ["components/LegacyWidget.test.ts", "package.json", "bun.lock"],
+    verification: ["bun test passed"],
+    evidenceClaims: [],
+    risks: [],
+    nextActions: [],
+  })}`);
+
+  assert.deepEqual(reconcileDeclaredGeneratedScopeViolations(run, step), ["bun.lock"]);
+  assert.deepEqual(step.metrics.policyViolations, []);
+  assert.deepEqual(run.workUnits[0]?.files, ["components/LegacyWidget.vue", "components/LegacyWidget.test.ts", "package.json", "bun.lock"]);
+  assert.match(step.output.warnings.join("\n"), /Expanded WorkUnit scope from declared generated output/);
+});
+
+test("reconcileDeclaredGeneratedScopeViolations ignores removed generated artifacts", () => {
+  const route: RouteDecision = {
+    kind: "multi-agent-sequential",
+    agents: ["worker"],
+    risk: "medium",
+    ambiguity: "low",
+    needsMemory: false,
+    needsArtifacts: true,
+    expectedEffects: ["read", "write", "verify"],
+    reason: "implementation",
+    plan: { kind: "sequential", steps: [{ agent: "worker", task: "Repair unit." }] },
+  };
+  const cwd = tempDir("pi-chalin-reconcile-removed-generated-");
+  fs.mkdirSync(path.join(cwd, "components"), { recursive: true });
+  fs.writeFileSync(path.join(cwd, "components", "LegacyWidget.test.ts"), "test\n");
+  const run = createRunState(route, cwd);
+  run.workUnits = [{
+    id: "unit-a",
+    title: "Unit A",
+    kind: "implementation",
+    status: "pending",
+    scope: ["A"],
+    files: ["components/LegacyWidget.test.ts"],
+    dependencies: [],
+    expectedEffects: ["read", "write", "verify"],
+    acceptanceCriteria: ["done"],
+    createdFrom: "fanout",
+  }];
+  const step = run.steps[0]!;
+  step.workUnitId = "unit-a";
+  step.status = "complete";
+  step.metrics = stepMetrics({
+    filesTouched: ["components/LegacyWidget.test.ts"],
+    policyViolations: ["outside_work_unit_scope:_tmp_plugin_test.ts"],
+  });
+  step.output = parseAgentOutput("worker", `## Agent Handoff\n${JSON.stringify({
+    summary: "Used a temporary verification script and removed it.",
+    changedFiles: ["components/LegacyWidget.test.ts", "_tmp_plugin_test.ts"],
+    verification: ["bun test passed; temporary script removed"],
+    evidenceClaims: [],
+    risks: [],
+    nextActions: [],
+  })}`);
+
+  assert.deepEqual(reconcileDeclaredGeneratedScopeViolations(run, step, cwd), []);
+  assert.deepEqual(step.metrics.policyViolations, []);
+  assert.deepEqual(run.workUnits[0]?.files, ["components/LegacyWidget.test.ts"]);
+  assert.deepEqual(step.output.structuredHandoff?.changedFiles, ["components/LegacyWidget.test.ts"]);
+  assert.match(step.output.warnings.join("\n"), /Ignored removed generated artifact/);
+});
+
+test("sanitizePromptWorkspaceText maps original workspace absolute paths to relative paths for isolated workers", () => {
+  const original = tempDir("pi-chalin-original-workspace-");
+  const worktree = tempDir("pi-chalin-isolated-worktree-");
+  const outside = tempDir("pi-chalin-outside-workspace-");
+  fs.mkdirSync(path.join(original, "internal", "auth"), { recursive: true });
+  fs.mkdirSync(path.join(worktree, "internal", "auth"), { recursive: true });
+  fs.writeFileSync(path.join(original, "internal", "auth", "refresh.go"), "package auth\n");
+  fs.writeFileSync(path.join(worktree, "internal", "auth", "refresh.go"), "package auth\n");
+  fs.writeFileSync(path.join(outside, "secret.txt"), "secret\n");
+
+  const text = [
+    `Original path: ${path.join(original, "internal", "auth", "refresh.go")}.`,
+    `Current path: ${path.join(worktree, "internal", "auth", "refresh.go")}.`,
+    `Root: ${original}.`,
+    `Outside: ${path.join(outside, "secret.txt")}.`,
+  ].join(" ");
+
+  assert.equal(
+    sanitizePromptWorkspaceText(text, worktree, original),
+    "Original path: internal/auth/refresh.go. Current path: internal/auth/refresh.go. Root: . Outside: [outside-workspace-path].",
+  );
 });
 
 test("childToolNames uses structured handoff audit signal before task wording", () => {
@@ -1673,6 +4217,18 @@ test("childToolNames exposes nested delegation only to coordinating subagents be
   assert.equal(childToolNames(noCoordinate, "Implement broad change.", true, false, { delegationDepth: 1, maxDelegationDepth: 2 }).includes("chalin_delegate"), false);
   assert.equal(childToolNames(worker, "Implement focused change.", true, false, { budgetProfile: "normal" }).includes("chalin_artifact_write"), false);
   assert.equal(childToolNames(worker, "Implement long checkpointed change.", true, false, { budgetProfile: "extended" }).includes("chalin_artifact_write"), true);
+
+  const prompt = buildSdkPrompt(
+    worker,
+    "Implement a scope that exceeds one worker ownership boundary.",
+    tempDir("pi-chalin-nested-worker-contract-"),
+    undefined,
+    120,
+    "extended",
+  );
+  assert.match(prompt, /ownership boundary/i);
+  assert.match(prompt, /worker-owned child units/i);
+  assert.match(prompt, /fan-in review/i);
 });
 
 test("childToolNames respects route-level memory gating", () => {
@@ -1945,8 +4501,8 @@ test("resolveStepCompletionStatus turns budget-capped SDK stops into checkpointe
     },
     output: {
       agent: "scout",
-      text: "Project finding: the repository uses TypeScript modules and tests in test/*.test.ts; next step should review src/runner.ts budget handling with file-level evidence.",
-      handoff: "Project finding: review src/runner.ts and src/budget.ts because budget policy controls subagent autonomy and checkpoint behavior.",
+      text: "Project finding: the repository uses TypeScript modules and tests in test/*.test.ts; next step should review src/runner/runner.ts budget handling with file-level evidence.",
+      handoff: "Project finding: review src/runner/runner.ts and src/budget/budget.ts because budget policy controls subagent autonomy and checkpoint behavior.",
       memoryCandidates: [],
       raw: "",
       warnings: [],

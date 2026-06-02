@@ -3,12 +3,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { AgentCatalog } from "../src/agents.ts";
-import { DEFAULT_CONFIG, type ChalinConfig } from "../src/config.ts";
-import { buildPromptTokenomics } from "../src/observability.ts";
-import { buildSdkPrompt, childToolNames } from "../src/runner-prompt.ts";
-import type { AgentDefinition, RouteKind } from "../src/schemas.ts";
-import { SkillCatalog, effectiveSkillToolNames, resolveSkillsForStep } from "../src/skills.ts";
+import { AgentCatalog } from "../src/agents/agents.ts";
+import { DEFAULT_CONFIG, type ChalinConfig } from "../src/config/config.ts";
+import { buildPromptTokenomics } from "../src/observability/observability.ts";
+import { buildSdkPrompt, childToolNames } from "../src/runner/runner-prompt.ts";
+import type { AgentDefinition, RouteKind } from "../src/domain/schemas.ts";
+import { SkillCatalog, effectiveSkillToolNames, resolveSkillsForStep } from "../src/skills/skills.ts";
 
 interface ComparisonCase {
   id: string;

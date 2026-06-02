@@ -3,14 +3,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, test } from "bun:test";
-import { AgentCatalog } from "../src/agents.ts";
-import { ArtifactStore } from "../src/artifacts.ts";
-import { createChildToolPolicy } from "../src/child-tools.ts";
-import { loadEffectiveConfig } from "../src/config.ts";
-import { createSkillTraceEvent } from "../src/observability.ts";
-import { buildSdkPrompt, childToolNames } from "../src/runner-prompt.ts";
-import { activateSkillForTurn, disableSkillForTurn, getSkillOverridesForTurn, resetRuntimeState } from "../src/runtime-state.ts";
-import type { AgentDefinition } from "../src/schemas.ts";
+import { AgentCatalog } from "../src/agents/agents.ts";
+import { ArtifactStore } from "../src/artifacts/artifacts.ts";
+import { createChildToolPolicy } from "../src/tools/child-tools.ts";
+import { loadEffectiveConfig } from "../src/config/config.ts";
+import { createSkillTraceEvent } from "../src/observability/observability.ts";
+import { buildSdkPrompt, childToolNames } from "../src/runner/runner-prompt.ts";
+import { activateSkillForTurn, disableSkillForTurn, getSkillOverridesForTurn, resetRuntimeState } from "../src/runtime/state.ts";
+import type { AgentDefinition } from "../src/domain/schemas.ts";
 import {
   SkillCatalog,
   SkillMetricsStore,
@@ -24,7 +24,7 @@ import {
   recordSkillMetricsEffect,
   retireSkill,
   resolveSkillsForStep,
-} from "../src/skills.ts";
+} from "../src/skills/skills.ts";
 import { Effect } from "effect";
 
 const tempDirs: string[] = [];

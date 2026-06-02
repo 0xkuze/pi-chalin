@@ -4,12 +4,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Effect } from "effect";
-import { AgentCatalog } from "../src/agents.ts";
-import { ArtifactStore } from "../src/artifacts.ts";
-import { createSkillTraceEvent } from "../src/observability.ts";
-import { buildSdkPrompt } from "../src/runner-prompt.ts";
-import { childToolNames } from "../src/runner-prompt.ts";
-import type { AgentDefinition } from "../src/schemas.ts";
+import { AgentCatalog } from "../src/agents/agents.ts";
+import { ArtifactStore } from "../src/artifacts/artifacts.ts";
+import { createSkillTraceEvent } from "../src/observability/observability.ts";
+import { buildSdkPrompt } from "../src/runner/runner-prompt.ts";
+import { childToolNames } from "../src/runner/runner-prompt.ts";
+import type { AgentDefinition } from "../src/domain/schemas.ts";
 import {
   SkillCatalog,
   SkillMetricsStore,
@@ -18,7 +18,7 @@ import {
   reconcileSkillLifecyclesEffect,
   recordSkillMetricsEffect,
   resolveSkillsForStep,
-} from "../src/skills.ts";
+} from "../src/skills/skills.ts";
 
 interface SkillEvalResult {
   id: string;

@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { analyzeTrajectory, scoreTrajectory, type TrajectoryReport } from "./trajectory.ts";
-import type { RunState, RunStepStatus, TokenUsageSummary } from "../src/schemas.ts";
+import type { RunState, RunStepStatus, TokenUsageSummary } from "../src/domain/schemas.ts";
 
 interface TrajectoryEvalResult {
   id: string;
@@ -94,8 +94,8 @@ function badRun(): RunState {
 function budgetCheckpointRun(): RunState {
   return baseRun("paused", [
     step("context-builder", "checkpointed", { chalin_project_snapshot: 1, read: 8 }, {
-      text: "## Findings\n- src/kernel.ts owns route execution.\n## Handoff\nPartial but useful handoff. Continue with reviewer.",
-      filesRead: ["src/kernel.ts", "src/runner.ts"],
+      text: "## Findings\n- src/kernel/kernel.ts owns route execution.\n## Handoff\nPartial but useful handoff. Continue with reviewer.",
+      filesRead: ["src/kernel/kernel.ts", "src/runner/runner.ts"],
       budgetStopCount: 1,
       findingsPerTool: 0.11,
     }),

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "bun:test";
 import { analyzeTrajectory, scoreTrajectory } from "../evals/trajectory.ts";
-import type { RunState } from "../src/schemas.ts";
+import type { RunState } from "../src/domain/schemas.ts";
 
 function run(overrides: Partial<RunState> = {}): RunState {
   return {
@@ -27,7 +27,7 @@ function run(overrides: Partial<RunState> = {}): RunState {
         task: "scan",
         status: "complete",
         output: { agent: "scout", text: "## Findings\n- src/index.ts controls entrypoint.", handoff: "src/index.ts", raw: "src/index.ts", warnings: [], memoryCandidates: [] },
-        metrics: { durationMs: 10, usage: emptyUsage(), toolCalls: 4, toolCallsByName: { read: 3, grep: 1 }, filesRead: ["src/index.ts", "src/config.ts"] },
+        metrics: { durationMs: 10, usage: emptyUsage(), toolCalls: 4, toolCallsByName: { read: 3, grep: 1 }, filesRead: ["src/index.ts", "src/config/config.ts"] },
       },
       {
         id: "step-2",
@@ -112,13 +112,13 @@ test("analyzeTrajectory treats late first evidence as budget waste", () => {
       agent: "scout",
       task: "analyze project",
       status: "complete",
-      output: { agent: "scout", text: "## Findings\n- src/index.ts registers the extension.\n- src/tools.ts registers chalin_route.", handoff: "src/index.ts and src/tools.ts.", raw: "", warnings: [], memoryCandidates: [] },
+      output: { agent: "scout", text: "## Findings\n- src/index.ts registers the extension.\n- src/tools/tools.ts registers chalin_route.", handoff: "src/index.ts and src/tools/tools.ts.", raw: "", warnings: [], memoryCandidates: [] },
       metrics: {
         durationMs: 20,
         usage: emptyUsage(),
         toolCalls: 12,
         toolCallsByName: { read: 8, grep: 4 },
-        filesRead: ["package.json", "README.md", "src/index.ts", "src/tools.ts"],
+        filesRead: ["package.json", "README.md", "src/index.ts", "src/tools/tools.ts"],
         utility: {
           findingsPerTool: 0.167,
           filesReadPerFinding: 2,

@@ -1,11 +1,11 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Context, Effect, Layer } from "effect";
-import { registerChalinAutoRouter } from "./autoroute.ts";
-import { hideLegacyTopLevelChildSessions } from "./child-sessions.ts";
-import { registerChalinCommands } from "./commands.ts";
-import { resetRuntimeState } from "./runtime-state.ts";
-import { registerChalinTools } from "./tools.ts";
-import { setChalinStatus } from "./ui-status.ts";
+import { registerChalinAutoRouter } from "./routing/autoroute.ts";
+import { hideLegacyTopLevelChildSessions } from "./runtime/child-sessions.ts";
+import { registerChalinCommands } from "./commands/commands.ts";
+import { resetRuntimeState } from "./runtime/state.ts";
+import { registerChalinTools } from "./tools/tools.ts";
+import { setChalinStatus } from "./ui/ui-status.ts";
 
 const PI_CHALIN_CHILD_ENV = "PI_CHALIN_CHILD";
 const PI_CHALIN_DISABLED_ENV = "PI_CHALIN_DISABLED";
@@ -50,14 +50,14 @@ function registerPiChalinUnsafe(pi: ExtensionAPI): void {
 }
 
 export { PI_CHALIN_CHILD_ENV, PI_CHALIN_DISABLED_ENV };
-export { AgentCatalog, parseFrontmatter } from "./agents.ts";
-export { ArtifactStore } from "./artifacts.ts";
-export { DEFAULT_CONFIG, approvalDecision, loadEffectiveConfig, setAgentModelOverride, setAgentThinkingOverride, writeProjectConfig, writeUserConfig } from "./config.ts";
-export { ChalinKernel } from "./kernel.ts";
-export { MemoryStore, createMemoryCandidate } from "./memory.ts";
-export { EngramMemoryStore, createConfiguredMemoryStore, resolveMemoryBackendStatus } from "./memory-provider.ts";
-export { MockWorkerRunner, SdkWorkerRunner, parseAgentOutput } from "./runner.ts";
-export { resolveChalinPaths } from "./paths.ts";
-export { SkillCatalog, SkillMetricsStore, auditSkill, loadSkillBody, reconcileSkillLifecyclesEffect, recordSkillMetricsEffect, resolveSkillsForStep } from "./skills.ts";
-export type { AgentDefinition, AgentMemoryPolicy, AgentThinkingLevel, RouteDecision, RoutePlan, RunState, MemoryCandidate, MemoryRecord, SkillDefinition, ResolvedSkill, RejectedSkill } from "./schemas.ts";
-export type { MemoryProvider } from "./config.ts";
+export { AgentCatalog, parseFrontmatter } from "./agents/agents.ts";
+export { ArtifactStore } from "./artifacts/artifacts.ts";
+export { DEFAULT_CONFIG, approvalDecision, loadEffectiveConfig, setAgentModelOverride, setAgentThinkingOverride, writeProjectConfig, writeUserConfig } from "./config/config.ts";
+export { ChalinKernel } from "./kernel/kernel.ts";
+export { MemoryStore, createMemoryCandidate } from "./memory/memory.ts";
+export { EngramMemoryStore, createConfiguredMemoryStore, resolveMemoryBackendStatus } from "./memory/memory-provider.ts";
+export { MockWorkerRunner, SdkWorkerRunner, parseAgentOutput } from "./runner/runner.ts";
+export { resolveChalinPaths } from "./config/paths.ts";
+export { SkillCatalog, SkillMetricsStore, auditSkill, loadSkillBody, reconcileSkillLifecyclesEffect, recordSkillMetricsEffect, resolveSkillsForStep } from "./skills/skills.ts";
+export type { AgentDefinition, AgentMemoryPolicy, AgentThinkingLevel, RouteDecision, RoutePlan, RunState, MemoryCandidate, MemoryRecord, SkillDefinition, ResolvedSkill, RejectedSkill } from "./domain/schemas.ts";
+export type { MemoryProvider } from "./config/config.ts";

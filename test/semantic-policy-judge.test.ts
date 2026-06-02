@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { afterEach, test } from "bun:test";
-import { beginChalinTurn, getSemanticPolicyJudgeResultsForTests, isSemanticPolicyJudgeRequestFresh, recordDirectToolCompletion, recordSemanticPolicyJudgeResult, resetRuntimeState } from "../src/runtime-state.ts";
+import { beginChalinTurn, getSemanticPolicyJudgeResultsForTests, isSemanticPolicyJudgeRequestFresh, recordDirectToolCompletion, recordSemanticPolicyJudgeResult, resetRuntimeState } from "../src/runtime/state.ts";
 import {
   parseSemanticPolicyJudgeResult,
   runSemanticPolicyJudge,
@@ -11,7 +11,15 @@ import {
   semanticPolicyJudgeStructuredOutputOptions,
   shouldApplySemanticPolicyJudgeResult,
   validateSemanticPolicyJudgeResult,
-} from "../src/semantic-policy-judge.ts";
+} from "../src/skills/semantic-policy-judge.ts";
+import {
+  DIRECT_DECISION_JUDGE_TOOL_NAME,
+  directDecisionJudgeStructuredOutputOptions,
+  parseDirectDecisionJudgeResult,
+  runDirectDecisionJudge,
+  shouldRejectDirectFromJudge,
+  validateDirectDecisionJudgeResult,
+} from "../src/skills/direct-decision-judge.ts";
 
 afterEach(() => {
   resetRuntimeState();
@@ -330,4 +338,110 @@ test("semantic policy judge falls back to JSON validation and traces usage when 
   } finally {
     registration.unregister();
   }
+});
+
+test("direct decision judge parses strict route and interview decisions", () => {
+  const route = parseDirectDecisionJudgeResult(fauxAssistantMessage([
+    fauxToolCall(DIRECT_DECISION_JUDGE_TOOL_NAME, {
+      decision: "route",
+      reason: "The proposed direct scope needs independent evidence synthesis.",
+      confidence: 0.89,
+      blockers: ["independent evidence synthesis"],
+    }),
+  ], { stopReason: "toolUse", responseId: "direct-decision-route" }));
+
+  assert.ok(route);
+  assert.equal(route.decision, "route");
+  assert.equal(route.trace?.mode, "tool-schema");
+  assert.equal(shouldRejectDirectFromJudge(route), true);
+
+  const interview = validateDirectDecisionJudgeResult({
+    decision: "interview",
+    reason: "A human tradeoff blocks a responsible plan.",
+    confidence: 0.8,
+    blockers: ["human tradeoff"],
+  });
+  assert.ok(interview);
+  assert.equal(shouldRejectDirectFromJudge(interview), true);
+});
+
+test("direct decision judge does not reject low confidence or direct decisions", () => {
+  assert.equal(shouldRejectDirectFromJudge({
+    decision: "route",
+    reason: "Weak signal only.",
+    confidence: 0.4,
+    blockers: ["weak signal"],
+  }), false);
+  assert.equal(shouldRejectDirectFromJudge({
+    decision: "direct",
+    reason: "One bounded surface.",
+    confidence: 0.92,
+    blockers: [],
+  }), false);
+});
+
+test("direct decision judge falls back to JSON validation with high reasoning", async () => {
+  const registration = registerFauxProvider({
+    api: "direct-decision-faux",
+    provider: "direct-decision-faux",
+  });
+  try {
+    registration.setResponses([
+      (context, options) => {
+        assert.equal(context.tools, undefined);
+        assert.equal((options as { reasoning?: string } | undefined)?.reasoning, "high");
+        return fauxAssistantMessage(JSON.stringify({
+          decision: "route",
+          reason: "The task requires reconstruction of current project state before a reliable answer.",
+          confidence: 0.87,
+          blockers: ["current project state reconstruction"],
+        }), { responseId: "direct-decision-json" });
+      },
+    ]);
+
+    const result = await runDirectDecisionJudge({
+      task: "Explain what changed in the active workspace.",
+      reason: "This was proposed as direct.",
+      scope: {
+        oneOwnershipSurface: true,
+        clearAcceptanceSurface: true,
+        parentVerifiableWithoutDelegation: true,
+        needsRepositoryStateOrHistorySynthesis: false,
+        needsMultipleLocalEvidenceSurfaces: false,
+        needsBroadWorkspaceEvidence: false,
+        needsDelegatedReviewOrSplitCoverage: false,
+      },
+      context: {
+        model: registration.getModel(),
+        modelRegistry: {
+          getApiKeyAndHeaders: async () => ({ ok: true as const, apiKey: "test-key" }),
+        } as unknown as ModelRegistry,
+      },
+    });
+
+    assert.ok(result);
+    assert.equal(result.decision, "route");
+    assert.equal(result.trace?.mode, "json-fallback");
+    assert.equal(result.trace?.responseId, "direct-decision-json");
+    assert.equal(shouldRejectDirectFromJudge(result), true);
+  } finally {
+    registration.unregister();
+  }
+});
+
+test("direct decision judge schema is closed and uses provider tool forcing where supported", () => {
+  assert.equal(validateDirectDecisionJudgeResult({
+    decision: "route",
+    reason: "Needs routed evidence.",
+    confidence: 0.9,
+    blockers: ["evidence"],
+    extra: "field",
+  }), undefined);
+  assert.deepEqual(directDecisionJudgeStructuredOutputOptions("openai-completions"), {
+    toolChoice: { type: "function", function: { name: DIRECT_DECISION_JUDGE_TOOL_NAME } },
+  });
+  assert.deepEqual(directDecisionJudgeStructuredOutputOptions("anthropic-messages"), {
+    toolChoice: { type: "tool", name: DIRECT_DECISION_JUDGE_TOOL_NAME },
+  });
+  assert.equal(directDecisionJudgeStructuredOutputOptions("openai-responses"), undefined);
 });

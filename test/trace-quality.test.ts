@@ -10,11 +10,11 @@ function event(value: unknown): string {
 const deepAnswer = [
   "## Coverage Matrix",
   "| Área | Evidencia |",
-  "| Runtime | src/runner.ts usa Cached Project Discovery Index y chalin_project_discovery |",
-  "| Tools | src/child-tools.ts expone chalin_project_discovery |",
+  "| Runtime | src/runner/runner.ts usa Cached Project Discovery Index y chalin_project_discovery |",
+  "| Tools | src/tools/child-tools.ts expone chalin_project_discovery |",
   "| Tests | test/discovery.test.ts valida layouts raros |",
   "## Evidence Table",
-  "- src/discovery.ts: índice raw stack-agnostic.",
+  "- src/project/discovery.ts: índice raw stack-agnostic.",
   "- package.json: scripts test/typecheck.",
   "- agents/scout.md: discovery-first antes de claims.",
   "Conclusión: el proyecto implementa una extensión de orquestación multi-agente con discovery primero, rutas delegadas, controles de evidencia y evals de calidad. ".repeat(8),
@@ -30,7 +30,7 @@ test("parsePiJsonTrace extracts chalin_route args and result material", () => {
   assert.equal(trace.jsonEvents, 2);
   assert.equal(trace.toolEvents.length, 2);
   assert.match(trace.chalinRouteArgs[0] ?? "", /chalin_project_discovery/);
-  assert.match(trace.chalinRouteResults[0] ?? "", /src\/discovery\.ts/);
+  assert.match(trace.chalinRouteResults[0] ?? "", /src\/project\/discovery\.ts/);
 });
 
 test("gradePiTrace passes evidence-rich chalin trace", () => {
@@ -59,7 +59,7 @@ test("gradePiTrace flags repeated chalin_route and parent exploration after chal
   const stdout = [
     event({ type: "tool_execution_end", toolName: "chalin_route", result: { content: [{ type: "text", text: deepAnswer }] } }),
     event({ type: "tool_execution_end", toolName: "chalin_route", result: { content: [{ type: "text", text: deepAnswer }] } }),
-    event({ type: "tool_execution_start", toolName: "read", args: { path: "src/runner.ts" } }),
+    event({ type: "tool_execution_start", toolName: "read", args: { path: "src/runner/runner.ts" } }),
   ].join("\n");
 
   const report = gradePiTrace(stdout, { variant: "chalin" });

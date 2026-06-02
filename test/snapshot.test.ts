@@ -3,9 +3,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, test } from "bun:test";
-import { buildProjectSnapshot, formatProjectSnapshot } from "../src/snapshot.ts";
-import { createChildToolPolicy, createChildTools, createProjectSnapshotTool } from "../src/child-tools.ts";
-import { createMemoryCandidate, MemoryStore } from "../src/memory.ts";
+import { buildProjectSnapshot, formatProjectSnapshot } from "../src/project/snapshot.ts";
+import { createChildToolPolicy, createChildTools, createProjectSnapshotTool } from "../src/tools/child-tools.ts";
+import { createMemoryCandidate, MemoryStore } from "../src/memory/memory.ts";
 
 const tempDirs: string[] = [];
 afterEach(() => { while (tempDirs.length > 0) fs.rmSync(tempDirs.pop()!, { recursive: true, force: true }); });

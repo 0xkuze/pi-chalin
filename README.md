@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="package.json"><img alt="version" src="https://img.shields.io/badge/version-0.4.0-111111?style=for-the-badge"></a>
+  <a href="package.json"><img alt="version" src="https://img.shields.io/badge/version-1.0.0-111111?style=for-the-badge"></a>
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT%20%2B%20Attribution-0f766e?style=for-the-badge"></a>
   <a href="package.json"><img alt="bun" src="https://img.shields.io/badge/bun-%3E%3D1.3.14-111111?style=for-the-badge&logo=bun&logoColor=white"></a>
   <a href="package.json"><img alt="typescript" src="https://img.shields.io/badge/typescript-6.0-3178c6?style=for-the-badge&logo=typescript&logoColor=white"></a>
@@ -200,25 +200,33 @@ Project agents win locally, user agents remain portable, and built-ins provide t
 
 ## Architecture
 
-Chalin is a modular monolith. The extension keeps runtime boundaries explicit without splitting the product into premature services.
+Chalin is a modular monolith. The extension keeps runtime boundaries explicit without splitting the product into premature services. `src/index.ts` is the package and Pi extension entrypoint; implementation lives in capability folders. Public package subpaths use canonical module folders such as `pi-chalin/runner/runner`, `pi-chalin/tools/tools`, and `pi-chalin/runtime/state`; legacy root deep imports like `pi-chalin/src/runner.ts` are intentionally not part of the v1 surface.
 
 ```txt
-src/index.ts              extension registration
-src/commands.ts           /chalin command tree
-src/tools.ts              Pi tool definitions
-src/autoroute.ts          prompt-time routing guidance
-src/kernel.ts             route validation and orchestration
-src/runner.ts             worker execution, resume, and run metrics
-src/agents.ts             agent catalog and resolution
-src/config.ts             config, safety, autonomy, and overrides
-src/memory.ts             built-in memory store
-src/memory-provider.ts    built-in and Engram memory backends
-src/artifacts.ts          resumable task state and handoffs
-src/webfetch.ts           audited external context cache
-src/worktrees.ts          isolated writer worktrees
-src/ui.ts                 TUI panels and confirmations
-src/schemas.ts            shared runtime types
+src/index.ts                  extension registration only
+src/agents/                   agent catalog, resolution, overrides
+src/artifacts/                resumable task state and handoffs
+src/budget/                   budget policy, telemetry, checkpoints
+src/commands/                 /chalin command tree
+src/config/                   config, paths, safety, autonomy, overrides
+src/domain/                   shared runtime types
+src/interview/                clarification workflow
+src/kernel/                   route validation and orchestration
+src/memory/                   memory store, write policy, provider backends
+src/observability/            tokenomics, traces, evidence-claim auditing
+src/orchestration/            orchestrator prompt and agent selection
+src/project/                  discovery and project snapshots
+src/routing/                  autoroute, route format, guards, TUI widgets
+src/runner/                   model resolution, prompt builder, run state
+src/runtime/                  in-memory run state, child sessions, status
+src/skills/                   skill catalog, metrics, semantic policy judge
+src/tools/                    Pi tool registration and tool output helpers
+src/ui/                       status bar, agent manager, settings panels
+src/webfetch/                 audited external context cache
+src/worktrees/                isolated writer worktrees
 ```
+
+This v1 module layout is a breaking cleanup from earlier deep-import facades. Import from `pi-chalin` for the extension entrypoint or from explicit canonical subpaths declared in `package.json#exports`.
 
 Runtime state is project-local:
 

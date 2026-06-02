@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "bun:test";
-import { buildPromptTokenomics, buildTokenomicsFromCharCounts, buildToolOutputTokenomics, createStructuredSpan, mergeTraceSpans } from "../src/observability.ts";
+import { buildPromptTokenomics, buildTokenomicsFromCharCounts, buildToolOutputTokenomics, createStructuredSpan, mergeTraceSpans } from "../src/observability/observability.ts";
 
 test("buildPromptTokenomics estimates stable and variable prompt phases separately", () => {
   const tokenomics = buildPromptTokenomics({
@@ -64,15 +64,15 @@ test("structured spans keep parent-child timing and bounded metadata", () => {
   const tool = createStructuredSpan({
     id: "tool-1",
     parentId: "run",
-    name: "read src/runner.ts",
+    name: "read src/runner/runner.ts",
     kind: "tool-call",
     startedAt: 1100,
     endedAt: 1300,
-    attributes: { toolName: "read", path: "src/runner.ts", ignored: undefined },
+    attributes: { toolName: "read", path: "src/runner/runner.ts", ignored: undefined },
   });
 
   assert.equal(run.durationMs, 600);
   assert.equal(tool.parentId, "run");
-  assert.deepEqual(tool.attributes, { toolName: "read", path: "src/runner.ts" });
+  assert.deepEqual(tool.attributes, { toolName: "read", path: "src/runner/runner.ts" });
   assert.deepEqual(mergeTraceSpans([run], [tool]).map((span) => span.id), ["run", "tool-1"]);
 });

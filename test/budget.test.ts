@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "bun:test";
-import { evaluateBudgetUsage, estimateBudgetPreflight, policyForStep, recordBudgetCheckpoint, scoreProgress, summarizeToolUtility } from "../src/budget.ts";
-import { ArtifactStore } from "../src/artifacts.ts";
-import type { AgentDefinition, RunStepState } from "../src/schemas.ts";
+import { evaluateBudgetUsage, estimateBudgetPreflight, policyForStep, recordBudgetCheckpoint, scoreProgress, summarizeToolUtility } from "../src/budget/budget.ts";
+import { ArtifactStore } from "../src/artifacts/artifacts.ts";
+import type { AgentDefinition, RunStepState } from "../src/domain/schemas.ts";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -177,7 +177,7 @@ test("scoreProgress turns utility signals into continuation gates", () => {
   const lowSignal = scoreProgress({
     findings: [],
     toolCalls: 12,
-    filesRead: ["src/runner.ts", "src/runner.ts", "src/runner.ts"],
+    filesRead: ["src/runner/runner.ts", "src/runner/runner.ts", "src/runner/runner.ts"],
     verificationDone: false,
     memoryCandidates: [],
   });
@@ -190,9 +190,9 @@ test("scoreProgress turns utility signals into continuation gates", () => {
 
 test("scoreProgress flags late first signal even when later findings exist", () => {
   const lateSignal = scoreProgress({
-    findings: ["src/index.ts defines the extension entrypoint.", "src/tools.ts registers the route tool."],
+    findings: ["src/index.ts defines the extension entrypoint.", "src/tools/tools.ts registers the route tool."],
     toolCalls: 12,
-    filesRead: ["package.json", "README.md", "src/index.ts", "src/tools.ts"],
+    filesRead: ["package.json", "README.md", "src/index.ts", "src/tools/tools.ts"],
     firstSignalToolCall: 10,
     verificationDone: false,
     memoryCandidates: [],

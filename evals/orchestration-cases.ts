@@ -1,14 +1,19 @@
 export type ChalinExpectedDecision = "chalin" | "direct";
 export type ChalinExpectedTopology = "sequential" | "dag" | "none";
+export type ChalinPreRouteInspection = "forbidden" | "minimal-if-needed";
 
 export interface ChalinOrchestrationEvalCase {
   id: string;
   prompt: string;
   expectedDecision: ChalinExpectedDecision;
   expectedTopology: ChalinExpectedTopology;
+  expectedWorkUnitStrategy?: "none" | "discover" | "planned";
+  minWorkUnits?: number;
+  minMaterializedWorkUnits?: number;
   acceptedTopologies?: ChalinExpectedTopology[];
   expectedAgents: string[];
   acceptedAgentSets?: string[][];
+  preRouteInspection?: ChalinPreRouteInspection;
   category: string;
   reason: string;
 }
@@ -20,6 +25,7 @@ export const ORCHESTRATION_EVAL_CASES: ChalinOrchestrationEvalCase[] = [
     expectedDecision: "chalin",
     expectedTopology: "sequential",
     expectedAgents: ["scout"],
+    preRouteInspection: "forbidden",
     category: "branch-analysis",
     reason: "Branch summaries require git/diff exploration, but a single scout can provide the evidence handoff while the primary agent synthesizes the user-facing answer.",
   },
@@ -31,6 +37,7 @@ export const ORCHESTRATION_EVAL_CASES: ChalinOrchestrationEvalCase[] = [
     acceptedTopologies: ["sequential", "dag"],
     expectedAgents: ["scout"],
     acceptedAgentSets: [["scout"], ["context-builder"]],
+    preRouteInspection: "forbidden",
     category: "broad-local-analysis",
     reason: "Understanding an unknown project needs scoped exploration; sequential and DAG are both valid depending on whether the router keeps the map as one ordered pass or splits independent surfaces before synthesis.",
   },
@@ -41,6 +48,7 @@ export const ORCHESTRATION_EVAL_CASES: ChalinOrchestrationEvalCase[] = [
     expectedTopology: "dag",
     acceptedTopologies: ["dag", "sequential"],
     expectedAgents: ["scout", "context-builder"],
+    preRouteInspection: "forbidden",
     category: "deep-local-analysis-fanout",
     reason: "Deep repository understanding should gather scoped context and synthesize afterward; DAG is preferred when the router splits independent surfaces, while sequential is still valid when it preserves a coherent ordered analysis.",
   },
@@ -50,6 +58,7 @@ export const ORCHESTRATION_EVAL_CASES: ChalinOrchestrationEvalCase[] = [
     expectedDecision: "chalin",
     expectedTopology: "sequential",
     expectedAgents: ["scout", "planner"],
+    preRouteInspection: "forbidden",
     category: "architecture-migration",
     reason: "A migration across all components benefits from inventory then planning; a separate reviewer is optional overhead unless risk review is requested.",
   },
@@ -60,6 +69,7 @@ export const ORCHESTRATION_EVAL_CASES: ChalinOrchestrationEvalCase[] = [
     expectedTopology: "sequential",
     acceptedTopologies: ["sequential", "dag"],
     expectedAgents: ["scout"],
+    preRouteInspection: "forbidden",
     category: "review",
     reason: "A high-level architecture-risk overview needs routed evidence; sequential and DAG are both valid depending on whether the router keeps one scout pass or splits independent surfaces before synthesis.",
   },
@@ -68,9 +78,63 @@ export const ORCHESTRATION_EVAL_CASES: ChalinOrchestrationEvalCase[] = [
     prompt: "implement a safer auth refresh flow and add tests",
     expectedDecision: "chalin",
     expectedTopology: "sequential",
+    acceptedTopologies: ["sequential", "dag"],
     expectedAgents: ["worker", "reviewer"],
+    acceptedAgentSets: [
+      ["worker", "reviewer"],
+      ["scout", "planner", "worker", "reviewer"],
+    ],
+    preRouteInspection: "forbidden",
     category: "implementation",
-    reason: "Implementation touching behavior and tests needs an executor and a later review; the worker can gather local context unless evidence proves a separate scout/planner is needed.",
+    reason: "A behavior-and-test implementation needs routed execution and review. The workflow may stay sequential or add discovery/planning/DAG decomposition when the model finds unclear ownership boundaries.",
+  },
+  {
+    id: "explicit-unit-fanout",
+    prompt: "este cambio va a ser grande: mejora el comportamiento, las pruebas y la documentacion de las partes independientes del repo; primero identifica superficies que se puedan trabajar sin pisarse, ejecuta cada parte por separado, valida cada resultado y cierra con una revision global",
+    expectedDecision: "chalin",
+    expectedTopology: "dag",
+    expectedWorkUnitStrategy: "discover",
+    minMaterializedWorkUnits: 2,
+    expectedAgents: ["scout", "worker", "reviewer"],
+    preRouteInspection: "forbidden",
+    category: "explicit-decomposition",
+    reason: "A broad implementation request with concrete quality goals must preserve independent execution intent: first discover bounded parts, then execute and review them separately instead of collapsing everything into one generic worker.",
+  },
+  {
+    id: "explicit-boundary-fanout",
+    prompt: "haz una mejora amplia en este proyecto, pero dividela por limites reales de responsabilidad del codigo; cada parte debe avanzar aislada, tener verificacion propia y luego una comprobacion final de consistencia",
+    expectedDecision: "chalin",
+    expectedTopology: "dag",
+    expectedWorkUnitStrategy: "discover",
+    minMaterializedWorkUnits: 2,
+    expectedAgents: ["scout", "worker", "reviewer"],
+    preRouteInspection: "forbidden",
+    category: "explicit-decomposition",
+    reason: "The user explicitly defines work by responsibility boundary; pi-chalin should discover concrete bounded parts and preserve separate execution/review.",
+  },
+  {
+    id: "explicit-scope-fanout",
+    prompt: "quiero una implementacion amplia, no una sola pasada gigante; separa el trabajo por areas independientes que encuentres en el workspace, comprueba cada area y despues integra el resultado",
+    expectedDecision: "chalin",
+    expectedTopology: "dag",
+    expectedWorkUnitStrategy: "discover",
+    minMaterializedWorkUnits: 2,
+    expectedAgents: ["scout", "worker", "reviewer"],
+    preRouteInspection: "forbidden",
+    category: "explicit-decomposition",
+    reason: "The user explicitly asks for independent-area decomposition; routing should remain unit-agnostic and use discovery plus separate execution/review.",
+  },
+  {
+    id: "large-work-decomposition",
+    prompt: "en este workspace, implementa un plan de cambios reales que excede un worker unico; descomponlo en unidades pequenas descubiertas, ejecuta subagentes aislados y revisa el fan-in",
+    expectedDecision: "chalin",
+    expectedTopology: "dag",
+    expectedWorkUnitStrategy: "discover",
+    minMaterializedWorkUnits: 2,
+    expectedAgents: ["scout", "worker", "reviewer"],
+    preRouteInspection: "forbidden",
+    category: "large-work-decomposition",
+    reason: "Implementation that exceeds one worker ownership boundary should not be assigned to one oversized worker; it needs discovery/planning, bounded worker-owned units, and fan-in review.",
   },
   {
     id: "parallel-options",
@@ -78,6 +142,7 @@ export const ORCHESTRATION_EVAL_CASES: ChalinOrchestrationEvalCase[] = [
     expectedDecision: "chalin",
     expectedTopology: "sequential",
     expectedAgents: ["planner"],
+    preRouteInspection: "minimal-if-needed",
     category: "parallel-analysis",
     reason: "A local module-splitting comparison can use compact evidence then planning; parallel planners are reserved for explicitly independent perspectives or high-stakes disagreement.",
   },
@@ -86,9 +151,11 @@ export const ORCHESTRATION_EVAL_CASES: ChalinOrchestrationEvalCase[] = [
     prompt: "implementa dos cambios independientes en modulos separados: mejora auth y agrega tests de billing",
     expectedDecision: "chalin",
     expectedTopology: "dag",
+    expectedWorkUnitStrategy: "planned",
     expectedAgents: ["worker"],
+    preRouteInspection: "forbidden",
     category: "parallel-implementation",
-    reason: "Independent implementation slices should use a staged DAG so discovery/planning can happen first, worker tasks can fan out in parallel with isolated ownership, and review can fan in afterward.",
+    reason: "Independent implementation slices already named by the user should use a planned DAG with isolated worker ownership and later review, instead of dynamic discovery fanout.",
   },
   {
     id: "memory-recall",
@@ -105,6 +172,7 @@ export const ORCHESTRATION_EVAL_CASES: ChalinOrchestrationEvalCase[] = [
     expectedDecision: "chalin",
     expectedTopology: "sequential",
     expectedAgents: ["scout"],
+    preRouteInspection: "forbidden",
     category: "broad-local-analysis-go",
     reason: "Stack-agnostic project understanding should use scout evidence without assuming a Node-style package manifest or paying for avoidable synthesis overhead.",
   },
@@ -113,9 +181,12 @@ export const ORCHESTRATION_EVAL_CASES: ChalinOrchestrationEvalCase[] = [
     prompt: "implementa manejo seguro de refresh token en este servicio Go y agrega tests",
     expectedDecision: "chalin",
     expectedTopology: "sequential",
+    acceptedTopologies: ["sequential", "dag"],
+    minWorkUnits: 2,
     expectedAgents: ["worker", "reviewer"],
+    preRouteInspection: "forbidden",
     category: "implementation-go",
-    reason: "A Go implementation with tests needs worker execution and review; extra planning/discovery agents are optional when the route discovers broader risk.",
+    reason: "A Go implementation with tests needs worker execution, review, persisted checkpointing, and bounded WorkUnits. Sequential and DAG are both valid: ordered units should stay sequential, while independent ownership boundaries may fan out before integration review.",
   },
   {
     id: "surgical-long-file-edit",
@@ -123,6 +194,7 @@ export const ORCHESTRATION_EVAL_CASES: ChalinOrchestrationEvalCase[] = [
     expectedDecision: "chalin",
     expectedTopology: "sequential",
     expectedAgents: ["worker", "reviewer"],
+    preRouteInspection: "forbidden",
     category: "surgical-edit",
     reason: "A long-file no-rewrite edit needs disciplined worker mutation and reviewer verification; a separate planner is useful only when target-region planning is nontrivial.",
   },
@@ -132,6 +204,7 @@ export const ORCHESTRATION_EVAL_CASES: ChalinOrchestrationEvalCase[] = [
     expectedDecision: "chalin",
     expectedTopology: "sequential",
     expectedAgents: ["reviewer"],
+    preRouteInspection: "forbidden",
     category: "tool-discipline-review",
     reason: "A reviewer can inspect test and command configuration directly; extra scout handoff is optional overhead.",
   },

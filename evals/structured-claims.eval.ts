@@ -1,11 +1,11 @@
 #!/usr/bin/env bun
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { finalAnswerMaterial } from "../src/route-format.ts";
-import { buildSdkPrompt, childToolNames } from "../src/runner-prompt.ts";
-import { parseAgentOutput } from "../src/runner.ts";
-import { createRunState } from "../src/runner-state.ts";
-import type { AgentDefinition, EvidenceClaim } from "../src/schemas.ts";
+import { finalAnswerMaterial } from "../src/routing/route-format.ts";
+import { buildSdkPrompt, childToolNames } from "../src/runner/runner-prompt.ts";
+import { parseAgentOutput } from "../src/runner/runner.ts";
+import { createRunState } from "../src/runner/runner-state.ts";
+import type { AgentDefinition, EvidenceClaim } from "../src/domain/schemas.ts";
 
 interface EvalResult {
   id: string;
