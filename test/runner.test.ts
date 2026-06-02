@@ -3543,7 +3543,7 @@ test("buildSdkPrompt injects write and verification handoff contracts from route
   assert.match(mutatingPrompt, /behavior\/API is missing/i);
   assert.match(mutatingPrompt, /next human decision/i);
   assert.match(mutatingPrompt, /do not invent/i);
-  assert.match(mutatingPrompt, /do not weaken tests or downgrade unmet required behavior to residual risk/i);
+  assert.match(mutatingPrompt, /never weaken tests or call unmet required behavior residual risk/i);
   assert.match(mutatingPrompt, /scratch in cwd/i);
 });
 
@@ -3591,8 +3591,8 @@ test("buildSdkPrompt makes implementation reviewers audit plan gaps instead of r
   assert.match(prompt, /Review unavailable optional verification carefully/i);
   assert.match(prompt, /block only when the Original User Goal, planner acceptance criteria, or discovered repo commands require it/i);
   assert.match(prompt, /non-blocking concern in residualRisks/i);
-  assert.match(prompt, /Residual risks are only for optional or future-hardening concerns/i);
-  assert.match(prompt, /contradicts an explicit Original User Goal guarantee/i);
+  assert.match(prompt, /Residual risks are optional\/future-hardening only/i);
+  assert.match(prompt, /unmet Original User Goal guarantees are blockingFindings or missingCoverage/i);
 });
 
 test("buildSdkPrompt asks discovery planners for verifiable WorkUnits without case-specific fanout rules", () => {
