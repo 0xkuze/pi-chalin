@@ -10,10 +10,8 @@ export function parseAgentOutput(agent: string, raw: string): AgentOutput {
   const structuredHandoff = parseStructuredAgentHandoff(raw, claimLedger.claims, warnings);
   const reviewerVerdict = agent === "reviewer" ? parseStructuredReviewerVerdict(raw, warnings) : undefined;
   if (agent === "reviewer" && !reviewerVerdict) warnings.push("Reviewer output did not include a structured Reviewer Verdict.");
-  let handoff = structuredHandoff ? formatAgentHandoffForLegacy(structuredHandoff) : undefined;
-  const handoffBlock = extractMarkdownSection(raw, "Handoff");
-  if (!handoff && handoffBlock) handoff = truncateText(handoffBlock.trim(), handoffBudgetChars(agent));
-  const handoffContract = structuredHandoff ? "structured" : handoff ? "legacy-degraded" : "missing";
+  const handoff = structuredHandoff ? formatAgentHandoffSummary(structuredHandoff, agent) : undefined;
+  const handoffContract = structuredHandoff ? "structured" : "missing";
 
   const candidates: MemoryCandidate[] = [];
   const memoryBlock = extractMarkdownSection(raw, "Memory Candidates") ?? extractMarkdownSection(raw, "Memory Candidate");
@@ -51,6 +49,8 @@ function parseStructuredAgentHandoff(raw: string, claims: EvidenceClaim[], warni
     evidenceClaims: evidenceClaimsField(value, claims),
     risks: stringArrayField(value, "risks"),
     nextActions: stringArrayField(value, "nextActions"),
+    ...(typeof value.requiresHumanInput === "boolean" ? { requiresHumanInput: value.requiresHumanInput } : {}),
+    ...(stringArrayField(value, "humanInputQuestions").length ? { humanInputQuestions: stringArrayField(value, "humanInputQuestions").slice(0, 5) } : {}),
     workUnits: workUnitsField(value),
   };
 }
@@ -76,7 +76,7 @@ function parseStructuredReviewerVerdict(raw: string, warnings: string[]): Review
   const blockingFindings = stringArrayField(value, "blockingFindings", { structuredObjects: true });
   const missingCoverage = stringArrayField(value, "missingCoverage", { structuredObjects: true });
   const residualRisks = stringArrayField(value, "residualRisks");
-  const repairFiles = reviewerRepairFiles(value, evidenceRecords);
+  const repairFiles = reviewerRepairFiles(value, evidenceRecords, rawVerdict);
   const normalizedVerdict = rawVerdict === "pass" && (blockingFindings.length > 0 || missingCoverage.length > 0 || requiredRepair)
     ? blockingFindings.length > 0 ? "fail" : "gap"
     : rawVerdict;
@@ -247,14 +247,19 @@ function normalizeReviewerEvidenceRecord(value: unknown): ReviewerEvidenceRecord
   }];
 }
 
-function reviewerRepairFiles(record: Record<string, unknown>, evidenceRecords: ReviewerEvidenceRecord[]): string[] {
-  return uniqueNonEmptyStrings([
+function reviewerRepairFiles(record: Record<string, unknown>, evidenceRecords: ReviewerEvidenceRecord[], verdict: string): string[] {
+  const explicitFiles = uniqueNonEmptyStrings([
     ...structuredFileReferences(record.repairFiles, { allowStringItems: true }),
     ...structuredFileReferences(record.blockingFindings),
     ...structuredFileReferences(record.missingCoverage),
     ...structuredFileReferences(record.requiredRepair),
     ...evidenceRecords.filter((item) => item.status === "fail").flatMap((item) => item.paths),
   ]);
+  const hasFailedVerificationEvidence = evidenceRecords.some((item) => item.kind === "verification" && item.status === "fail");
+  if (explicitFiles.length > 0 || verdict === "pass" || !hasFailedVerificationEvidence) return explicitFiles;
+  return uniqueNonEmptyStrings(evidenceRecords
+    .filter((item) => item.kind === "reviewed-content")
+    .flatMap((item) => item.paths));
 }
 
 function structuredFileReferences(value: unknown, options: { allowStringItems?: boolean } = {}): string[] {
@@ -402,15 +407,16 @@ function normalizeEvidenceClaim(value: unknown): EvidenceClaim[] {
   }];
 }
 
-function formatAgentHandoffForLegacy(handoff: AgentHandoff): string {
+function formatAgentHandoffSummary(handoff: AgentHandoff, agent?: string): string {
   const lines = [
     `Summary: ${handoff.summary}`,
     handoff.changedFiles.length ? `Changed: ${handoff.changedFiles.join(", ")}` : undefined,
     handoff.verification.length ? `Verification: ${handoff.verification.join("; ")}` : undefined,
     handoff.risks.length ? `Risks: ${handoff.risks.join("; ")}` : undefined,
     handoff.nextActions.length ? `Next: ${handoff.nextActions.join("; ")}` : undefined,
+    handoff.requiresHumanInput ? `Human input required: ${(handoff.humanInputQuestions?.length ? handoff.humanInputQuestions : handoff.nextActions).join("; ")}` : undefined,
   ].filter((line): line is string => Boolean(line));
-  return truncateText(lines.join("\n"), handoffBudgetChars());
+  return truncateText(lines.join("\n"), handoffBudgetChars(agent));
 }
 
 function parseMemoryCandidateLine(line: string): { category: string; content: string; confidence: number } | undefined {

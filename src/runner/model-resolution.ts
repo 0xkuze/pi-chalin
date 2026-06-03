@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { AgentDefinition, AgentThinkingLevel, ModelResolutionAttempt, ModelResolutionLog } from "../domain/schemas.ts";
+import { isAgentThinkingLevel, type AgentDefinition, type AgentThinkingLevel, type ModelResolutionAttempt, type ModelResolutionLog } from "../domain/schemas.ts";
 
 interface ModelResolutionContext {
   cwd?: string;
@@ -99,11 +99,18 @@ export function resolveAgentThinking(
   context: ModelResolutionContext,
   modelResolution?: ModelResolutionLog,
 ): { level?: Exclude<AgentThinkingLevel, "inherit">; label: AgentThinkingLevel } {
+  const forcedEvalThinking = evalAgentThinkingOverride();
   const explicit = context.thinkingOverrides?.[`${agent?.scope ?? "built-in"}/${agentName}`] ?? context.thinkingOverrides?.[agentName];
   const frontmatter = agent?.thinking && agent.thinking !== "inherit" ? agent.thinking : undefined;
   const modelSuffix = selectedThinkingSuffix(modelResolution);
-  const level = explicit && explicit !== "inherit" ? explicit : frontmatter ?? modelSuffix;
+  const level = forcedEvalThinking ?? (explicit && explicit !== "inherit" ? explicit : frontmatter ?? modelSuffix);
   return level ? { level, label: level } : { label: "inherit" };
+}
+
+function evalAgentThinkingOverride(): Exclude<AgentThinkingLevel, "inherit"> | undefined {
+  const value = process.env.PI_CHALIN_EVAL_AGENT_THINKING?.trim();
+  if (!value || value === "inherit" || !isAgentThinkingLevel(value)) return undefined;
+  return value as Exclude<AgentThinkingLevel, "inherit">;
 }
 
 function selectedThinkingSuffix(modelResolution?: ModelResolutionLog): Exclude<AgentThinkingLevel, "inherit"> | undefined {

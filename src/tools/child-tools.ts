@@ -21,11 +21,9 @@ import { createMemoryCandidate } from "../memory/memory.ts";
 import { createConfiguredMemoryStore } from "../memory/memory-provider.ts";
 import { loadEffectiveConfig } from "../config/config.ts";
 import type { BudgetCapHit, BudgetCapName, BudgetCapSeverity } from "../domain/schemas.ts";
-import { buildProjectSnapshot, formatProjectSnapshot } from "../project/snapshot.ts";
 import { SkillCatalog, auditSkill, formatSkillList, formatSkillSearch, formatSkillShow } from "../skills/skills.ts";
 import { fetchWebUrls, formatWebBundle, searchWeb } from "../webfetch/webfetch.ts";
 
-const SnapshotParams = Type.Object({});
 const ChildSkillParams = Type.Object({
   action: Type.Union([Type.Literal("list"), Type.Literal("show"), Type.Literal("search"), Type.Literal("audit")]),
   name: Type.Optional(Type.String({ description: "Skill reference for show/audit, or search text when task is omitted." })),
@@ -235,7 +233,7 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
   const shellCommands: string[] = [];
   const pendingShellCommands: Array<{ command?: string; afterMutation: boolean; dirtyBaseline?: string[] }> = [];
   const retriesByTool: Record<string, number> = {};
-  const readCallsByPath: Record<string, number> = {};
+  const readCallsBySignature: Record<string, number> = {};
   const allowedTools = new Set(options.allowedTools ?? []);
   const priorFilesRead = new Set((options.priorFilesRead ?? []).map((item) => normalizeMetricPath(item, options.cwd)));
   const workUnitScope = normalizeWorkUnitScope(options.workUnitScope, options.cwd);
@@ -251,6 +249,7 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
   let mutationSucceeded = false;
   let postMutationShellCommands = 0;
   let successfulPostMutationShellCommands = 0;
+  let terminalPolicyViolation: string | undefined;
   const startedAt = Date.now();
   const caps = options.budgetPolicy?.caps ?? {
     maxToolCalls: options.maxToolCalls,
@@ -265,11 +264,13 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
 
   function violation(reason: string): { allowed: false; reason: string } {
     policyViolations.push(reason);
+    if (isTerminalToolPolicyViolation(reason)) terminalPolicyViolation ??= reason;
     return { allowed: false, reason };
   }
 
   function recordViolation(reason: string): void {
     policyViolations.push(reason);
+    if (isTerminalToolPolicyViolation(reason)) terminalPolicyViolation ??= reason;
   }
 
   function recordBudgetCapHit(input: {
@@ -340,6 +341,12 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
     allowedTools,
     subagentDelegation: options.subagentDelegation,
     beforeTool(toolName, params) {
+      normalizeSafeToolParams(toolName, params, options.cwd);
+      if (terminalPolicyViolation) {
+        const reason = `policy_stopped_after_scope_violation:${terminalPolicyViolation}`;
+        activity(toolName, "blocked", reason, params);
+        return violation(reason);
+      }
       if (hasExplicitAllowlist && !allowedTools.has(toolName)) {
         const reason = `tool_not_allowed:${toolName}`;
         activity(toolName, "blocked", reason, params);
@@ -355,7 +362,7 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
         budgetWarn(toolName, "max_files_touched", filesTouched.length, caps.maxFilesTouched, "pre-tool", "soft touched-files budget reached; continuing");
       }
 
-      const workspacePathViolation = outsideWorkspacePathViolation(toolName, params, options.cwd);
+      const workspacePathViolation = childWorkspacePathViolation(toolName, params, options.cwd);
       if (workspacePathViolation) {
         activity(toolName, "blocked", workspacePathViolation, params);
         return violation(workspacePathViolation);
@@ -399,7 +406,8 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
           crossStepDuplicateReadCount = nextDuplicateCount;
         }
         if (normalizedReadPath) {
-          const nextReadCount = (readCallsByPath[normalizedReadPath] ?? 0) + 1;
+          const readSignature = sameStepReadSignature(normalizedReadPath, params);
+          const nextReadCount = (readCallsBySignature[readSignature] ?? 0) + 1;
           if (nextReadCount > sameStepReadLoopLimit()) {
             const reason = `read_loop:${normalizedReadPath}`;
             activity("read", "blocked", reason, params);
@@ -426,7 +434,10 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
       if (toolName === "read") {
         const readPath = getPathParam(params);
         const normalizedReadPath = readPath ? normalizeMetricPath(readPath, options.cwd) : undefined;
-        if (normalizedReadPath) readCallsByPath[normalizedReadPath] = (readCallsByPath[normalizedReadPath] ?? 0) + 1;
+        if (normalizedReadPath) {
+          const readSignature = sameStepReadSignature(normalizedReadPath, params);
+          readCallsBySignature[readSignature] = (readCallsBySignature[readSignature] ?? 0) + 1;
+        }
       }
       activity(toolName, "start");
       return recorded;
@@ -501,7 +512,6 @@ export function createChildTools(policy: ChildToolPolicy): ToolDefinition[] {
   const tools: Array<[string, ToolDefinition<any, any, any>]> = [
     ...builtinTools.map(([name, tool]) => [name, guardTool(tool, name, policy)] as [string, ToolDefinition<any, any, any>]),
     ["chalin_project_discovery", createProjectDiscoveryTool(policy)],
-    ["chalin_project_snapshot", createProjectSnapshotTool(policy)],
     ["bash", guardTool(createBashToolDefinition(policy.cwd), "bash", policy)],
     ["chalin_web_search", createChalinWebSearchTool(policy)],
     ["chalin_artifact_write", createChalinArtifactWriteTool(policy)],
@@ -582,29 +592,6 @@ export function createProjectDiscoveryTool(policy: ChildToolPolicy): ToolDefinit
       return policy.afterTool("chalin_project_discovery", {
         content: [{ type: "text" as const, text: formatProjectDiscoveryIndex(index) }],
         details: { index },
-      }) as never;
-    },
-  });
-}
-
-export function createProjectSnapshotTool(policy: ChildToolPolicy): ToolDefinition {
-  return defineTool<typeof SnapshotParams, unknown>({
-    name: "chalin_project_snapshot",
-    label: "Chalin Project Snapshot",
-    description: "Legacy alias that returns raw project inventory plus git metadata. It does not infer stack, entrypoints, tests, commands, or importance.",
-    promptSnippet: "chalin_project_snapshot: get raw project inventory plus git metadata when change-set or repository-state facts are needed.",
-    promptGuidelines: [
-      "Prefer chalin_project_discovery unless git metadata is needed.",
-      "Treat this as filesystem/git facts only; choose follow-up reads/searches with LLM judgment.",
-    ],
-    parameters: SnapshotParams,
-    async execute() {
-      const gate = policy.beforeTool("chalin_project_snapshot", {});
-      if (!gate.allowed) return blockedToolResult(gate.reason);
-      const snapshot = buildProjectSnapshot({ cwd: policy.cwd });
-      return policy.afterTool("chalin_project_snapshot", {
-        content: [{ type: "text" as const, text: formatProjectSnapshot(snapshot) }],
-        details: { snapshot },
       }) as never;
     },
   });
@@ -889,6 +876,10 @@ function guardTool(base: ToolDefinition<any, any, any>, toolName: string, policy
 function blockedToolResult(reason: string) {
   const guidance = reason.startsWith("work_unit_scope_gap:")
     ? "Report the missing WorkUnit scope/dependency in ## Agent Handoff and stop instead of editing outside the unit."
+    : reason.startsWith("policy_stopped_after_scope_violation:")
+      ? "A prior scope violation made this step terminal. Return ## Agent Handoff with the exact missing scope/dependency; do not call more tools."
+    : reason.startsWith("mutating_git_command:")
+      ? "Git mutation is forbidden in child agents. Do not retry with git checkout/restore/switch/reset/add/commit/clean. If rollback is required, use edit only on in-scope files; otherwise report the exact blocker and stop."
     : "Stop if you have enough evidence; otherwise use fewer, more targeted Pi-native tools.";
   return {
     content: [{ type: "text" as const, text: `Blocked by pi-chalin child policy: ${reason}\n${guidance}` }],
@@ -897,10 +888,18 @@ function blockedToolResult(reason: string) {
   };
 }
 
+function isTerminalToolPolicyViolation(reason: string): boolean {
+  return reason.startsWith("work_unit_scope_gap:")
+    || reason.startsWith("outside_work_unit_scope:")
+    || reason.startsWith("mutating_git_command:")
+    || reason === "bash_denied_for_work_unit_scope";
+}
+
 function appendToolResultPolicyWarning(result: unknown, reason: string): unknown {
   const text = [
     `pi-chalin policy warning: ${reason}`,
     "This command changed files outside the active WorkUnit mutation allowlist. Stop and report the missing scope/dependency in ## Agent Handoff instead of continuing with more mutations.",
+    "Do not try to revert with git checkout/restore/reset/switch. Use only in-scope edit/write, or stop with the exact scope gap.",
   ].join("\n");
   if (!isRecord(result) || !Array.isArray(result.content)) {
     return {
@@ -924,6 +923,33 @@ function getPathParam(params: Record<string, unknown>): string | undefined {
 
 function getCommandParam(params: Record<string, unknown>): string | undefined {
   return typeof params.command === "string" ? params.command : undefined;
+}
+
+function normalizeSafeToolParams(toolName: string, params: Record<string, unknown>, cwd: string): void {
+  if (toolName !== "bash" || typeof params.command !== "string") return;
+  const normalized = stripLeadingCurrentWorkspaceCd(params.command, cwd);
+  if (normalized !== params.command) params.command = normalized;
+}
+
+function stripLeadingCurrentWorkspaceCd(command: string, cwd: string): string {
+  const andIndex = command.indexOf("&&");
+  if (andIndex < 0) return command;
+  const left = command.slice(0, andIndex).trim();
+  const right = command.slice(andIndex + 2).trimStart();
+  const words = shellWords(left);
+  if (words.length !== 2 || path.basename(words[0]!) !== "cd") return command;
+  return isSameWorkspacePath(words[1]!, cwd) ? right : command;
+}
+
+function isSameWorkspacePath(target: string, cwd: string): boolean {
+  if (!path.isAbsolute(target)) return false;
+  return path.resolve(target) === path.resolve(cwd) || safeRealpath(target) === safeRealpath(cwd);
+}
+
+function sameStepReadSignature(normalizedPath: string, params: Record<string, unknown>): string {
+  const offset = Number.isFinite(params.offset) ? Number(params.offset) : "full";
+  const limit = Number.isFinite(params.limit) ? Number(params.limit) : "full";
+  return `${normalizedPath}@${offset}:${limit}`;
 }
 
 type NormalizedWorkUnitScope = {
@@ -1052,15 +1078,18 @@ function isLikelyBinaryFile(filePath: string): boolean {
   return buffer.includes(0);
 }
 
-function outsideWorkspacePathViolation(toolName: string, params: Record<string, unknown>, cwd: string): string | undefined {
+function childWorkspacePathViolation(toolName: string, params: Record<string, unknown>, cwd: string): string | undefined {
   if (toolName === "bash") {
     const command = getCommandParam(params);
-    const target = command ? firstOutsideWorkspacePathInCommand(command, cwd) : undefined;
-    return target ? `outside_workspace_path:${target}` : undefined;
+    return command ? firstShellWorkspacePathViolation(command, cwd) : undefined;
   }
   const target = getPathParam(params);
   if (!target) return undefined;
-  return isOutsideWorkspacePath(target, cwd) ? `outside_workspace_path:${normalizeMetricPath(target, cwd)}` : undefined;
+  const normalized = normalizeMetricPath(target, cwd);
+  if (isInternalHarnessPath(normalized)) return `internal_harness_path:${normalized}`;
+  if (isOutsideWorkspacePath(target, cwd)) return `outside_workspace_path:${normalized}`;
+  if (path.isAbsolute(target)) return `absolute_workspace_path:${normalized}`;
+  return undefined;
 }
 
 function mutatingGitCommandViolation(toolName: string, params: Record<string, unknown>): string | undefined {
@@ -1073,7 +1102,7 @@ function mutatingGitCommandViolation(toolName: string, params: Record<string, un
 
 function commandSegments(command: string): string[] {
   return command
-    .split(/&&|\|\||[;\n]/)
+    .split(/&&|\|\||[|;\n]/)
     .map((segment) => segment.trim())
     .filter(Boolean);
 }
@@ -1095,6 +1124,10 @@ function isReadOnlyGitBranchCommand(args: string[]): boolean {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
     if (!arg) continue;
+    if (isShellRedirectionToken(arg)) {
+      if (isStandaloneShellRedirectionOperator(arg)) index += 1;
+      continue;
+    }
     if (isMutatingGitBranchArg(arg)) return false;
     if (arg === "--") {
       return allowPatterns && args.slice(index + 1).every((value) => value.trim().length > 0);
@@ -1111,6 +1144,14 @@ function isReadOnlyGitBranchCommand(args: string[]): boolean {
     return false;
   }
   return true;
+}
+
+function isShellRedirectionToken(arg: string): boolean {
+  return isStandaloneShellRedirectionOperator(arg) || /^[0-9]?(?:>>?|<<?|<>|&>|>&|<&)/.test(arg);
+}
+
+function isStandaloneShellRedirectionOperator(arg: string): boolean {
+  return /^(?:[0-9]?(?:>>?|<<?|<>)|&>|[0-9]?>&|[0-9]?<&)$/.test(arg);
 }
 
 function isMutatingGitBranchArg(arg: string): boolean {
@@ -1219,20 +1260,102 @@ function shellWords(segment: string): string[] {
   return segment.match(/(?:[^\s"'`\\]+|"(?:\\.|[^"])*"|'[^']*')+/g)?.map((word) => word.replace(/^['"]|['"]$/g, "")) ?? [];
 }
 
-function firstOutsideWorkspacePathInCommand(command: string, cwd: string): string | undefined {
-  for (const token of absolutePathTokens(command)) {
+function firstShellWorkspacePathViolation(command: string, cwd: string): string | undefined {
+  const internalPath = firstInternalHarnessPathInCommand(command, cwd);
+  if (internalPath) return `internal_harness_path:${internalPath}`;
+  for (const token of dangerousAbsolutePathTokens(command)) {
     if (isAllowedExternalShellPath(token)) continue;
-    if (isOutsideWorkspacePath(token, cwd)) return token;
+    if (isOutsideWorkspacePath(token, cwd)) return `outside_workspace_path:${token}`;
+    return `absolute_workspace_path:${normalizeMetricPath(token, cwd)}`;
   }
   return undefined;
 }
 
-function absolutePathTokens(command: string): string[] {
+function firstInternalHarnessPathInCommand(command: string, cwd: string): string | undefined {
+  for (const line of stripNonShellHeredocBodies(command).split(/\r?\n/)) {
+    const words = shellWords(line);
+    for (let index = 0; index < words.length; index += 1) {
+      const word = words[index]!;
+      if (isNegatedFindPathPattern(words, index)) continue;
+      for (const candidate of shellInternalPathCandidatesFromWord(word)) {
+        const normalized = normalizeMetricPath(candidate, cwd);
+        if (isInternalHarnessPath(normalized)) return normalized;
+      }
+    }
+  }
+  return undefined;
+}
+
+function isNegatedFindPathPattern(words: string[], index: number): boolean {
+  if (index < 2) return false;
+  const command = words[0];
+  if (command !== "find" && !command.endsWith("/find")) return false;
+  return words[index - 1] === "-path" && (words[index - 2] === "-not" || words[index - 2] === "!");
+}
+
+function shellInternalPathCandidatesFromWord(word: string): string[] {
+  const candidates = new Set<string>();
+  const stripped = stripShellRedirectionPrefix(word.trim());
+  if (stripped) candidates.add(trimCommandPathToken(stripped));
+  const assignmentValue = shellAssignmentValue(word);
+  if (assignmentValue) candidates.add(trimCommandPathToken(assignmentValue));
+  return [...candidates].filter(Boolean);
+}
+
+function isInternalHarnessPath(normalizedPath: string): boolean {
+  return normalizedPath === ".pi-chalin" || normalizedPath.startsWith(".pi-chalin/");
+}
+
+function dangerousAbsolutePathTokens(command: string): string[] {
   const tokens: string[] = [];
-  for (const word of shellWords(stripNonShellHeredocBodies(command))) {
+  const pending: Array<{ delimiter: string; scanBody: boolean }> = [];
+  for (const line of command.split(/\r?\n/)) {
+    const active = pending[0];
+    if (active) {
+      if (line.trim() === active.delimiter) {
+        pending.shift();
+        continue;
+      }
+      if (active.scanBody) tokens.push(...absolutePathTokensFromLine(line));
+      continue;
+    }
+    tokens.push(...dangerousTopLevelPathTokensFromLine(line));
+    pending.push(...heredocSpecsForLine(line));
+  }
+  return tokens;
+}
+
+function absolutePathTokensFromLine(line: string): string[] {
+  const tokens: string[] = [];
+  for (const word of shellWords(line)) {
     for (const candidate of shellPathCandidatesFromWord(word)) {
       const token = trimCommandPathToken(candidate);
       if (path.isAbsolute(token)) tokens.push(token);
+    }
+  }
+  return tokens;
+}
+
+function dangerousTopLevelPathTokensFromLine(line: string): string[] {
+  const tokens: string[] = [];
+  const words = shellWords(line);
+  for (let index = 0; index < words.length; index += 1) {
+    const word = words[index]!;
+    if (["cd", "pushd", "popd"].includes(path.basename(word))) {
+      const target = words[index + 1];
+      if (target) {
+        const token = trimCommandPathToken(target);
+        if (path.isAbsolute(token)) tokens.push(token);
+      }
+      continue;
+    }
+    if (isShellRedirectionWord(word)) {
+      const inline = shellPathCandidateFromWord(word);
+      const candidate = inline && path.isAbsolute(trimCommandPathToken(inline)) ? inline : words[index + 1];
+      if (candidate) {
+        const token = trimCommandPathToken(candidate);
+        if (path.isAbsolute(token)) tokens.push(token);
+      }
     }
   }
   return tokens;
@@ -1386,7 +1509,7 @@ function sameStepReadLoopLimit(): number {
 }
 
 function isInspectionTool(toolName: string): boolean {
-  return toolName === "read" || toolName === "grep" || toolName === "find" || toolName === "ls" || toolName === "chalin_project_discovery" || toolName === "chalin_project_snapshot" || toolName === "chalin_web_search";
+  return toolName === "read" || toolName === "grep" || toolName === "find" || toolName === "ls" || toolName === "chalin_project_discovery" || toolName === "chalin_web_search";
 }
 
 function isToolError(result: unknown): boolean {

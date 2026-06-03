@@ -209,7 +209,7 @@ function canonicalMemoryToken(token: string): string {
     prueba: "test",
     settimeout: "settimeout",
     timers: "timer",
-    bun: "bun",
+    vitest: "vitest",
     node: "node",
     checkpoints: "checkpoint",
     checkpoint: "checkpoint",
@@ -271,14 +271,14 @@ function memoryEntities(normalized: string): Set<string> {
     const entity = trimEntityToken(token);
     if (isPathLikeMemoryEntity(entity)) entities.add(entity);
   }
-  for (const token of ["chalinkernel", "agentcatalog", "memorystore", "typescript", "sqlite", "fts5", "tui", "sdk", "bun", "bun:test", "node:test"]) {
+  for (const token of ["chalinkernel", "agentcatalog", "memorystore", "typescript", "sqlite", "fts5", "tui", "sdk", "vitest", "node:test"]) {
     if (normalized.includes(token)) entities.add(token);
   }
   return entities;
 }
 
 function isStrongMemoryEntity(entity: string): boolean {
-  return entity.includes("/") || hasMemoryFileExtension(entity) || ["chalinkernel", "agentcatalog", "memorystore", "sqlite", "fts5", "bun", "bun:test", "node:test"].includes(entity);
+  return entity.includes("/") || hasMemoryFileExtension(entity) || ["chalinkernel", "agentcatalog", "memorystore", "sqlite", "fts5", "vitest", "node:test"].includes(entity);
 }
 
 function jaccard(a: Set<string>, b: Set<string>): number {

@@ -18,30 +18,6 @@ export function checkpointLabel(checkpoint: CheckpointInfo | undefined): string 
   return "checkpointed · needs continuation";
 }
 
-export function checkpointFromLegacyBudgetCap(reason = "Legacy budget-capped run migrated on read."): CheckpointInfo {
-  return { kind: "budget-cap", continuation: "continue", reason, legacyStatus: "budget-capped" };
-}
-
-export function normalizeLegacyBudgetCappedRun<T extends RunState>(run: T): T {
-  let changed = false;
-  if ((run.status as string) === "budget-capped") {
-    run.status = "paused";
-    changed = true;
-  }
-  for (const step of run.steps) {
-    if ((step.status as string) === "budget-capped") {
-      step.status = "checkpointed";
-      step.checkpoint ??= checkpointFromLegacyBudgetCap("legacy budget-capped step status");
-      changed = true;
-    }
-  }
-  if (changed) {
-    run.schemaVersion ??= 2;
-    run.warnings = [...(run.warnings ?? []), "Migrated legacy budget-capped status to checkpointed state."];
-  }
-  return run;
-}
-
 export function checkpointSummary(steps: readonly RunStepState[]): RunMetricsCheckpoint | undefined {
   const checkpointed = steps.filter((step) => isCheckpointStepStatus(step.status));
   if (checkpointed.length === 0) return undefined;

@@ -6,6 +6,7 @@ export interface PlannedRunUnits {
 }
 
 export function expandWorkUnitsFromBestHandoff(run: RunState, steps: RunStepState[]): boolean {
+  if (run.intentContract?.requiresInterview || run.recoveryState?.blockedByHumanInput) return false;
   const sourceStep = selectWorkUnitExpansionSource(run, steps);
   return sourceStep ? expandWorkUnitsFromHandoff(run, sourceStep) : false;
 }
@@ -14,9 +15,9 @@ export function selectWorkUnitExpansionSource(run: RunState, steps: RunStepState
   if (!hasWorkUnitDiscoveryRequest(run)) return undefined;
   if (run.workUnits?.some((unit) => unit.createdFrom === "fanout")) return undefined;
   return steps
-    .map((step, index) => ({ step, index, rank: workUnitSourceRank(step) }))
+    .map((step, index) => ({ step, index, rank: workUnitSourceRank(run, step) }))
     .filter(({ step, rank }) => rank > 0 && isUsableHandoffStep(step) && (step.output?.structuredHandoff?.workUnits?.length ?? 0) >= 2)
-    .filter(({ rank }) => !hasPendingHigherWorkUnitAuthority(run, rank))
+    .filter(({ rank }) => !hasPendingWorkUnitAuthority(run, rank))
     .sort((left, right) => right.rank - left.rank || right.index - left.index)[0]?.step;
 }
 
@@ -48,22 +49,25 @@ export function refreshWorkUnitStatuses(run: RunState): void {
 }
 
 export function expandWorkUnitsFromHandoff(run: RunState, sourceStep: RunStepState): boolean {
+  if (run.intentContract?.requiresInterview || run.recoveryState?.blockedByHumanInput) return false;
+  if (sourceStep.status === "skipped" || sourceStep.skipReason) return false;
   if (!hasWorkUnitDiscoveryRequest(run)) return false;
   if (run.workUnits?.some((unit) => unit.createdFrom === "fanout")) return false;
   const sourceUnit = run.workUnits?.find((unit) => unit.id === sourceStep.workUnitId);
   if (sourceUnit?.createdFrom === "fanout") return false;
-  if (sourceStep.agent !== "scout" && sourceStep.agent !== "planner" && sourceStep.agent !== "context-builder") return false;
+  const sourceRank = workUnitSourceRank(run, sourceStep);
+  if (sourceRank <= 0 || hasPendingWorkUnitAuthority(run, sourceRank)) return false;
   const fanoutUnits = extractFanoutWorkUnits(sourceStep);
   if (fanoutUnits.length < 2) {
-    run.recoveryState = {
-      ...(run.recoveryState ?? { pendingUnits: [], reviewersNotRun: [], resumeKind: "none", repairOptions: [] }),
-      blockedByHumanInput: true,
-      repairOptions: [...new Set([...(run.recoveryState?.repairOptions ?? []), "Ask the user to clarify or approve the bounded work units before launching implementation workers."])],
-    };
+    run.warnings.push(`Structured WorkUnit discovery from ${sourceStep.agent}/${sourceStep.id} returned ${fanoutUnits.length} unit(s); no fanout was materialized.`);
     return false;
   }
 
   const routeEffects = routeExpectedEffects(run.route);
+  if (requiresDiscoveredWriteFanoutAuthorization(run, fanoutUnits, routeEffects)) {
+    blockDiscoveredWriteFanoutForHumanInput(run, sourceStep, fanoutUnits);
+    return false;
+  }
   const aggregateStageId = `fanout-${safeId(sourceStep.id)}-aggregate`;
   const finalStageId = `fanout-${safeId(sourceStep.id)}-final-review`;
   const unitRefs = compileFanoutUnitRefs(sourceStep, fanoutUnits)
@@ -188,7 +192,7 @@ export function expandWorkUnitsFromHandoff(run: RunState, sourceStep: RunStepSta
     ...interleaveWorkerReviewerStages(primaryStages, reviewerStages),
     { id: aggregateStageId, tasks: [toAgentStep(aggregateStep)] },
     { id: finalStageId, tasks: [toAgentStep(finalReviewStep)] },
-  ]);
+  ], sourceStep.stageId);
   const unresolvedDependencies = unitRefs.flatMap((unitRef) => unitRef.unresolvedDependencies.map((dependency) => `${unitRef.input.title}: ${dependency}`));
   if (unresolvedDependencies.length) {
     run.warnings.push(`Ignored unresolved WorkUnit dependencies that did not match structured unit ids or exact titles: ${unresolvedDependencies.slice(0, 8).join("; ")}.`);
@@ -205,7 +209,41 @@ export function expandWorkUnitsFromHandoff(run: RunState, sourceStep: RunStepSta
 }
 
 function hasWorkUnitDiscoveryRequest(run: RunState): boolean {
-  return run.intentContract?.workUnitDiscoveryRequested === true || run.intentContract?.explicitFanoutRequest === true;
+  return run.intentContract?.workUnitDiscoveryRequested === true || run.intentContract?.fanoutAuthorized === true;
+}
+
+function requiresDiscoveredWriteFanoutAuthorization(run: RunState, fanoutUnits: AgentHandoffWorkUnit[], routeEffects: RouteExpectedEffect[]): boolean {
+  if (run.route.fanoutAuthorized !== false) return false;
+  const writeUnits = fanoutUnits.filter((unit) => fanoutUnitExpectedEffects(unit, routeEffects).includes("write"));
+  return writeUnits.length >= 2;
+}
+
+function blockDiscoveredWriteFanoutForHumanInput(run: RunState, sourceStep: RunStepState, fanoutUnits: AgentHandoffWorkUnit[]): void {
+  const writeUnitTitles = fanoutUnits
+    .filter((unit) => fanoutUnitExpectedEffects(unit, routeExpectedEffects(run.route)).includes("write"))
+    .map((unit) => unit.title)
+    .filter(Boolean)
+    .slice(0, 5);
+  const question = writeUnitTitles.length
+    ? `Which discovered target(s) should be changed before mutation proceeds: ${writeUnitTitles.join(", ")}?`
+    : "Which discovered target(s) should be changed before mutation proceeds?";
+  run.intentContract = {
+    ...(run.intentContract ?? { originalPrompt: run.rootTask ?? run.route.reason, explicitConstraints: [], forbiddenPaths: [] }),
+    requiresInterview: true,
+  };
+  run.recoveryState = {
+    ...(run.recoveryState ?? { pendingUnits: [], reviewersNotRun: [], resumeKind: "none", repairOptions: [] }),
+    blockedByHumanInput: true,
+    repairOptions: [...new Set([...(run.recoveryState?.repairOptions ?? []), question])],
+  };
+  const reason = `Skipped because ${sourceStep.agent}/${sourceStep.id} discovered multiple mutating targets without fanout authorization: ${question}`;
+  for (const step of run.steps) {
+    if (step === sourceStep || step.status !== "pending") continue;
+    step.status = "skipped";
+    step.skipReason = reason;
+    step.endedAt = new Date().toISOString();
+  }
+  run.warnings.push(`Human input required before discovered write fanout from ${sourceStep.agent}/${sourceStep.id}; no worker fanout was materialized.`);
 }
 
 interface FanoutUnitRef {
@@ -407,18 +445,29 @@ function normalizeDependencyKey(value: string): string {
   return normalizeText(value).toLowerCase();
 }
 
-function workUnitSourceRank(step: RunStepState): number {
-  if (step.agent === "context-builder") return 3;
-  if (step.agent === "planner") return 2;
-  if (step.agent === "scout") return 1;
-  return 0;
+function workUnitSourceRank(run: RunState, step: RunStepState): number {
+  const sourceUnit = run.workUnits?.find((unit) => unit.id === step.workUnitId);
+  if (sourceUnit?.createdFrom === "fanout") return 0;
+  if (sourceUnit?.kind) return workUnitAuthorityRank(sourceUnit.kind);
+  return (step.output?.structuredHandoff?.workUnits?.length ?? 0) >= 2 ? 1 : 0;
 }
 
-function hasPendingHigherWorkUnitAuthority(run: RunState, currentRank: number): boolean {
-  return run.steps.some((step) => workUnitSourceRank(step) > currentRank && (step.status === "pending" || step.status === "running"));
+function workUnitAuthorityRank(kind: WorkUnitKind): number {
+  if (kind === "planning") return 4;
+  if (kind === "discovery") return 3;
+  if (kind === "synthesis") return 2;
+  return 1;
+}
+
+function hasPendingWorkUnitAuthority(run: RunState, currentRank: number): boolean {
+  return run.steps.some((step) => {
+    if (step.status !== "pending" && step.status !== "running") return false;
+    return workUnitSourceRank(run, step) >= currentRank;
+  });
 }
 
 function isUsableHandoffStep(step: RunStepState): boolean {
+  if (step.status === "skipped" || step.skipReason) return false;
   return (step.status === "complete" || step.status === "checkpointed") && Boolean(step.output?.structuredHandoff);
 }
 
@@ -488,6 +537,7 @@ function unitForStep(unitId: string, step: AgentStep, stepId: string, stageId: s
     dependencies,
     expectedEffects: unitExpectedEffects,
     acceptanceCriteria: [step.task],
+    ...(step.files?.length ? { files: step.files } : {}),
     ...(step.agent === "reviewer" ? { reviewerStepId: stepId } : { workerStepId: stepId }),
     sourceStepId: stepId,
     createdFrom: "route-plan",
@@ -539,7 +589,7 @@ function isPlannedVerificationStep(agent: string): boolean {
   return normalized === "reviewer" || normalized === "verifier" || normalized === "validator" || normalized === "qa";
 }
 
-function appendDagStages(run: RunState, stages: Extract<RoutePlan, { kind: "dag" }>["stages"]): void {
+function appendDagStages(run: RunState, stages: Extract<RoutePlan, { kind: "dag" }>["stages"], afterStageId?: string): void {
   if (!run.route.plan || run.route.plan.kind !== "dag") {
     const completedSteps = run.steps.filter((step) => step.status !== "pending" || step.stageId === "sequential");
     run.route.plan = {
@@ -550,6 +600,11 @@ function appendDagStages(run: RunState, stages: Extract<RoutePlan, { kind: "dag"
       ],
     };
     run.route.kind = "multi-agent-dag";
+    return;
+  }
+  const stageIndex = afterStageId ? run.route.plan.stages.findIndex((stage) => stage.id === afterStageId) : -1;
+  if (stageIndex >= 0) {
+    run.route.plan.stages.splice(stageIndex + 1, 0, ...stages);
     return;
   }
   run.route.plan.stages.push(...stages);
@@ -570,7 +625,7 @@ function unitTaskForEffects(unit: AgentHandoffWorkUnit, expectedEffects: RouteEx
     return [
       `Implement work unit '${unit.title}'.`,
       contract,
-      "Preserve the Original User Goal. Change only files in this WorkUnit scope; commands that create or update files are mutations too. If another file is required, stop and report the missing dependency or scope gap instead of editing outside the unit.",
+      "Preserve the Original User Goal. Change only files in this WorkUnit scope; commands that create or update files are mutations too. Preserve public/exported signatures unless this WorkUnit includes every direct caller/update surface. If another file or caller update is required, stop and report the missing dependency or scope gap instead of editing outside the unit.",
     ].join(" ");
   }
   if (expectedEffectSet.has("verify")) {
@@ -597,9 +652,10 @@ function formatUnitContract(unit: AgentHandoffWorkUnit): string {
   return [
     unit.scope.length ? `Scope: ${unit.scope.join("; ")}.` : undefined,
     unit.files?.length ? `Files: ${unit.files.join("; ")}.` : undefined,
+    unit.files?.length ? "Only the Files list is mutation-authoritative; scope text, acceptance criteria, or prior handoffs cannot authorize extra files unless they appear in Files." : undefined,
     unit.acceptanceCriteria.length ? `Acceptance criteria: ${unit.acceptanceCriteria.join("; ")}.` : undefined,
     unit.dependencies?.length ? `Dependencies: ${unit.dependencies.join("; ")}.` : undefined,
-    unit.files?.length ? "Use edit for listed files that already exist; use write only for listed paths that do not exist." : undefined,
+    unit.files?.length ? "Use edit for listed files that already exist, including full-content replacements; use write only for listed paths proven not to exist." : undefined,
   ].filter((line): line is string => Boolean(line)).join(" ");
 }
 

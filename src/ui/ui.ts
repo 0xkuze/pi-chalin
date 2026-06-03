@@ -12,7 +12,7 @@ import type { ArtifactStore, FeatureArtifactState } from "../artifacts/artifacts
 import { getLatestRun, getLiveStepSession } from "../runtime/state.ts";
 import type { AgentDefinition, ApprovalDecision, BudgetCapHit, ChalinRuntimeState, MemoryRecord, RouteDecision, RunState, RunStepState, RunStepStatus } from "../domain/schemas.ts";
 import { isUsableStepStatus } from "../runtime/status.ts";
-import { clearLegacyChalinControlWidget, setChalinStatus } from "./ui-status.ts";
+import { setChalinStatus } from "./ui-status.ts";
 import { formatWebFetchAudit, type WebFetchAuditEntry } from "../webfetch/webfetch.ts";
 
 const MEMORY_OVERLAY_TITLE = "Memory";
@@ -607,7 +607,6 @@ function formatArtifactSkills(feature: FeatureArtifactState): string {
 }
 
 export async function openActivityMonitor(ctx: ExtensionContext, run: RunState | undefined): Promise<void> {
-  clearLegacyChalinControlWidget(ctx);
   if (!run) {
     ctx.ui.notify("No pi-chalin activity yet.", "info");
     return;
@@ -1564,7 +1563,7 @@ export function summarizeRuntimeGuards(run: RunState | undefined): string[] {
 function summarizeBudgetHealth(hits: BudgetCapHit[] | undefined, stops: number): string {
   const hard = (hits ?? []).filter((hit) => hit.severity === "hard");
   const soft = (hits ?? []).filter((hit) => hit.severity === "soft");
-  if (hard.length > 0 || stops > 0) return `limit reached ${formatBudgetHit(hard[0] ?? soft[0])}${stops > 0 ? ` (${stops} legacy stops)` : ""}`;
+  if (hard.length > 0 || stops > 0) return `limit reached ${formatBudgetHit(hard[0] ?? soft[0])}${stops > 0 ? ` (${stops} stops)` : ""}`;
   if (soft.length > 0) return `warning ${formatBudgetHit(soft[0])}`;
   return "ok";
 }

@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
-import { test } from "bun:test";
+import { test } from "vitest";
 import { approvalDecision, DEFAULT_CONFIG } from "../src/config/config.ts";
 import { createChildToolPolicy } from "../src/tools/child-tools.ts";
 import type { RouteDecision } from "../src/domain/schemas.ts";
@@ -124,14 +124,36 @@ test("child policy guards same-file read loops inside one subagent", () => {
   assert.equal(policy.metrics().toolCalls, 4);
 });
 
-test("child policy blocks absolute paths outside the child workspace", () => {
+test("child policy allows bounded ranged reads of different same-file regions", () => {
+  const policy = createChildToolPolicy({
+    cwd: process.cwd(),
+    maxToolCalls: 100,
+    allowedTools: ["read"],
+  });
+
+  assert.equal(policy.beforeTool("read", { path: "src/index.ts", offset: 1, limit: 20 }).allowed, true);
+  assert.equal(policy.beforeTool("read", { path: "src/index.ts", offset: 40, limit: 20 }).allowed, true);
+  assert.equal(policy.beforeTool("read", { path: "src/index.ts", offset: 80, limit: 20 }).allowed, true);
+  assert.equal(policy.beforeTool("read", { path: "src/index.ts", offset: 120, limit: 20 }).allowed, true);
+  assert.equal(policy.beforeTool("read", { path: "src/index.ts", offset: 160, limit: 20 }).allowed, true);
+
+  assert.deepEqual(policy.metrics().policyViolations, []);
+  assert.equal(policy.metrics().duplicateReadCount, 4);
+  assert.equal(policy.metrics().toolCalls, 5);
+});
+
+test("child policy blocks absolute and internal harness paths", () => {
   const cwd = process.cwd();
   const outside = path.dirname(cwd);
   const policy = createChildToolPolicy({ cwd, maxToolCalls: 10, allowedTools: ["read", "bash"] });
 
-  assert.equal(policy.beforeTool("read", { path: path.join(cwd, "src/index.ts") }).allowed, true);
+  const blockedAbsoluteRead = policy.beforeTool("read", { path: path.join(cwd, "src/index.ts") });
   const blockedRead = policy.beforeTool("read", { path: path.join(outside, "outside.ts") });
   const blockedBash = policy.beforeTool("bash", { command: `cd ${outside} && ls` });
+  const allowedWorkspaceCdBash = policy.beforeTool("bash", { command: `cd ${cwd} && ls` });
+  const blockedInternalRead = policy.beforeTool("read", { path: ".pi-chalin/runs/run.json" });
+  const blockedInternalBash = policy.beforeTool("bash", { command: "grep -R chalin_memory_write .pi-chalin/child-sessions" });
+  const allowedInternalExclusionFind = policy.beforeTool("bash", { command: "find . -type f -not -path './.git/*' -not -path './.pi-chalin/*' | sort" });
   const allowedRelativeSlash = policy.beforeTool("bash", { command: "cat src/auth/keycloak.ts" });
   const allowedRedirect = policy.beforeTool("bash", { command: "git status --short 2>/dev/null" });
   const allowedRedirectTerminated = policy.beforeTool("bash", { command: "git status --short 2>/dev/null; git diff --stat" });
@@ -143,10 +165,10 @@ test("child policy blocks absolute paths outside the child workspace", () => {
   const allowedRegexLiteral = policy.beforeTool("bash", { command: "node -e \"const re = /compile\\w+/; console.log(re.test('compileTemplate'))\"" });
   const allowedQuotedJsComment = policy.beforeTool("bash", { command: "node -e \"// Setup globals FIRST, before imports\nconst path = '/healthz'; console.log(path)\"" });
   const allowedHeredocRegex = policy.beforeTool("bash", {
-    command: "cat > components/LegacyWidget.test.ts << 'EOF'\nconst scriptMatch = source.match(/<script>([\\s\\S]*?)<\\/script>/)\nEOF",
+    command: "cat > components/ExistingWidget.test.ts << 'EOF'\nconst scriptMatch = source.match(/<script>([\\s\\S]*?)<\\/script>/)\nEOF",
   });
   const allowedJsDocHeredoc = policy.beforeTool("bash", {
-    command: "cat > components/legacy-data.ts << 'EOF'\n/** Reactive data factory for direct tests. */\nexport function createLegacyData() { return { open: false } }\nEOF",
+    command: "cat > components/existing-data.ts << 'EOF'\n/** Reactive data factory for inline tests. */\nexport function createExistingData() { return { open: false } }\nEOF",
   });
   const allowedHttpPathHeredoc = policy.beforeTool("bash", {
     command: "tee cmd/api/main_test.go << 'EOF'\nconst path = \"/healthz\"\nassert.equal(path, \"/healthz\")\nEOF",
@@ -157,10 +179,18 @@ test("child policy blocks absolute paths outside the child workspace", () => {
   const blockedTmpWrite = policy.beforeTool("bash", { command: "echo test > /tmp/pi-chalin-outside.txt" });
   const blockedShellHeredoc = policy.beforeTool("bash", { command: "bash << 'EOF'\ncat /tmp/pi-chalin-outside.txt\nEOF" });
 
+  assert.equal(blockedAbsoluteRead.allowed, false);
+  assert.match(blockedAbsoluteRead.reason, /absolute_workspace_path:src\/index\.ts/);
   assert.equal(blockedRead.allowed, false);
   assert.match(blockedRead.reason, /outside_workspace_path/);
   assert.equal(blockedBash.allowed, false);
   assert.match(blockedBash.reason, /outside_workspace_path/);
+  assert.equal(allowedWorkspaceCdBash.allowed, true);
+  assert.equal(blockedInternalRead.allowed, false);
+  assert.match(blockedInternalRead.reason, /internal_harness_path:\.pi-chalin\/runs\/run\.json/);
+  assert.equal(blockedInternalBash.allowed, false);
+  assert.match(blockedInternalBash.reason, /internal_harness_path:\.pi-chalin\/child-sessions/);
+  assert.equal(allowedInternalExclusionFind.allowed, true);
   assert.equal(allowedRelativeSlash.allowed, true);
   assert.equal(allowedRedirect.allowed, true);
   assert.equal(allowedRedirectTerminated.allowed, true);
@@ -179,6 +209,23 @@ test("child policy blocks absolute paths outside the child workspace", () => {
   assert.match(blockedTmpWrite.reason, /outside_workspace_path:\/tmp\/pi-chalin-outside\.txt/);
   assert.equal(blockedShellHeredoc.allowed, false);
   assert.match(blockedShellHeredoc.reason, /outside_workspace_path:\/tmp\/pi-chalin-outside\.txt/);
+});
+
+test("child policy normalizes redundant absolute cwd before bash execution", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-chalin-safe-cwd-cd-"));
+  try {
+    const policy = createChildToolPolicy({ cwd, maxToolCalls: 10, allowedTools: ["bash"] });
+    const params = { command: `cd ${cwd} && git diff HEAD -- src/auth/longAuthPolicy.ts 2>/dev/null || echo no-diff` };
+
+    const gate = policy.beforeTool("bash", params);
+
+    assert.equal(gate.allowed, true);
+    assert.equal(params.command, "git diff HEAD -- src/auth/longAuthPolicy.ts 2>/dev/null || echo no-diff");
+    assert.deepEqual(policy.metrics().shellCommands, [params.command]);
+    assert.deepEqual(policy.metrics().policyViolations, []);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test("child policy reports blocked tool reason and safe params summary", () => {
@@ -212,11 +259,20 @@ test("child policy enforces WorkUnit mutation scope for edit/write", () => {
 
   assert.equal(policy.beforeTool("edit", { path: "src/allowed.ts", edits: [] }).allowed, true);
   const blockedEdit = policy.beforeTool("edit", { path: "src/other.ts", edits: [] });
-  const blockedWrite = policy.beforeTool("write", { path: "src/generated.ts", content: "" });
+  const stoppedWrite = policy.beforeTool("write", { path: "src/generated.ts", content: "" });
+  const writePolicy = createChildToolPolicy({
+    cwd: process.cwd(),
+    maxToolCalls: 10,
+    allowedTools: ["write"],
+    workUnitScope: { files: ["src/allowed.ts"], mode: "strict", bash: "allow-with-postcheck" },
+  });
+  const blockedWrite = writePolicy.beforeTool("write", { path: "src/generated.ts", content: "" });
 
   assert.equal(blockedEdit.allowed, false);
+  assert.equal(stoppedWrite.allowed, false);
   assert.equal(blockedWrite.allowed, false);
   assert.match(blockedEdit.reason, /work_unit_scope_gap:src\/other\.ts/);
+  assert.match(stoppedWrite.reason, /policy_stopped_after_scope_violation:work_unit_scope_gap:src\/other\.ts/);
   assert.match(blockedWrite.reason, /work_unit_scope_gap:src\/generated\.ts/);
 });
 
@@ -241,11 +297,17 @@ test("child policy records bash-created files outside WorkUnit scope", () => {
     assert.equal(blockedBash.allowed, true);
     assert.equal(spawnSync("sh", ["-c", "printf 'no' > extra.ts"], { cwd }).status, 0);
     const result = policy.afterTool("bash", { content: [{ type: "text", text: "" }], details: {} });
+    const stopped = policy.beforeTool("bash", { command: "printf 'ok' > allowed.ts" });
 
-    assert.deepEqual(policy.metrics().policyViolations, ["outside_work_unit_scope:extra.ts"]);
+    assert.deepEqual(policy.metrics().policyViolations, [
+      "outside_work_unit_scope:extra.ts",
+      "policy_stopped_after_scope_violation:outside_work_unit_scope:extra.ts",
+    ]);
     assert.equal((result as { isError?: boolean }).isError, true);
     assert.match(JSON.stringify(result), /outside_work_unit_scope:extra\.ts/);
     assert.match(JSON.stringify(result), /Stop and report the missing scope/);
+    assert.equal(stopped.allowed, false);
+    assert.match(stopped.reason, /policy_stopped_after_scope_violation:outside_work_unit_scope:extra\.ts/);
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }
@@ -292,6 +354,8 @@ test("child policy blocks mutating git commands but allows git inspection", () =
     "git branch --format='%(refname:short)'",
     "git branch --format '%(refname:short)' --sort=-committerdate",
     "git branch --list 'feature/*'",
+    "git branch -a 2>/dev/null | head -10",
+    "git branch --show-current > current-branch.txt",
   ]) {
     assert.equal(policy.beforeTool("bash", { command }).allowed, true, command);
   }
@@ -310,6 +374,8 @@ test("child policy blocks mutating git commands but allows git inspection", () =
     "git branch --unset-upstream main",
     "git branch --edit-description main",
     "git branch --list -D old",
+    "git branch feature/new 2>/dev/null | head -10",
+    "git branch -a | git checkout main",
     "git checkout main",
     "git switch main",
     "git add .",

@@ -5,45 +5,23 @@ import { mergedSessionModelOverrides, mergedSessionThinkingOverrides } from "../
 import { AgentCatalog } from "../agents/agents.ts";
 import { ArtifactStore } from "../artifacts/artifacts.ts";
 import { loadEffectiveConfig } from "../config/config.ts";
-import { ChalinKernel, routeFromPlan } from "../kernel/kernel.ts";
+import { ChalinKernel } from "../kernel/kernel.ts";
 import { createMemoryCandidate } from "../memory/memory.ts";
 import { createConfiguredMemoryStore } from "../memory/memory-provider.ts";
 import { formatInterviewResult, runChalinInterview, type InterviewRequestInput, type InterviewResult } from "../interview/interview.ts";
 import { loadFailedRunDiagnostic } from "../runner/run-recovery.ts";
 import { loadResumableRunState } from "../runner/runner-state.ts";
-import { activateSkillForTurn, beginChalinRouteInvocation, disableSkillForTurn, finishChalinRouteInvocation, getSkillOverridesForTurn, isDirectDecisionConfirmed, markDecisionToolGateResolved, markDirectDecisionConfirmed, releaseDecisionToolGate, setLatestRun } from "../runtime/state.ts";
-import { openSafetyApproval } from "../ui/ui.ts";
-import { clearLegacyChalinControlWidget, setChalinStatus } from "../ui/ui-status.ts";
-import { chalinRouteUpdateDetails, colorizeChalinWidget, footerStateForRun, formatChalinRoutePlanWidget, formatChalinRunWidget, formatChalinRunWidgetFromDetails, isUsableStepStatus, plannedWidgetRun, routeIntent, type ChalinRouteWidgetDetails } from "../routing/route-widget.ts";
+import { activateSkillForTurn, disableSkillForTurn, setLatestRun } from "../runtime/state.ts";
+import { setChalinStatus } from "../ui/ui-status.ts";
+import { chalinRouteUpdateDetails, colorizeChalinWidget, footerStateForRun, formatChalinRoutePlanWidget, formatChalinRunWidget, formatChalinRunWidgetFromDetails, isUsableStepStatus, routeIntent, type ChalinRouteWidgetDetails } from "../routing/route-widget.ts";
 import { fetchWebUrls, formatWebBundle, formatWebBundleProgressWidget, formatWebBundleWidget, searchWeb, type WebBundleProgressWidgetInput, type WebContextBundle } from "../webfetch/webfetch.ts";
-import type { MemoryRecord, RouteDecision, RouteExpectedEffect, RouteWorkUnitStrategy, RunState } from "../domain/schemas.ts";
-import { collapseReadOnlyScoutContextRoute, inferRouteRequiresWorkspaceMutation, normalizeRouteForExecution } from "../routing/route-guards.ts";
-import { compactRouteDetails, finalAnswerMaterial, formatRoute, outcomeForResult } from "../routing/route-format.ts";
+import type { MemoryRecord, RunState } from "../domain/schemas.ts";
+import { compactRouteDetails, formatRoute } from "../routing/route-format.ts";
+import { executeDelegatedChalinRoute, type ChalinDelegationRouteParams } from "../routing/delegation.ts";
 import { buildProjectDiscoveryIndex, formatProjectDiscoveryIndex } from "../project/discovery.ts";
-import { buildProjectSnapshot, formatProjectSnapshot } from "../project/snapshot.ts";
-import { runDirectDecisionJudge, shouldRejectDirectFromJudge } from "../skills/direct-decision-judge.ts";
 import { SkillCatalog, SkillMetricsStore, auditSkill, formatSkillList, formatSkillSearch, formatSkillShow, promoteSkill, reconcileSkillLifecyclesEffect, retireSkill, summarizeSkillMetrics } from "../skills/skills.ts";
 import { Effect } from "effect";
 import { clampInteger, clampNumber, errorResult, finalToolResult, formatMemoryInventory, isMemoryInventoryQuery, textResult, truncateForTool } from "./tool-output.ts";
-
-const AgentStepParams = Type.Object({
-  id: Type.Optional(Type.String({ description: "Stable step id such as scout, plan, implement, review." })),
-  agent: Type.String({ description: "Available pi-chalin agent name. Built-in names include scout, context-builder, planner, worker, reviewer, researcher, oracle, delegate, and conflict-resolver; project catalogs may add more." }),
-  task: Type.String({ description: "Concrete outcome for this agent, including evidence to inspect, files to modify if any, and success criteria." }),
-  budget: Type.Optional(Type.Union([
-    Type.Literal("tight"),
-    Type.Literal("normal"),
-    Type.Literal("deep"),
-    Type.Literal("extended"),
-  ], { description: "Optional tool/time budget hint. Use tight for bounded evidence, normal for ordinary work, deep/extended only when broad exploration is necessary." })),
-});
-
-const AgentStageParams = Type.Object({
-  id: Type.Optional(Type.String({ description: "Stable stage id." })),
-  name: Type.Optional(Type.String({ description: "Human-readable stage name." })),
-  tasks: Type.Optional(Type.Array(AgentStepParams, { description: "One or more agent tasks in this DAG stage. Omit dynamic discover execution placeholders; empty stages are ignored before execution." })),
-});
-
 
 const InterviewChoiceParams = Type.Object({
   label: Type.String({ description: "Short answer option shown to the user." }),
@@ -66,53 +44,39 @@ const ChalinInterviewParams = Type.Object({
   batchSize: Type.Optional(Type.Number({ description: "Maximum questions to ask in this batch. Default 5, hard max 5." })),
 });
 
-const ChalinDirectScopeParams = Type.Object({
-  oneOwnershipSurface: Type.Boolean({ description: "True only when the work can be completed from one bounded local ownership surface without stitching together independent repository areas." }),
-  clearAcceptanceSurface: Type.Boolean({ description: "True only when success can be checked by the parent agent with a small, explicit acceptance surface." }),
-  parentVerifiableWithoutDelegation: Type.Boolean({ description: "True only when correctness does not require an isolated reviewer, independent agent judgment, or multi-agent synthesis." }),
-  needsRepositoryStateOrHistorySynthesis: Type.Boolean({ description: "True when the answer depends on synthesizing repository state, branch history, diff history, commit history, or equivalent temporal/project state." }),
-  needsMultipleLocalEvidenceSurfaces: Type.Boolean({ description: "True when the answer depends on combining several independent local evidence surfaces instead of one bounded surface; read-only evidence can still be multi-surface." }),
-  needsBroadWorkspaceEvidence: Type.Boolean({ description: "True when broad workspace discovery or project-wide coverage is needed before a responsible answer; read-only review can still be broad." }),
-  needsDelegatedReviewOrSplitCoverage: Type.Boolean({ description: "True when correctness benefits from delegated ownership, review gates, split coverage, or separate implementation/review responsibilities." }),
+const ChalinRouteStepParams = Type.Object({
+  id: Type.Optional(Type.String({ description: "Stable step id, e.g. scout, plan, implement, review." })),
+  agent: Type.String({ description: "pi-chalin agent name such as scout, planner, context-builder, worker, reviewer, researcher, or conflict-resolver." }),
+  task: Type.String({ minLength: 12, description: "Concrete responsibility for this subagent. Include relevant constraints and expected evidence." }),
+  budget: Type.Optional(Type.Union([Type.Literal("tight"), Type.Literal("normal"), Type.Literal("deep"), Type.Literal("extended")])),
+  files: Type.Optional(Type.Array(Type.String(), { description: "Optional authoritative mutable file scope for this step when known." })),
 });
 
-const ChalinDirectParams = Type.Object({
-  task: Type.String({ description: "Original user goal that remains bounded enough for the primary agent to execute directly." }),
-  reason: Type.String({ description: "Why direct execution is sufficient: one bounded ownership surface, clear acceptance surface, parent-verifiable result, and no need for delegated review, broad evidence, repository state/history synthesis, or multiple local evidence sources." }),
-  scope: ChalinDirectScopeParams,
+const ChalinRouteStageParams = Type.Object({
+  id: Type.Optional(Type.String({ description: "Stable stage id." })),
+  name: Type.Optional(Type.String({ description: "Human-readable stage name." })),
+  tasks: Type.Optional(Type.Array(ChalinRouteStepParams, { minItems: 1, description: "Subagent tasks in this DAG stage." })),
 });
 
 const ChalinRouteParams = Type.Object({
-  task: Type.String({ description: "Original user goal rewritten as an executable workflow objective; preserve the final requested outcome, not only the first discovery/planning stage." }),
-  topology: Type.Union([
-    Type.Literal("sequential", { description: "One or more agent steps run in order; one step is valid." }),
-    Type.Literal("dag", { description: "Staged workflow where a stage can contain parallel agent tasks and later stages fan in." }),
-  ], { description: "Must be exactly one of: sequential, dag. Do not invent other topology values." }),
-  steps: Type.Optional(Type.Array(AgentStepParams, { description: "Required for sequential. Omit for dag." })),
-  stages: Type.Optional(Type.Array(AgentStageParams, { description: "Required for dag. Omit for sequential." })),
+  task: Type.String({ minLength: 12, description: "Original user request or the exact work to delegate to the pi-chalin orchestrator." }),
+  topology: Type.Union([Type.Literal("sequential"), Type.Literal("dag")], { description: "sequential for dependent phases, dag for independent fan-out before fan-in." }),
+  steps: Type.Optional(Type.Array(ChalinRouteStepParams, { minItems: 1, maxItems: 6, description: "Ordered subagent steps for sequential topology." })),
+  stages: Type.Optional(Type.Array(ChalinRouteStageParams, { minItems: 1, maxItems: 8, description: "DAG stages for independent or staged subagent work." })),
   risk: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"), Type.Literal("critical")])),
-  needsMemory: Type.Optional(Type.Boolean()),
-  needsArtifacts: Type.Optional(Type.Boolean()),
-  expectedEffects: Type.Array(Type.Union([
-    Type.Literal("read"),
-    Type.Literal("write"),
-    Type.Literal("verify"),
-  ]), { minItems: 1, description: "Required final workflow side effects. read means inspect only; write means workspace mutation is expected; verify means tests/commands/readback are expected. For discover, include the effects of materialized units." }),
-  workUnitStrategy: Type.Optional(Type.Union([
-    Type.Literal("none"),
-    Type.Literal("planned"),
-    Type.Literal("discover"),
-  ], { description: "Structured WorkUnit decision. Use none when one bounded route is enough; planned when this route can already name each bounded worker/reviewer unit; discover when units are unknown and this same run should materialize them from structured scout/planner workUnits." })),
-  requiresWorkspaceMutation: Type.Optional(Type.Boolean({ description: "Set true when any routed step is expected to edit, write, create, delete, or otherwise mutate workspace files. Implementation/file-mutation routes require an executor plus final reviewer." })),
-  reason: Type.Optional(Type.String({ description: "Why delegation improves correctness, confidence, isolation, or review for this specific task." })),
-  dryRun: Type.Optional(Type.Boolean()),
+  needsMemory: Type.Optional(Type.Boolean({ description: "Allow the workflow to retrieve relevant pi-chalin memory." })),
+  needsArtifacts: Type.Optional(Type.Boolean({ description: "Persist run artifacts/checkpoints for resume and inspection." })),
+  expectedEffects: Type.Array(Type.Union([Type.Literal("read"), Type.Literal("write"), Type.Literal("verify")]), { minItems: 1, maxItems: 3, uniqueItems: true, description: "Effects the delegated workflow must cover. Mutation requires write and verify." }),
+  workUnitStrategy: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("planned"), Type.Literal("discover")], { description: "Use discover when the orchestrator must derive safe work units before execution; planned when user already named independent slices." })),
+  fanoutAuthorized: Type.Optional(Type.Boolean({ description: "True only when the user authorized applying the same delegated change across discovered independent targets." })),
+  requiresWorkspaceMutation: Type.Optional(Type.Boolean({ description: "Set true when the delegated work is expected to edit/write files." })),
+  reason: Type.Optional(Type.String({ minLength: 8, maxLength: 400, description: "Short internal reason for delegating to subagents; do not expose delegation mechanics to the user." })),
 });
 
 const ChalinProjectDiscoveryParams = Type.Object({
   maxDepth: Type.Optional(Type.Number({ description: "Maximum directory depth to index. Default 4." })),
   maxEntries: Type.Optional(Type.Number({ description: "Maximum entries to return. Default 450." })),
 });
-const ChalinProjectSnapshotParams = Type.Object({});
 const ChalinSkillParams = Type.Object({
   action: Type.Union([
     Type.Literal("list"),
@@ -131,79 +95,6 @@ const ChalinSkillParams = Type.Object({
   targetScope: Type.Optional(Type.Union([Type.Literal("project"), Type.Literal("user")])),
   lifecycle: Type.Optional(Type.Union([Type.Literal("stale"), Type.Literal("expired"), Type.Literal("blocked")])),
 });
-
-type ChalinRouteToolParams = {
-  task: string;
-  topology: "sequential" | "dag";
-  steps?: Array<{ id?: string; agent: string; task: string; budget?: "tight" | "normal" | "deep" | "extended" }>;
-  stages?: Array<{ id?: string; name?: string; tasks?: Array<{ id?: string; agent: string; task: string; budget?: "tight" | "normal" | "deep" | "extended" }> }>;
-  risk?: RouteDecision["risk"];
-  needsMemory?: boolean;
-  needsArtifacts?: boolean;
-  expectedEffects: RouteExpectedEffect[];
-  workUnitStrategy?: RouteWorkUnitStrategy;
-  requiresWorkspaceMutation?: boolean;
-  reason?: string;
-  dryRun?: boolean;
-};
-
-type ChalinDirectToolParams = {
-  task: string;
-  reason: string;
-  scope: {
-    oneOwnershipSurface: boolean;
-    clearAcceptanceSurface: boolean;
-    parentVerifiableWithoutDelegation: boolean;
-    needsRepositoryStateOrHistorySynthesis: boolean;
-    needsMultipleLocalEvidenceSurfaces: boolean;
-    needsBroadWorkspaceEvidence: boolean;
-    needsDelegatedReviewOrSplitCoverage: boolean;
-  };
-};
-
-function directScopeBlockers(scope: ChalinDirectToolParams["scope"]): string[] {
-  const blockers: string[] = [];
-  if (!scope.oneOwnershipSurface) blockers.push("work is not confined to one bounded ownership surface");
-  if (!scope.clearAcceptanceSurface) blockers.push("acceptance surface is not clear enough for direct execution");
-  if (!scope.parentVerifiableWithoutDelegation) blockers.push("parent agent cannot verify correctness without delegation");
-  if (scope.needsRepositoryStateOrHistorySynthesis) blockers.push("requires repository state or history synthesis");
-  if (scope.needsMultipleLocalEvidenceSurfaces) blockers.push("requires multiple independent local evidence surfaces");
-  if (scope.needsBroadWorkspaceEvidence) blockers.push("requires broad workspace evidence");
-  if (scope.needsDelegatedReviewOrSplitCoverage) blockers.push("requires delegated review or split coverage");
-  return blockers;
-}
-
-function validateExplicitExpectedEffects(value: unknown): { effects: RouteExpectedEffect[] } | { error: string } {
-  const valid = new Set<RouteExpectedEffect>(["read", "write", "verify"]);
-  if (!Array.isArray(value)) {
-    return { error: "chalin_route requires expectedEffects. Set at least one of: read, write, verify." };
-  }
-  if (value.length === 0) {
-    return { error: "chalin_route expectedEffects must include at least one of: read, write, verify." };
-  }
-  const invalid = value.filter((effect) => typeof effect !== "string" || !valid.has(effect as RouteExpectedEffect));
-  if (invalid.length > 0) {
-    return { error: `chalin_route expectedEffects contains invalid value(s): ${invalid.map(String).join(", ")}. Use only: read, write, verify.` };
-  }
-  return { effects: [...new Set(value as RouteExpectedEffect[])] };
-}
-
-function safeActiveToolsForDirect(pi: ExtensionAPI): string[] {
-  try {
-    return pi.getActiveTools();
-  } catch {
-    return [];
-  }
-}
-
-function directDecisionJudgeContext(ctx: unknown, signal?: AbortSignal): Parameters<typeof runDirectDecisionJudge>[0]["context"] {
-  const value = (ctx ?? {}) as { model?: unknown; modelRegistry?: unknown; signal?: AbortSignal };
-  return {
-    model: value.model as never,
-    modelRegistry: value.modelRegistry as never,
-    signal: signal ?? value.signal,
-  };
-}
 
 type ChalinSkillToolParams = {
   action: "list" | "show" | "search" | "use" | "disable" | "audit" | "promote" | "retire" | "metrics" | "reconcile";
@@ -281,6 +172,8 @@ type ChalinArtifactResumeToolParams = {
 type ChalinResumeToolParams = {
   runId?: string;
 };
+
+type ChalinRouteToolParams = ChalinDelegationRouteParams;
 
 type ChalinWebSearchToolParams = {
   query?: string;
@@ -390,75 +283,10 @@ export function registerChalinTools(pi: ExtensionAPI): void {
   });
 
   pi.registerTool({
-    name: "chalin_direct",
-    label: "Chalin Direct",
-    description: "Confirm that the current turn should proceed with direct primary-agent tools instead of a pi-chalin subagent workflow.",
-    promptSnippet: "chalin_direct: use first when the work is bounded enough for direct execution but still needs native workspace tools.",
-    promptGuidelines: [
-      "Use this only after choosing DIRECT for work that needs native tools.",
-      "DIRECT requires one bounded ownership surface, clear acceptance, and a parent-verifiable result.",
-      "Read-only status is not enough for DIRECT when evidence breadth, constraint compliance, or independent judgment affects correctness.",
-      "Do not use it when correctness depends on delegated ownership, review, synthesis, broad workspace evidence, repository state/history synthesis, multiple local evidence sources, or split coverage.",
-      "Fill the scope flags conservatively; chalin_direct rejects contradictory scope and keeps the decision phase active.",
-      "Do not use it for routed work; call chalin_route instead.",
-      "After it returns, continue with the restored native tools and keep scope bounded to the stated direct task.",
-    ],
-    parameters: ChalinDirectParams,
-    async execute(_toolCallId, params: ChalinDirectToolParams, signal, _onUpdate, ctx) {
-      if (isDirectDecisionConfirmed(pi)) {
-        return errorResult("chalin_direct was already confirmed for this user prompt. Do not call chalin_direct again; continue with native tools now, or call chalin_route if the evidence shows the work needs delegation.", {
-          decision: "direct",
-          task: params.task,
-          reason: params.reason,
-          restoredTools: safeActiveToolsForDirect(pi).filter((tool) => tool !== "chalin_direct"),
-        });
-      }
-      const blockers = directScopeBlockers(params.scope);
-      if (blockers.length > 0) {
-        return errorResult(`DIRECT rejected: ${blockers.join("; ")}. Keep the decision phase active and call chalin_route with a minimal routed workflow, or chalin_interview if a human decision is genuinely required.`, {
-          decision: "route-required",
-          task: params.task,
-          reason: params.reason,
-          blockers,
-          scope: params.scope,
-        });
-      }
-      const semanticJudge = await runDirectDecisionJudge({
-        task: params.task,
-        reason: params.reason,
-        scope: params.scope,
-        context: directDecisionJudgeContext(ctx, signal),
-      });
-      if (shouldRejectDirectFromJudge(semanticJudge)) {
-        const nextTool = semanticJudge.decision === "interview" ? "chalin_interview" : "chalin_route";
-        return errorResult(`DIRECT rejected by semantic judge: ${semanticJudge.reason}. Keep the decision phase active and call ${nextTool}.`, {
-          decision: semanticJudge.decision === "interview" ? "interview-required" : "route-required",
-          task: params.task,
-          reason: params.reason,
-          blockers: semanticJudge.blockers,
-          scope: params.scope,
-          semanticJudge,
-        });
-      }
-      markDecisionToolGateResolved(pi);
-      const restoredTools = releaseDecisionToolGate(pi);
-      const fallbackTools = restoredTools ?? safeActiveToolsForDirect(pi);
-      const activeTools = fallbackTools.filter((tool) => tool !== "chalin_direct");
-      markDirectDecisionConfirmed(pi);
-      return textResult("DIRECT confirmed. Native tools are available for this bounded turn; continue with the stated task and escalate only if new evidence expands scope.", {
-        decision: "direct",
-        task: params.task,
-        reason: params.reason,
-        restoredTools: activeTools,
-      });
-    },
-  });
-
-  pi.registerTool({
     name: "chalin_project_discovery",
     label: "Chalin Project Discovery",
     description: "Return a bounded raw filesystem inventory for local project orientation. It does not infer stack, entrypoints, tests, commands, or importance.",
-    promptSnippet: "chalin_project_discovery: get raw project inventory for broad orientation; skip it for bounded direct edits when native find/grep/read is cheaper.",
+    promptSnippet: "chalin_project_discovery: get raw project inventory for broad orientation; skip it for bounded inline edits when native find/grep/read is cheaper.",
     promptGuidelines: [
       "Use when broad repository orientation is needed before selecting files.",
       "For bounded bugfix/refactor/test/scaffold work, prefer native find/grep/read against likely files and nearby tests instead of inventorying the project.",
@@ -476,29 +304,12 @@ export function registerChalinTools(pi: ExtensionAPI): void {
   });
 
   pi.registerTool({
-    name: "chalin_project_snapshot",
-    label: "Chalin Project Snapshot",
-    description: "Legacy alias that returns raw project inventory plus git metadata. It does not infer stack, entrypoints, tests, commands, or importance.",
-    promptSnippet: "chalin_project_snapshot: get raw project inventory plus git metadata when change-set or repository-state facts are needed.",
-    promptGuidelines: [
-      "Prefer chalin_project_discovery unless git metadata is needed.",
-      "Treat this as filesystem/git facts only; choose follow-up reads/searches with LLM judgment.",
-      "Do not use for external/current facts; verify final claims from exact file evidence.",
-    ],
-    parameters: ChalinProjectSnapshotParams,
-    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-      const snapshot = buildProjectSnapshot({ cwd: ctx.cwd });
-      return textResult(formatProjectSnapshot(snapshot), { snapshot });
-    },
-  });
-
-  pi.registerTool({
     name: "chalin_interview",
     label: "Chalin Interview",
-    description: "Ask blocking clarification questions in the TUI and persist answers as pi-chalin artifacts for direct or routed work.",
+    description: "Ask blocking clarification questions in the TUI and persist answers as pi-chalin artifacts for inline or delegated work.",
     promptSnippet: "chalin_interview: ask concise questions only when a remaining human decision blocks safe progress after discoverable context is used.",
     promptGuidelines: [
-      "Use chalin_interview in direct or routed mode when proceeding would require guessing user intent, constraints, tradeoffs, or safety boundaries that cannot be discovered cheaply.",
+      "Use chalin_interview when proceeding would require guessing user intent, constraints, tradeoffs, or safety boundaries that cannot be discovered cheaply.",
       "Ask only what blocks correct planning. Prefer one to five questions per batch. Each question must have two to five concise options and exactly one recommended option when possible.",
       "Always allow a custom answer unless the answer space must be constrained for safety.",
       "After chalin_interview returns, use the persisted answers as artifact context and continue only when you are confident enough.",
@@ -539,128 +350,39 @@ export function registerChalinTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "chalin_route",
     label: "Chalin Route",
-    description: "Run a selected pi-chalin subagent workflow when isolated roles, staged execution, review, or context relief materially improve correctness beyond direct work.",
-    promptSnippet: "chalin_route: use when a reliable outcome needs current repo/change-state reconstruction, broad context-building, staged or independent responsibilities, mutation plus review, or parent context relief; keep bounded target-plus-verifier work direct unless evidence expands scope.",
+    description: "Delegate complex, multi-step, high-risk, or multi-surface work to the pi-chalin orchestrator and its subagents. This is a delegation gateway, not a route-selection or user-facing decision tool.",
+    promptSnippet: "chalin_route: delegate to the pi-chalin orchestrator when subagents, WorkUnits, independent review, or staged execution will materially improve quality.",
     promptGuidelines: [
-      "Use only when subagents materially improve quality, confidence, isolation, review, or context management.",
-      "Keep work direct when the target, acceptance surface, and verifier are already clear enough for the parent agent to proceed cheaply.",
-      "If direct work reveals real breadth, unresolved ambiguity, repeated failed verification, independent responsibility boundaries, or context pressure, escalate with a compact evidence handoff.",
-      "Valid topology values are exactly: sequential and dag. Use sequential with steps and dag with stages.",
-      "Choose topology from execution shape: sequential for one or more ordered responsibilities; dag when any stage needs parallel ownership or later fan-in.",
-      "Set workUnitStrategy structurally: none for a bounded route, planned when this route can already name bounded worker/reviewer units, discover when unknown units must be materialized inside this same run from structured scout/planner workUnits.",
-      "For discover, the initial route plan should contain discovery/planning ownership, not worker/reviewer placeholders for units that do not exist yet; do not split later unit execution/review into a second route.",
-      "Memory is a capability, not a route topology. Use direct memory search for recall/inventory, or set needsMemory when routed agents should receive/use memory context.",
-      "Set expectedEffects for the whole workflow, including units materialized after discover: read for inspection, write when routed work culminates in workspace mutation, verify when tests/commands/readback or review evidence are part of completion. requiresWorkspaceMutation is a legacy compatibility flag.",
-      "Any routed implementation or file mutation must include an editing/executing worker and a later reviewer who checks the original request, plan/claims, repository standards, gaps, and test/readback evidence.",
-      "Add roles only when they own a distinct responsibility that materially improves evidence, alternatives, risk control, execution, review, or synthesis; otherwise keep the route compact.",
-      "Use risk low for explicit docs-only artifact edits; reserve medium/high/critical for product-code mutation, secrets, destructive actions, or security-sensitive execution.",
-      "After the result, answer from Final answer material; call more tools only for an explicit critical gap.",
+      "Use this when the work is complex, touches multiple files or ownership boundaries, needs independent verification/review, benefits from decomposition, or would otherwise overload the primary Pi thread.",
+      "Do not call chalin_route just to decide whether to delegate. Decide with LLM judgment from the task shape, evidence burden, risk, ambiguity, decomposition value, and verification burden.",
+      "If a non-discoverable human decision blocks safe progress, use chalin_interview before delegating. If uncertainty is discoverable from repo/web evidence, pass it into the delegated workflow.",
+      "Use sequential topology for dependent phases. Use DAG only for independent work before fan-in, and give disjoint file scopes for parallel writers when known.",
+      "For mutation, include expectedEffects read/write/verify and let the orchestrator add worker/reviewer coverage when needed.",
+      "Keep the user experience simple: after chalin_route returns, answer from its final material without exposing internal delegation labels unless the user asks.",
     ],
     parameters: ChalinRouteParams,
     async execute(_toolCallId, params: ChalinRouteToolParams, signal, onUpdate, ctx) {
-      const expectedEffects = validateExplicitExpectedEffects(params.expectedEffects);
-      if ("error" in expectedEffects) return errorResult(expectedEffects.error, { expectedEffects: params.expectedEffects });
       const loaded = loadEffectiveConfig({ cwd: ctx.cwd });
       const catalog = AgentCatalog.load({ cwd: ctx.cwd });
-      const memory = createConfiguredMemoryStore({ cwd: ctx.cwd }, loaded.config);
-      const kernel = new ChalinKernel({
-        cwd: ctx.cwd,
-        config: loaded.config,
-        catalog,
-        memory,
-        modelOverrides: mergedSessionModelOverrides(loaded.config.agents.modelOverrides),
-        thinkingOverrides: mergedSessionThinkingOverrides(loaded.config.agents.thinkingOverrides),
-      });
-      let route = routeFromPlan({ ...params, expectedEffects: expectedEffects.effects });
-      const requiresWorkspaceMutation = route.expectedEffects?.includes("write") === true
-        || Boolean(params.requiresWorkspaceMutation)
-        || inferRouteRequiresWorkspaceMutation(route, params.task);
-      route = loaded.config.safety.mutationExpectationGuard
-        ? normalizeRouteForExecution(route, { requiresWorkspaceMutation, task: params.task })
-        : collapseReadOnlyScoutContextRoute(route, requiresWorkspaceMutation);
-      const agents = catalog.list();
-      const unknownAgents = route.agents.filter((agent) => !catalog.resolve(agent).agent);
-
-      if (!loaded.config.enabled) {
-        return textResult("pi-chalin is disabled for this project. Answer directly or ask the user to run /chalin on.", { route, diagnostics: loaded.diagnostics });
-      }
-      if (unknownAgents.length > 0) {
-        return errorResult(`Unknown pi-chalin agent(s): ${unknownAgents.join(", ")}\nAvailable agents: ${agents.map((agent) => agent.name).join(", ")}\nRetry chalin_route with only available agent names, or answer directly if the task is bounded.`, { route, diagnostics: catalog.diagnostics });
-      }
-      if (route.kind === "ask-user") {
-        return errorResult(`${route.reason}\nRetry chalin_route with a valid topology contract: sequential requires steps and dag requires stages.`, { route });
-      }
-      const guard = beginChalinRouteInvocation({ dryRun: Boolean(params.dryRun), route });
-      if (!guard.allowed) {
-        return textResult(guard.reason ?? "chalin_route already executed for this prompt.", { route, guard });
-      }
-      if (params.dryRun) {
-        finishChalinRouteInvocation(guard.invocationId, "dry-run");
-        return textResult(formatRoute(route, undefined, { availableAgents: agents.map((agent) => agent.name) }), { route, diagnostics: [...loaded.diagnostics, catalog.diagnostics] });
-      }
-
-      clearLegacyChalinControlWidget(ctx);
       onUpdate?.({
         content: [{ type: "text", text: formatChalinRoutePlanWidget(params) }],
-        details: { route, run: plannedWidgetRun(route) },
+        details: { status: "pending", params },
       });
-
-      const preApproval = await kernel.approvalFor(route);
-      const approvalOverride = preApproval.action === "ask" && await openSafetyApproval(ctx, route, preApproval)
-        ? { action: "allow" as const, reason: "Approved once through Safety Approval." }
-        : undefined;
-      if (preApproval.action === "block" || (preApproval.action === "ask" && !approvalOverride)) {
-        finishChalinRouteInvocation(guard.invocationId, preApproval.action);
-        setChalinStatus(ctx, preApproval.action === "block" ? { kind: "failed" } : { kind: "stopped" });
-        return textResult(formatRoute(route, { route, approval: preApproval, memories: [], diagnostics: [] }), { route, approval: preApproval });
-      }
-
-      const abortSignal = signal ?? new AbortController().signal;
-      const skillOverrides = getSkillOverridesForTurn();
-      setChalinStatus(ctx, route.plan ? { kind: "running", intent: routeIntent(route), agent: route.agents[0] ?? route.kind, completed: 0, total: Math.max(route.agents.length, 1) } : { kind: "synthesizing" });
-      let result: Awaited<ReturnType<ChalinKernel["handleRoute"]>>;
       try {
-        result = await kernel.handleRoute(route, params.task, {
-          cwd: ctx.cwd,
-          extensionContext: ctx,
-          signal: abortSignal,
-          explicitSkills: [...skillOverrides.explicit],
-          disabledSkills: [...skillOverrides.disabled],
-          onUpdate: (run) => {
-            setLatestRun(run);
-            setChalinStatus(ctx, footerStateForRun(run));
-            onUpdate?.({
-              content: [{ type: "text", text: formatChalinRunWidget(run) }],
-              details: chalinRouteUpdateDetails(run),
-            });
-          },
-        }, approvalOverride);
+        const result = await executeDelegatedChalinRoute(params, params.task, ctx, { signal, onUpdate });
+        if (result.run) setLatestRun(result.run);
+        if (result.run?.status === "paused" || signal?.aborted) setChalinStatus(ctx, { kind: "stopped" });
+        else if (result.run?.status === "failed") setChalinStatus(ctx, { kind: "failed" });
+        else setChalinStatus(ctx, { kind: "complete", intent: routeIntent(result.route) });
+        return finalToolResult(ctx, formatRoute(result.route, result), compactRouteDetails(result.route, result, [...loaded.diagnostics, catalog.diagnostics]));
       } catch (error) {
-        finishChalinRouteInvocation(guard.invocationId, "failed");
-        setChalinStatus(ctx, abortSignal.aborted ? { kind: "stopped" } : { kind: "failed" });
-        throw error;
+        const message = error instanceof Error ? error.message : String(error);
+        setChalinStatus(ctx, signal?.aborted ? { kind: "stopped" } : { kind: "failed" });
+        return textResult(`chalin_route failed: ${message}`, { error: message, params });
       }
-      if (result.run) setLatestRun(result.run);
-      if (result.approval.action !== "allow") {
-        finishChalinRouteInvocation(guard.invocationId, outcomeForResult(result));
-        setChalinStatus(ctx, result.approval.action === "block" ? { kind: "failed" } : { kind: "stopped" });
-        return finalToolResult(ctx, formatRoute(route, result), compactRouteDetails(route, result, [...loaded.diagnostics, catalog.diagnostics]));
-      }
-      if (result.run?.status === "paused" || abortSignal.aborted) setChalinStatus(ctx, { kind: "stopped" });
-      else if (result.run?.status === "failed") setChalinStatus(ctx, { kind: "failed" });
-      else setChalinStatus(ctx, { kind: "complete", intent: routeIntent(route) });
-      finishChalinRouteInvocation(guard.invocationId, outcomeForResult(result));
-
-      return finalToolResult(ctx, formatRoute(route, result), compactRouteDetails(route, result, [...loaded.diagnostics, catalog.diagnostics]));
     },
-    renderCall(args, theme) {
-      void args;
-      void theme;
-      // Keep the call slot intentionally empty. Pi renders call + result in the
-      // same tool component; rendering the full tree in both places creates the
-      // duplicated "planned tree + running tree" UX and layout shift while tool
-      // arguments stream in. The result slot below is the single source of UI.
-      return new Text("", 0, 0);
+    renderCall(args: ChalinRouteToolParams, theme) {
+      return new Text(colorizeChalinWidget(formatChalinRoutePlanWidget(args), theme), 0, 0);
     },
     renderResult(result, _options, theme) {
       const details = result.details as ChalinRouteWidgetDetails | undefined;
@@ -669,7 +391,6 @@ export function registerChalinTools(pi: ExtensionAPI): void {
     },
   });
 
-
   pi.registerTool({
     name: "chalin_resume",
     label: "Chalin Resume",
@@ -677,7 +398,7 @@ export function registerChalinTools(pi: ExtensionAPI): void {
     promptSnippet: "chalin_resume: resume an interrupted pi-chalin run when the user's current intent is continuation after ESC, abort, terminal close, or a paused run.",
     promptGuidelines: [
       "Use this before answering from partial findings when the user asks to continue a paused/interrupted chalin run; infer continuation from intent and resumable-run context, not literal phrase matching.",
-      "Do not create a new chalin_route for a paused run; resume the persisted run instead.",
+      "Do not start a new subagent workflow for a paused run; resume the persisted run instead.",
       "After chalin_resume returns, answer the user from the resumed Final answer material.",
     ],
     parameters: ChalinResumeParams,
@@ -699,7 +420,6 @@ export function registerChalinTools(pi: ExtensionAPI): void {
         modelOverrides: mergedSessionModelOverrides(loaded.config.agents.modelOverrides),
         thinkingOverrides: mergedSessionThinkingOverrides(loaded.config.agents.thinkingOverrides),
       });
-      clearLegacyChalinControlWidget(ctx);
       const abortSignal = signal ?? new AbortController().signal;
       setChalinStatus(ctx, {
         kind: "running",
@@ -752,10 +472,10 @@ export function registerChalinTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "chalin_memory_search",
     label: "Chalin Memory Search",
-    description: "Search or list compact durable pi-chalin memory from the primary Pi agent, including direct-mode work. Use without waiting for an explicit memory request when prior decisions, project facts, workflows, preferences, or memory inventory/counts matter.",
-    promptSnippet: "chalin_memory_search: recall or list compact durable memory during direct work when prior context or memory inventory may help.",
+    description: "Search or list compact durable pi-chalin memory from the primary Pi agent. Use without waiting for an explicit memory request when prior decisions, project facts, workflows, preferences, or memory inventory/counts matter.",
+    promptSnippet: "chalin_memory_search: recall or list compact durable memory during inline work when prior context or memory inventory may help.",
     promptGuidelines: [
-      "Use this as the first tool for explicit memory/recall questions instead of routing through chalin_route.",
+      "Use this as the first tool for explicit memory/recall questions instead of starting a subagent workflow.",
       "Use mode `list` for memory inventory/count questions such as what memory elements exist or how many records are visible.",
       "Use this proactively for repeated project conventions, prior decisions, user preferences, workflows, and suspected stale assumptions.",
       "Keep queries short and tokenBudget small. Current repository evidence and explicit user instructions override memory.",
@@ -794,7 +514,7 @@ export function registerChalinTools(pi: ExtensionAPI): void {
     name: "chalin_memory_write",
     label: "Chalin Memory Write",
     description: "Save compact durable project or user knowledge from the primary Pi agent. The MemoryStore WriteGuard decides active, pending, duplicate, revised, or rejected.",
-    promptSnippet: "chalin_memory_write: save durable verified knowledge discovered during direct or routed work.",
+    promptSnippet: "chalin_memory_write: save durable verified knowledge discovered during inline or delegated work.",
     promptGuidelines: [
       "Use this for durable project facts, decisions, workflows, user preferences, and lessons that should reduce future rediscovery.",
       "Do not write logs, command output, code dumps, transient task completion notes, or facts that are not backed by evidence.",

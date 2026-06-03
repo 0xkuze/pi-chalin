@@ -41,7 +41,7 @@ export interface ChalinConfig {
   skills: {
     enabled: boolean;
     autoActivation: boolean;
-    maxActiveDirect: number;
+    maxActiveInline: number;
     maxActivePerStep: number;
     allowProjectSkills: boolean;
     allowUserSkills: boolean;
@@ -99,7 +99,7 @@ export const DEFAULT_CONFIG: ChalinConfig = {
   skills: {
     enabled: true,
     autoActivation: true,
-    maxActiveDirect: 1,
+    maxActiveInline: 1,
     maxActivePerStep: 2,
     allowProjectSkills: true,
     allowUserSkills: true,
@@ -233,7 +233,7 @@ function coerceConfig(input: ChalinConfig, diagnostics: string[]): ChalinConfig 
     }
   }
   for (const [key, min, max] of [
-    ["maxActiveDirect", 0, 5],
+    ["maxActiveInline", 0, 5],
     ["maxActivePerStep", 0, 5],
     ["staleAfterDays", 1, 365],
   ] as const) {

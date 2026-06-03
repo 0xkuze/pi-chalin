@@ -30,7 +30,7 @@ export function buildContextPacket(run: RunState, currentStep: RunStepState, pre
     ...priorSteps.flatMap((step) => step.output?.reviewerVerdict?.missingCoverage ?? []),
     ...priorSteps.filter((step) => step.status === "failed" || step.status === "skipped").map((step) => step.error ?? step.skipReason ?? `${step.agent}/${step.id} did not complete`),
   ]).map((item) => sanitizeContextText(item, roots)).slice(0, 12);
-  const summary = sanitizeContextText(truncateText(previous?.trim() || priorSteps.map((step) => step.output?.handoff ?? step.output?.text ?? "").filter(Boolean).join("\n"), tokenBudget), roots);
+  const summary = sanitizeContextText(buildContextSummary(priorSteps, previous, tokenBudget), roots);
   return {
     summary,
     workUnitIds: unique([currentStep.workUnitId, ...priorSteps.map((step) => step.workUnitId)].filter((value): value is string => Boolean(value))),
@@ -42,6 +42,21 @@ export function buildContextPacket(run: RunState, currentStep: RunStepState, pre
     knownGaps,
     tokenBudget,
   };
+}
+
+function buildContextSummary(priorSteps: RunStepState[], previous: string | undefined, tokenBudget: number): string {
+  const immediate = previous?.trim();
+  const upstream = priorSteps
+    .map((step) => {
+      const text = (step.output?.handoff ?? step.output?.text ?? "").trim();
+      return text ? `- ${step.agent}/${step.id}: ${text}` : undefined;
+    })
+    .filter((line): line is string => Boolean(line));
+  const parts = [
+    immediate ? `previous: ${immediate}` : undefined,
+    upstream.length ? `upstream:\n${upstream.join("\n")}` : undefined,
+  ].filter((line): line is string => Boolean(line));
+  return truncateText(parts.join("\n"), tokenBudget);
 }
 
 function sanitizeContextText(value: string, roots: string[]): string {

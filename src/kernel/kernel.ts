@@ -31,7 +31,6 @@ export interface ChalinHandleResult {
 interface KernelServiceShape {
   readonly kernel: ChalinKernel;
   readonly handleRoute: (route: RouteDecision, prompt: string, context?: Omit<WorkerRunnerContext, "agents" | "modelOverrides">, approvalOverride?: ApprovalDecision) => Effect.Effect<ChalinHandleResult, unknown>;
-  readonly handlePrompt: (prompt: string, context?: Omit<WorkerRunnerContext, "agents" | "modelOverrides">) => Effect.Effect<ChalinHandleResult, unknown>;
 }
 
 class KernelService extends Context.Tag("pi-chalin/Kernel")<KernelService, KernelServiceShape>() {}
@@ -40,7 +39,6 @@ export function kernelLayer(kernel: ChalinKernel): Layer.Layer<KernelService> {
   return Layer.succeed(KernelService, {
     kernel,
     handleRoute: (route, prompt, context, approvalOverride) => Effect.tryPromise(() => kernel.handleRoute(route, prompt, context, approvalOverride)),
-    handlePrompt: (prompt, context) => Effect.tryPromise(() => kernel.handlePrompt(prompt, context)),
   });
 }
 
@@ -79,34 +77,6 @@ export class ChalinKernel {
     this.sdkRunner = options?.sdkRunner ?? new SdkWorkerRunner();
     this.modelOverrides = options?.modelOverrides ?? this.config.agents.modelOverrides;
     this.thinkingOverrides = options?.thinkingOverrides ?? this.config.agents.thinkingOverrides;
-  }
-
-  /**
-   * pi-chalin is LLM-routed: the primary Pi agent decides whether to call the
-   * chalin_route tool and provides the topology/steps. This method remains as a
-   * safe legacy preview path, but it intentionally does not infer workflows from
-   * hard-coded prompt keywords.
-   */
-  classify(prompt: string): RouteDecision {
-    const text = prompt.trim();
-    if (!text) return askUser("Prompt is empty.");
-    return {
-      kind: "bypass",
-      agents: [],
-      risk: "low",
-      ambiguity: "low",
-      needsMemory: false,
-      needsArtifacts: false,
-      reason: "pi-chalin uses LLM-first routing: the primary Pi agent decides when to call chalin_route and which agents/topology to use.",
-    };
-  }
-
-  classifyPlaceholder(prompt: string): RouteDecision {
-    return this.classify(prompt);
-  }
-
-  async handlePrompt(prompt: string, context: Omit<WorkerRunnerContext, "agents" | "modelOverrides"> = { cwd: this.cwd }): Promise<ChalinHandleResult> {
-    return this.handleRoute(this.classify(prompt), prompt, context);
   }
 
   async handleRoute(route: RouteDecision, prompt: string, context: Omit<WorkerRunnerContext, "agents" | "modelOverrides"> = { cwd: this.cwd }, approvalOverride?: ApprovalDecision): Promise<ChalinHandleResult> {
@@ -229,29 +199,18 @@ type StrictRoutePlanInput = {
   needsArtifacts?: boolean;
   expectedEffects: RouteExpectedEffect[];
   workUnitStrategy?: RouteWorkUnitStrategy;
+  fanoutAuthorized?: boolean;
   reason?: string;
 };
 
-type LegacyRoutePlanInput = Omit<StrictRoutePlanInput, "expectedEffects"> & {
-  expectedEffects?: RouteExpectedEffect[];
-};
-
-export function routeFromPlan(input: LegacyRoutePlanInput): RouteDecision {
-  return routeFromPlanInternal(input, false);
-}
-
-export function routeFromLegacyPlan(input: LegacyRoutePlanInput): RouteDecision {
-  return routeFromPlanInternal(input, true);
-}
-
-function routeFromPlanInternal(input: LegacyRoutePlanInput, legacyInferExpectedEffects: boolean): RouteDecision {
+export function routeFromPlan(input: StrictRoutePlanInput): RouteDecision {
   const steps = sanitizeSteps(input.steps ?? []);
   if (input.topology === "dag") {
     const stages = sanitizeStages(input.stages ?? []);
-    if (stages.length === 0) return askUser("chalin_route dag topology requires at least one stage with agent tasks.");
+    if (stages.length === 0) return askUser("Routed dag topology requires at least one stage with agent tasks.");
     const agents = stages.flatMap((stage) => stage.tasks.map((step) => step.agent));
     const allSteps = stages.flatMap((stage) => stage.tasks);
-    const expectedEffects = expectedEffectsFromInput(input.expectedEffects, allSteps, legacyInferExpectedEffects);
+    const expectedEffects = expectedEffectsFromInput(input.expectedEffects);
     if (!expectedEffects) return expectedEffectsRequiredRoute();
     return {
       kind: "multi-agent-dag",
@@ -262,14 +221,15 @@ function routeFromPlanInternal(input: LegacyRoutePlanInput, legacyInferExpectedE
       needsArtifacts: input.needsArtifacts ?? allSteps.some((step) => ["scout", "planner", "worker", "reviewer", "context-builder"].includes(step.agent)),
       expectedEffects,
       workUnitStrategy: sanitizeWorkUnitStrategy(input.workUnitStrategy),
+      ...(typeof input.fanoutAuthorized === "boolean" ? { fanoutAuthorized: input.fanoutAuthorized } : {}),
       reason: input.reason?.trim() || "Primary Pi agent selected a staged DAG workflow dynamically.",
       plan: { kind: "dag", stages },
     };
   }
-  if (steps.length === 0) return askUser("chalin_route sequential topology requires at least one agent step.");
+  if (steps.length === 0) return askUser("Routed sequential topology requires at least one agent step.");
 
   const agents = steps.map((step) => step.agent);
-  const expectedEffects = expectedEffectsFromInput(input.expectedEffects, steps, legacyInferExpectedEffects);
+  const expectedEffects = expectedEffectsFromInput(input.expectedEffects);
   if (!expectedEffects) return expectedEffectsRequiredRoute();
   return {
     kind: "multi-agent-sequential",
@@ -280,13 +240,14 @@ function routeFromPlanInternal(input: LegacyRoutePlanInput, legacyInferExpectedE
     needsArtifacts: input.needsArtifacts ?? steps.some((step) => ["scout", "planner", "worker", "reviewer", "context-builder"].includes(step.agent)),
     expectedEffects,
     workUnitStrategy: sanitizeWorkUnitStrategy(input.workUnitStrategy),
+    ...(typeof input.fanoutAuthorized === "boolean" ? { fanoutAuthorized: input.fanoutAuthorized } : {}),
     reason: input.reason?.trim() || "Primary Pi agent selected this chalin workflow dynamically.",
     plan: { kind: "sequential", steps },
   };
 }
 
 function expectedEffectsRequiredRoute(): RouteDecision {
-  return askUser("chalin_route requires explicit expectedEffects; set read, write, and/or verify instead of relying on legacy agent-based inference.");
+  return askUser("Delegated work requires explicit expectedEffects; set read, write, and/or verify so the orchestrator can enforce the right coverage.");
 }
 
 function routeNeedsMemory(value: boolean | undefined): boolean {
@@ -299,7 +260,16 @@ function memoryDisabled(): boolean {
 
 function sanitizeSteps(steps: AgentStep[]): AgentStep[] {
   return steps
-    .map((step) => ({ id: step.id?.trim(), agent: step.agent.trim(), task: step.task.trim(), budget: sanitizeBudget(step.budget) }))
+    .map((step) => {
+      const files = sanitizeStepFiles(step.files);
+      return {
+        id: step.id?.trim(),
+        agent: step.agent.trim(),
+        task: step.task.trim(),
+        budget: sanitizeBudget(step.budget),
+        ...(files ? { files } : {}),
+      };
+    })
     .filter((step) => step.agent.length > 0 && step.task.length > 0)
     .slice(0, 6);
 }
@@ -318,14 +288,26 @@ function sanitizeBudget(value: AgentStep["budget"]): AgentStep["budget"] | undef
   return value === "tight" || value === "normal" || value === "deep" || value === "extended" ? value : undefined;
 }
 
+function sanitizeStepFiles(files: string[] | undefined): string[] | undefined {
+  if (!files?.length) return undefined;
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const file of files) {
+    const normalized = file.trim().replaceAll("\\", "/");
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(normalized);
+    if (result.length >= 40) break;
+  }
+  return result.length ? result : undefined;
+}
+
 function sanitizeWorkUnitStrategy(value: RouteWorkUnitStrategy | undefined): RouteWorkUnitStrategy | undefined {
   return value === "none" || value === "discover" || value === "planned" ? value : undefined;
 }
 
-function expectedEffectsFromInput(effects: RouteExpectedEffect[] | undefined, steps: AgentStep[], legacyInferExpectedEffects: boolean): RouteExpectedEffect[] | undefined {
-  if (effects !== undefined) return sanitizeExpectedEffects(effects);
-  if (legacyInferExpectedEffects) return inferExpectedEffectsFromSteps(steps);
-  return undefined;
+function expectedEffectsFromInput(effects: RouteExpectedEffect[]): RouteExpectedEffect[] | undefined {
+  return sanitizeExpectedEffects(effects);
 }
 
 function sanitizeExpectedEffects(effects: RouteExpectedEffect[]): RouteExpectedEffect[] | undefined {
@@ -335,31 +317,7 @@ function sanitizeExpectedEffects(effects: RouteExpectedEffect[]): RouteExpectedE
   return unique.length > 0 ? unique : undefined;
 }
 
-function inferExpectedEffectsFromSteps(steps: AgentStep[]): RouteExpectedEffect[] {
-  const effects = new Set<RouteExpectedEffect>(["read"]);
-  if (steps.some((step) => step.agent === "worker" || step.agent === "conflict-resolver")) effects.add("write");
-  if (steps.some((step) => step.agent === "worker" || step.agent === "reviewer" || step.agent === "conflict-resolver")) effects.add("verify");
-  return [...effects];
-}
-
 function riskFromPlan(steps: Array<{ agent: string }>): RouteDecision["risk"] {
   if (steps.some((step) => step.agent === "worker")) return "medium";
   return "low";
-}
-
-function isMemoryInventoryPrompt(prompt: string): boolean {
-  const normalized = prompt.toLowerCase();
-  return [
-    "how many",
-    "how much",
-    "memory count",
-    "count memory",
-    "list memory",
-    "memory elements",
-    "memory records",
-    "what elements",
-    "what do you have in memory",
-    "what is in memory",
-    "what's in memory",
-  ].some((phrase) => normalized.includes(phrase));
 }

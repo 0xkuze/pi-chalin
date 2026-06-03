@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, test } from "bun:test";
+import { afterEach, test } from "vitest";
 import { ArtifactStore } from "../src/artifacts/artifacts.ts";
 
 import { openArtifactPanel } from "../src/ui/ui.ts";
@@ -30,7 +30,7 @@ test("ArtifactStore persists resumable feature state with checkpoints and valida
   await store.saveValidationContract("memory-and-artifacts", {
     id: "memory-quality-gate",
     title: "Memory quality regression gate",
-    commands: ["bun test -- --runInBand test/memory.test.ts"],
+    commands: ["pnpm test -- test/memory.test.ts"],
     successCriteria: ["No raw logs are stored", "Topic-key duplicates revise existing memories"],
   });
   await store.saveWorkerSkill("memory-and-artifacts", {

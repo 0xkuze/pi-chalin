@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "bun:test";
+import { test } from "vitest";
 import { evaluateBudgetUsage, estimateBudgetPreflight, policyForStep, recordBudgetCheckpoint, scoreProgress, summarizeToolUtility } from "../src/budget/budget.ts";
 import { ArtifactStore } from "../src/artifacts/artifacts.ts";
 import type { AgentDefinition, RunStepState } from "../src/domain/schemas.ts";
@@ -133,7 +133,7 @@ test("tool-call budget alone remains a soft cap and never checkpoints the stage"
 test("summarizeToolUtility exposes waste and signal metrics", () => {
   const utility = summarizeToolUtility({
     findings: [
-      "testing: Project uses bun:test.",
+      "testing: Project uses Vitest.",
       "workflow: Checkpoints are written after each handoff.",
     ],
     toolCalls: 8,
@@ -141,7 +141,7 @@ test("summarizeToolUtility exposes waste and signal metrics", () => {
     firstSignalToolCall: 4,
     verificationDone: true,
     memoryCandidates: [
-      { content: "Project uses bun:test with isolated temp dirs.", category: "testing", confidence: 0.9 },
+      { content: "Project uses Vitest with isolated temp dirs.", category: "testing", confidence: 0.9 },
       { content: "cmd = ['pi']", category: "agent-note", confidence: 0.5 },
     ],
   });
@@ -157,15 +157,15 @@ test("summarizeToolUtility exposes waste and signal metrics", () => {
 test("scoreProgress turns utility signals into continuation gates", () => {
   const positive = scoreProgress({
     findings: [
-      "testing: Project uses bun:test.",
-      "validation: nearest verification command is bun run test.",
+      "testing: Project uses Vitest.",
+      "validation: nearest verification command is pnpm run test.",
     ],
     toolCalls: 5,
     filesRead: ["package.json", "test/budget.test.ts"],
     firstSignalToolCall: 1,
     verificationDone: true,
     memoryCandidates: [
-      { content: "Project uses bun:test with isolated temp dirs.", category: "testing", confidence: 0.9 },
+      { content: "Project uses Vitest with isolated temp dirs.", category: "testing", confidence: 0.9 },
     ],
   });
 

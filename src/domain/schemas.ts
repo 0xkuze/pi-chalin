@@ -145,6 +145,7 @@ export interface AgentStep {
   agent: string;
   task: string;
   budget?: ToolBudgetProfile;
+  files?: string[];
 }
 
 export interface AgentStage {
@@ -167,6 +168,7 @@ export interface RouteDecision {
   needsArtifacts: boolean;
   expectedEffects?: RouteExpectedEffect[];
   workUnitStrategy?: RouteWorkUnitStrategy;
+  fanoutAuthorized?: boolean;
   reason: string;
   plan?: RoutePlan;
 }
@@ -180,8 +182,6 @@ export interface ApprovalDecision {
 
 export type RunStatus = "pending" | "running" | "complete" | "failed" | "paused" | "stale-repaired";
 export type RunStepStatus = "pending" | "running" | "complete" | "failed" | "paused" | "checkpointed" | "skipped";
-export type LegacyRunStatus = RunStatus | "budget-capped";
-export type LegacyRunStepStatus = RunStepStatus | "budget-capped";
 export type RunStepPauseReason = "aborted" | "idle-stall";
 export type CheckpointKind = "budget-cap" | "needs-continuation" | "low-signal" | "awaiting-review" | "split-recommended" | "handoff-contract";
 export type CheckpointContinuation = "continue" | "review" | "split" | "resume";
@@ -192,7 +192,6 @@ export interface CheckpointInfo {
   continuation: CheckpointContinuation;
   progressScore?: number;
   capHits?: BudgetCapHit[];
-  legacyStatus?: "budget-capped";
 }
 
 export interface MemoryCandidate {
@@ -299,6 +298,8 @@ export interface AgentHandoff {
   evidenceClaims: EvidenceClaim[];
   risks: string[];
   nextActions: string[];
+  requiresHumanInput?: boolean;
+  humanInputQuestions?: string[];
   workUnits?: AgentHandoffWorkUnit[];
 }
 
@@ -317,7 +318,7 @@ export interface AgentOutput {
   text: string;
   handoff?: string;
   structuredHandoff?: AgentHandoff;
-  handoffContract?: "structured" | "legacy-degraded" | "missing";
+  handoffContract?: "structured" | "missing";
   reviewerVerdict?: ReviewerVerdict;
   memoryCandidates: MemoryCandidate[];
   claims?: EvidenceClaim[];
@@ -334,11 +335,7 @@ export interface UserIntentContract {
   originalPrompt: string;
   workUnitDiscoveryRequested?: boolean;
   decompositionTarget?: string;
-  /**
-   * Legacy schema v3 field. Prefer workUnitDiscoveryRequested for orchestrator-selected
-   * decomposition; this field is reserved for persisted older runs.
-   */
-  explicitFanoutRequest?: boolean;
+  fanoutAuthorized?: boolean;
   fanoutTarget?: string;
   explicitConstraints: string[];
   forbiddenPaths: string[];
@@ -516,6 +513,8 @@ export interface ModelResolutionLog {
   attempts: ModelResolutionAttempt[];
 }
 
+export type RunStepRepairKind = "implementation" | "review-evidence" | "scope-gap";
+
 export interface RunStepState {
   id: string;
   agent: string;
@@ -527,6 +526,7 @@ export interface RunStepState {
   skipReason?: string;
   reviewGate?: ReviewGateStatus;
   repairCycle?: number;
+  repairKind?: RunStepRepairKind;
   checkpoint?: CheckpointInfo;
   budget?: ToolBudgetProfile;
   maxToolCalls?: number;

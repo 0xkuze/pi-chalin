@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, test } from "bun:test";
+import { afterEach, test } from "vitest";
 import { loadEffectiveConfig, setAgentThinkingOverride } from "../src/config/config.ts";
 
 const tempDirs: string[] = [];
@@ -115,4 +115,23 @@ test("config validates memory provider and engram settings", () => {
   assert.equal(loaded.config.memory.engram.timeoutMs, 800);
   assert.equal(loaded.config.memory.engram.project, undefined);
   assert.match(loaded.diagnostics.join("\n"), /Invalid memory\.provider/);
+});
+
+test("config validates inline and per-step skill activation caps", () => {
+  const cwd = tempDir("pi-chalin-cwd-");
+  writeJson(path.join(cwd, ".pi-chalin", "config.json"), {
+    skills: {
+      maxActiveInline: 3.8,
+      maxActivePerStep: 9,
+      autoActivation: "yes",
+    },
+  });
+
+  const loaded = loadEffectiveConfig({ cwd });
+
+  assert.equal(loaded.config.skills.maxActiveInline, 3);
+  assert.equal(loaded.config.skills.maxActivePerStep, 2);
+  assert.equal(loaded.config.skills.autoActivation, true);
+  assert.match(loaded.diagnostics.join("\n"), /Invalid skills\.maxActivePerStep/);
+  assert.match(loaded.diagnostics.join("\n"), /Invalid skills\.autoActivation/);
 });

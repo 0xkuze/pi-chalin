@@ -267,7 +267,7 @@ function formatCommandBudgetSummary(metrics: RunState["metrics"] | undefined): s
   const stops = metrics?.budgetStopCount ?? 0;
   const soft = hits.filter((hit) => hit.severity === "soft").length;
   const hard = hits.filter((hit) => hit.severity === "hard").length || stops;
-  return `${soft} budget warnings · ${hard} legacy budget stops`;
+  return `${soft} budget warnings · ${hard} budget stops`;
 }
 
 async function handleSkillsCommand(ctx: ExtensionContext, catalog: SkillCatalog, args: string[]): Promise<void> {
@@ -512,18 +512,12 @@ async function openSkillSettings(ctx: ExtensionContext, config: ChalinConfig, op
 
 async function openMaintenanceSettings(ctx: ExtensionContext): Promise<void> {
   const webFetchFiles = countJsonFiles(webFetchCacheDir(ctx.cwd));
-  const snapshotExists = fs.existsSync(projectSnapshotCachePath(ctx.cwd));
   const selected = await ctx.ui.select("Maintenance", [
     `Clear WebFetch cache · ${webFetchFiles} file${webFetchFiles === 1 ? "" : "s"}`,
-    `Clear project snapshot cache · ${snapshotExists ? "1 file" : "none"}`,
     "Close",
   ]);
   if (selected?.startsWith("Clear WebFetch cache")) {
     await clearWebFetchCache(ctx, webFetchFiles);
-    return;
-  }
-  if (selected?.startsWith("Clear project snapshot cache")) {
-    await clearProjectSnapshotCache(ctx, snapshotExists);
   }
 }
 
@@ -539,20 +533,6 @@ async function clearWebFetchCache(ctx: ExtensionContext, fileCount: number): Pro
   if (!confirmed) return;
   fs.rmSync(webFetchCacheDir(ctx.cwd), { recursive: true, force: true });
   ctx.ui.notify(`Cleared ${fileCount} WebFetch cache file${fileCount === 1 ? "" : "s"}.`, "info");
-}
-
-async function clearProjectSnapshotCache(ctx: ExtensionContext, exists: boolean): Promise<void> {
-  if (!exists) {
-    ctx.ui.notify("No project snapshot cache file to clear.", "info");
-    return;
-  }
-  const confirmed = await ctx.ui.confirm(
-    "Clear Project Snapshot Cache",
-    "This deletes the cached project snapshot. pi-chalin will rebuild it on the next discovery pass.\n\nContinue?",
-  );
-  if (!confirmed) return;
-  fs.rmSync(projectSnapshotCachePath(ctx.cwd), { force: true });
-  ctx.ui.notify("Cleared project snapshot cache.", "info");
 }
 
 function routingEnabledFromSettingsChoice(choice: string | undefined): boolean | undefined {
@@ -622,7 +602,7 @@ function formatSkillPolicySummary(config: ChalinConfig): string {
     "Skill policy",
     `feature: ${enabledLabel(config.skills.enabled)}`,
     `auto activation: ${enabledLabel(config.skills.autoActivation)}`,
-    `max active direct: ${config.skills.maxActiveDirect}`,
+    `max active inline: ${config.skills.maxActiveInline}`,
     `max active per step: ${config.skills.maxActivePerStep}`,
     `project skills: ${enabledLabel(config.skills.allowProjectSkills)}`,
     `user skills: ${enabledLabel(config.skills.allowUserSkills)}`,
@@ -663,10 +643,6 @@ function enabledLabel(value: boolean): string {
 
 function webFetchCacheDir(cwd: string): string {
   return path.join(resolveChalinPaths({ cwd }).projectRoot, ".pi-chalin", "cache", "webfetch");
-}
-
-function projectSnapshotCachePath(cwd: string): string {
-  return path.join(resolveChalinPaths({ cwd }).projectRoot, ".pi-chalin", "cache", "project-snapshot.json");
 }
 
 function countJsonFiles(dir: string): number {

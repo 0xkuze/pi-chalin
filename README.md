@@ -5,7 +5,7 @@
 <p align="center">
   <a href="package.json"><img alt="version" src="https://img.shields.io/badge/version-1.0.0-111111?style=for-the-badge"></a>
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT%20%2B%20Attribution-0f766e?style=for-the-badge"></a>
-  <a href="package.json"><img alt="bun" src="https://img.shields.io/badge/bun-%3E%3D1.3.14-111111?style=for-the-badge&logo=bun&logoColor=white"></a>
+  <a href="package.json"><img alt="pnpm" src="https://img.shields.io/badge/pnpm-11.5.1-f69220?style=for-the-badge&logo=pnpm&logoColor=white"></a>
   <a href="package.json"><img alt="typescript" src="https://img.shields.io/badge/typescript-6.0-3178c6?style=for-the-badge&logo=typescript&logoColor=white"></a>
 </p>
 
@@ -50,7 +50,8 @@ The product goal is simple: keep the human in command while giving complex engin
 
 ### Requirements
 
-- Bun `>=1.3.14`
+- Node.js `>=26.3.0`
+- pnpm `>=11.5.1`
 - Pi Coding Agent runtime
 
 ### Install
@@ -62,7 +63,7 @@ pi install npm:pi-chalin
 For local development in this repository:
 
 ```bash
-bun install
+pnpm install
 ```
 
 ### Load In Pi
@@ -244,22 +245,11 @@ Runtime state is project-local:
 Fast verification:
 
 ```bash
-bun run typecheck
-bun run test
+pnpm run typecheck
+pnpm test
 ```
 
-Focused evaluator scripts are available for routing, memory, trace, trajectory, and workflow quality work:
-
-```bash
-bun run eval
-bun run eval:memory
-bun run eval:trace
-bun run eval:workflow
-bun run eval:workflow:harness
-bun run eval:workflow:complex
-```
-
-Use the broader evaluator path when changing routing policy, runner behavior, child-tool budgets, memory semantics, or workflow scoring. `eval:workflow:harness` compares simple, Chalin, and Gentle harnesses on the standard suite; `eval:workflow:complex` runs the expanded real-OSS-inspired suite across Zig/Rust, Rust, C, and C++ planning/implementation cases.
+Use the broader validation path when changing routing policy, runner behavior, child-tool budgets, memory semantics, or workflow scoring.
 
 ## Design Principles
 

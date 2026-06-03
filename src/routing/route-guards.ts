@@ -1,10 +1,11 @@
 import { Effect } from "effect";
-import type { AgentStep, RouteDecision, RouteExpectedEffect } from "../domain/schemas.ts";
+import type { AgentDefinition, AgentStep, RouteDecision, RouteExpectedEffect } from "../domain/schemas.ts";
 import { routeNeedsWorkUnitDiscovery } from "../runner/intent-contract.ts";
 
 interface RouteNormalizationOptions {
   requiresWorkspaceMutation: boolean;
   task: string;
+  agents?: ReadonlyMap<string, AgentDefinition>;
 }
 
 export function normalizeRouteForExecution(route: RouteDecision, options: RouteNormalizationOptions): RouteDecision {
@@ -14,7 +15,8 @@ export function normalizeRouteForExecution(route: RouteDecision, options: RouteN
 export function normalizeRouteForExecutionEffect(route: RouteDecision, options: RouteNormalizationOptions): Effect.Effect<RouteDecision> {
   return Effect.succeed(route).pipe(
     Effect.map((current) => stripPrematureDiscoverWorkUnitExecution(current)),
-    Effect.map((current) => ensureMutationRouteHasWorkerAndReviewer(current, options.requiresWorkspaceMutation, options.task)),
+    Effect.map((current) => ensureMutationRouteHasWorkerAndReviewer(current, options.requiresWorkspaceMutation, options.task, options.agents)),
+    Effect.map((current) => serializeUnsafeParallelPlannedWriters(current, options.requiresWorkspaceMutation, options.agents)),
     Effect.map((current) => collapseReadOnlyScoutContextRoute(current, options.requiresWorkspaceMutation)),
     Effect.withSpan("route-guards.normalizeRouteForExecution"),
   );
@@ -55,9 +57,9 @@ function stripPrematureDiscoverWorkUnitExecution(route: RouteDecision): RouteDec
   };
 }
 
-export function ensureMutationRouteHasWorkerAndReviewer(route: RouteDecision, requiresWorkspaceMutation: boolean, task: string): RouteDecision {
-  if (reviewerDisabled()) return ensureMutationRouteHasWorkerOnly(route, requiresWorkspaceMutation, task);
-  const hasImplementationWorker = route.agents.includes("worker");
+export function ensureMutationRouteHasWorkerAndReviewer(route: RouteDecision, requiresWorkspaceMutation: boolean, task: string, agents?: ReadonlyMap<string, AgentDefinition>): RouteDecision {
+  if (reviewerDisabled()) return ensureMutationRouteHasWorkerOnly(route, requiresWorkspaceMutation, task, agents);
+  const hasImplementationWorker = routeHasImplementationWriter(route, agents);
   if ((!requiresWorkspaceMutation && !hasImplementationWorker) || route.kind === "ask-user") return route;
   if (!route.plan) return route;
   if (!hasImplementationWorker && routeNeedsWorkUnitDiscovery(route)) return ensureFanoutDiscoveryRoute(route, task);
@@ -84,7 +86,7 @@ export function ensureMutationRouteHasWorkerAndReviewer(route: RouteDecision, re
   };
 
   if (route.plan.kind === "dag") {
-    const result = ensureDagHasImplementationReview(route.plan.stages, workerStep, reviewerStep);
+    const result = ensureDagHasImplementationReview(route.plan.stages, workerStep, reviewerStep, agents);
     const withReview = result.changed ? {
       ...route,
       agents: result.stages.flatMap((stage) => stage.tasks.map((step) => step.agent)),
@@ -100,7 +102,7 @@ export function ensureMutationRouteHasWorkerAndReviewer(route: RouteDecision, re
   }
 
   const existingSteps = route.plan.steps;
-  const result = ensureStepsHaveImplementationReview(existingSteps, workerStep, reviewerStep);
+  const result = ensureStepsHaveImplementationReview(existingSteps, workerStep, reviewerStep, agents);
   const withReview = result.changed ? {
     ...route,
     kind: "multi-agent-sequential",
@@ -152,8 +154,8 @@ function isFanoutDiscoveryAgent(agent: string): boolean {
   return agent === "scout" || agent === "planner" || agent === "context-builder";
 }
 
-function ensureMutationRouteHasWorkerOnly(route: RouteDecision, requiresWorkspaceMutation: boolean, task: string): RouteDecision {
-  const hasImplementationWorker = route.agents.includes("worker");
+function ensureMutationRouteHasWorkerOnly(route: RouteDecision, requiresWorkspaceMutation: boolean, task: string, agents?: ReadonlyMap<string, AgentDefinition>): RouteDecision {
+  const hasImplementationWorker = routeHasImplementationWriter(route, agents);
   if ((!requiresWorkspaceMutation && !hasImplementationWorker) || route.kind === "ask-user") return stripReviewerSteps(route);
   if (!route.plan) return stripReviewerSteps(route);
 
@@ -170,7 +172,7 @@ function ensureMutationRouteHasWorkerOnly(route: RouteDecision, requiresWorkspac
 
   if (route.plan.kind === "dag") {
     const stages = stripReviewerStages(route.plan.stages);
-    const withWorker = stages.some((stage) => stage.tasks.some((step) => step.agent === "worker"))
+    const withWorker = stages.some((stage) => stage.tasks.some((step) => isImplementationWriterStep(step, agents)))
       ? stages
       : [...stages, { id: "implementation", tasks: [workerStep] }];
     return {
@@ -185,7 +187,7 @@ function ensureMutationRouteHasWorkerOnly(route: RouteDecision, requiresWorkspac
 
   const existingSteps = route.plan.steps;
   const stripped = existingSteps.filter((step) => step.agent !== "reviewer");
-  const steps = stripped.some((step) => step.agent === "worker") ? stripped : [...stripped, workerStep];
+  const steps = stripped.some((step) => isImplementationWriterStep(step, agents)) ? stripped : [...stripped, workerStep];
   return {
     ...route,
     kind: "multi-agent-sequential",
@@ -236,6 +238,111 @@ function stripReviewerStages(stages: Array<{ id: string; tasks: AgentStep[] }>):
     .filter((stage) => stage.tasks.length > 0);
 }
 
+function serializeUnsafeParallelPlannedWriters(route: RouteDecision, requiresWorkspaceMutation: boolean, agents?: ReadonlyMap<string, AgentDefinition>): RouteDecision {
+  if (!requiresWorkspaceMutation && !route.expectedEffects?.includes("write")) return route;
+  if (route.kind !== "multi-agent-dag" || route.plan?.kind !== "dag") return route;
+
+  let changed = false;
+  const stages: Array<{ id: string; tasks: AgentStep[] }> = [];
+  for (const stage of route.plan.stages) {
+    if (!stageHasUnsafeParallelWriters(stage.tasks, agents)) {
+      stages.push(stage);
+      continue;
+    }
+    changed = true;
+    const readOnlyTasks = stage.tasks.filter((step) => !isPlannedWriterStep(step, agents));
+    const writerTasks = stage.tasks.filter((step) => isPlannedWriterStep(step, agents));
+    if (readOnlyTasks.length) stages.push({ id: `${stage.id}-read`, tasks: readOnlyTasks });
+    for (const [index, step] of writerTasks.entries()) {
+      stages.push({ id: `${stage.id}-writer-${index + 1}`, tasks: [step] });
+    }
+  }
+  if (!changed) return route;
+  return {
+    ...route,
+    agents: stages.flatMap((stage) => stage.tasks.map((step) => step.agent)),
+    reason: `${route.reason} Parallel writer stages normalized by pi-chalin: write-capable tasks without explicit disjoint file ownership are ordered to avoid shared mutable-surface conflicts.`,
+    plan: { kind: "dag", stages },
+  };
+}
+
+function stageHasUnsafeParallelWriters(tasks: AgentStep[], agents?: ReadonlyMap<string, AgentDefinition>): boolean {
+  const writers = tasks.filter((step) => isPlannedWriterStep(step, agents));
+  if (writers.length <= 1) return false;
+  if (writers.some((step) => normalizedStepFiles(step).length === 0)) return true;
+  for (let leftIndex = 0; leftIndex < writers.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < writers.length; rightIndex += 1) {
+      if (fileScopesOverlap(normalizedStepFiles(writers[leftIndex]!), normalizedStepFiles(writers[rightIndex]!))) return true;
+    }
+  }
+  return false;
+}
+
+function isPlannedWriterStep(step: AgentStep, agents?: ReadonlyMap<string, AgentDefinition>): boolean {
+  const agent = agents?.get(step.agent);
+  if (agent) return agentCanMutateWorkspace(agent);
+  if (agents) return normalizedStepFiles(step).length > 0;
+  return true;
+}
+
+function routeHasImplementationWriter(route: RouteDecision, agents?: ReadonlyMap<string, AgentDefinition>): boolean {
+  if (route.plan?.kind === "dag") return route.plan.stages.some((stage) => stage.tasks.some((step) => isImplementationWriterStep(step, agents)));
+  if (route.plan?.kind === "sequential") return route.plan.steps.some((step) => isImplementationWriterStep(step, agents));
+  if (agents) return route.agents.some((ref) => {
+    const agent = agents.get(ref);
+    return agent ? agentCanMutateWorkspace(agent) : false;
+  });
+  return route.agents.includes("worker");
+}
+
+function isImplementationWriterStep(step: AgentStep, agents?: ReadonlyMap<string, AgentDefinition>): boolean {
+  const agent = agents?.get(step.agent);
+  if (agent) return agentCanMutateWorkspace(agent);
+  if (agents) return normalizedStepFiles(step).length > 0;
+  return step.agent === "worker";
+}
+
+function isReviewerPlanStep(step: AgentStep, agents?: ReadonlyMap<string, AgentDefinition>): boolean {
+  const agent = agents?.get(step.agent);
+  if (agent) return agent.concern === "review";
+  return step.agent === "reviewer";
+}
+
+function agentCanMutateWorkspace(agent: AgentDefinition): boolean {
+  return agent.concern === "implementation"
+    || agent.concern === "conflict-resolution"
+    || agent.capabilities.includes("edit-files")
+    || agent.capabilities.includes("write-new-files");
+}
+
+function normalizedStepFiles(step: AgentStep): string[] {
+  const seen = new Set<string>();
+  const files: string[] = [];
+  for (const file of step.files ?? []) {
+    const normalized = normalizeFileScope(file);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    files.push(normalized);
+  }
+  return files;
+}
+
+function normalizeFileScope(file: string): string {
+  let normalized = file.trim().replaceAll("\\", "/").replace(/\/+$/, "");
+  while (normalized.startsWith("./")) normalized = normalized.slice(2);
+  return normalized;
+}
+
+function fileScopesOverlap(left: string[], right: string[]): boolean {
+  for (const leftFile of left) {
+    for (const rightFile of right) {
+      if (leftFile === rightFile) return true;
+      if (rightFile.startsWith(`${leftFile}/`) || leftFile.startsWith(`${rightFile}/`)) return true;
+    }
+  }
+  return false;
+}
+
 export function collapseReadOnlyScoutContextRoute(route: RouteDecision, requiresWorkspaceMutation: boolean): RouteDecision {
   if (requiresWorkspaceMutation || route.needsMemory || route.risk !== "low") return route;
   if (route.kind !== "multi-agent-sequential" || route.plan?.kind !== "sequential") return route;
@@ -262,20 +369,20 @@ function reviewerDisabled(): boolean {
   return process.env.PI_CHALIN_DISABLE_REVIEWER === "1";
 }
 
-function ensureStepsHaveImplementationReview(existingSteps: AgentStep[], workerStep: AgentStep, reviewerStep: AgentStep): { steps: AgentStep[]; changed: boolean; addedWorker: boolean; addedReviewer: boolean } {
+function ensureStepsHaveImplementationReview(existingSteps: AgentStep[], workerStep: AgentStep, reviewerStep: AgentStep, agents?: ReadonlyMap<string, AgentDefinition>): { steps: AgentStep[]; changed: boolean; addedWorker: boolean; addedReviewer: boolean } {
   let steps = [...existingSteps];
   let addedWorker = false;
   let addedReviewer = false;
 
-  if (!steps.some((step) => step.agent === "worker")) {
-    const firstReviewerIndex = steps.findIndex((step) => step.agent === "reviewer");
+  if (!steps.some((step) => isImplementationWriterStep(step, agents))) {
+    const firstReviewerIndex = steps.findIndex((step) => isReviewerPlanStep(step, agents));
     const insertAt = firstReviewerIndex >= 0 ? firstReviewerIndex : steps.length;
     steps = [...steps.slice(0, insertAt), workerStep, ...steps.slice(insertAt)];
     addedWorker = true;
   }
 
-  const lastWorkerIndex = findLastIndex(steps, (step) => step.agent === "worker");
-  const hasPostWorkerReviewer = lastWorkerIndex >= 0 && steps.some((step, index) => index > lastWorkerIndex && step.agent === "reviewer");
+  const lastWorkerIndex = findLastIndex(steps, (step) => isImplementationWriterStep(step, agents));
+  const hasPostWorkerReviewer = lastWorkerIndex >= 0 && steps.some((step, index) => index > lastWorkerIndex && isReviewerPlanStep(step, agents));
   if (!hasPostWorkerReviewer) {
     steps = [...steps, reviewerStep];
     addedReviewer = true;
@@ -284,13 +391,13 @@ function ensureStepsHaveImplementationReview(existingSteps: AgentStep[], workerS
   return { steps, changed: addedWorker || addedReviewer, addedWorker, addedReviewer };
 }
 
-function ensureDagHasImplementationReview(stages: Array<{ id: string; tasks: AgentStep[] }>, workerStep: AgentStep, reviewerStep: AgentStep): { stages: Array<{ id: string; tasks: AgentStep[] }>; changed: boolean; addedWorker: boolean; addedReviewer: boolean } {
+function ensureDagHasImplementationReview(stages: Array<{ id: string; tasks: AgentStep[] }>, workerStep: AgentStep, reviewerStep: AgentStep, agents?: ReadonlyMap<string, AgentDefinition>): { stages: Array<{ id: string; tasks: AgentStep[] }>; changed: boolean; addedWorker: boolean; addedReviewer: boolean } {
   let nextStages = stages.map((stage) => ({ ...stage, tasks: [...stage.tasks] }));
   let addedWorker = false;
   let addedReviewer = false;
 
-  if (!nextStages.some((stage) => stage.tasks.some((step) => step.agent === "worker"))) {
-    const firstReviewerStageIndex = nextStages.findIndex((stage) => stage.tasks.some((step) => step.agent === "reviewer"));
+  if (!nextStages.some((stage) => stage.tasks.some((step) => isImplementationWriterStep(step, agents)))) {
+    const firstReviewerStageIndex = nextStages.findIndex((stage) => stage.tasks.some((step) => isReviewerPlanStep(step, agents)));
     const insertAt = firstReviewerStageIndex >= 0 ? firstReviewerStageIndex : nextStages.length;
     nextStages = [
       ...nextStages.slice(0, insertAt),
@@ -300,8 +407,8 @@ function ensureDagHasImplementationReview(stages: Array<{ id: string; tasks: Age
     addedWorker = true;
   }
 
-  const lastWorkerStageIndex = findLastIndex(nextStages, (stage) => stage.tasks.some((step) => step.agent === "worker"));
-  const hasPostWorkerReviewer = lastWorkerStageIndex >= 0 && nextStages.some((stage, index) => index > lastWorkerStageIndex && stage.tasks.some((step) => step.agent === "reviewer"));
+  const lastWorkerStageIndex = findLastIndex(nextStages, (stage) => stage.tasks.some((step) => isImplementationWriterStep(step, agents)));
+  const hasPostWorkerReviewer = lastWorkerStageIndex >= 0 && nextStages.some((stage, index) => index > lastWorkerStageIndex && stage.tasks.some((step) => isReviewerPlanStep(step, agents)));
   if (!hasPostWorkerReviewer) {
     nextStages = [...nextStages, { id: "implementation-review", tasks: [reviewerStep] }];
     addedReviewer = true;

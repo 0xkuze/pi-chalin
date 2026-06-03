@@ -1,0 +1,43 @@
+minimumReleaseAge: 5760
+minimumReleaseAgeStrict: true
+minimumReleaseAgeExclude:
+  - '@aws-sdk/core@3.974.17'
+  - '@aws-sdk/credential-provider-env@3.972.43'
+  - '@aws-sdk/credential-provider-http@3.972.45'
+  - '@aws-sdk/credential-provider-ini@3.972.48'
+  - '@aws-sdk/credential-provider-login@3.972.47'
+  - '@aws-sdk/credential-provider-node@3.972.50'
+  - '@aws-sdk/credential-provider-process@3.972.43'
+  - '@aws-sdk/credential-provider-sso@3.972.47'
+  - '@aws-sdk/credential-provider-web-identity@3.972.47'
+  - '@aws-sdk/eventstream-handler-node@3.972.19'
+  - '@aws-sdk/middleware-eventstream@3.972.15'
+  - '@aws-sdk/middleware-websocket@3.972.25'
+  - '@aws-sdk/nested-clients@3.997.15'
+  - '@aws-sdk/signature-v4-multi-region@3.996.31'
+  - '@aws-sdk/token-providers@3.1060.0'
+  - '@aws-sdk/types@3.973.10'
+  - '@aws-sdk/xml-builder@3.972.27'
+  - '@smithy/core@3.24.6'
+  - '@smithy/credential-provider-imds@4.3.7'
+  - '@smithy/fetch-http-handler@5.4.6'
+  - '@smithy/node-http-handler@4.7.6'
+  - '@smithy/signature-v4@5.4.6'
+  - '@smithy/types@4.14.3'
+  - '@vitest/expect@4.1.8'
+  - '@vitest/mocker@4.1.8'
+  - '@vitest/pretty-format@4.1.8'
+  - '@vitest/runner@4.1.8'
+  - '@vitest/snapshot@4.1.8'
+  - '@vitest/spy@4.1.8'
+  - '@vitest/utils@4.1.8'
+  - protobufjs@7.6.2
+  - tinyexec@1.2.4
+  - tinyglobby@0.2.17
+  - vite@8.0.16
+  - vitest@4.1.8
+nodeVersion: 26.3.0
+allowBuilds:
+  '@google/genai': true
+  koffi: true
+  protobufjs: true

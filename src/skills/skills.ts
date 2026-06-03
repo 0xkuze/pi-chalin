@@ -677,9 +677,9 @@ function matchSkill(skill: SkillDefinition, task: string, explicit: boolean): { 
 }
 
 function maxActiveForRoute(routeKind: RouteKind | undefined, config: ChalinConfig): number {
-  if (routeKind === "bypass") return config.skills.maxActiveDirect;
+  if (routeKind === "bypass") return config.skills.maxActiveInline;
   if (routeKind === "multi-agent-dag" || routeKind === "multi-agent-sequential") return config.skills.maxActivePerStep;
-  return config.skills.maxActiveDirect;
+  return config.skills.maxActiveInline;
 }
 
 function canCoexist(a: SkillDefinition, b: SkillDefinition): boolean {

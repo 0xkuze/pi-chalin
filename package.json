@@ -11,7 +11,7 @@
     "url": "https://github.com/0xkuze/pi-chalin/issues"
   },
   "homepage": "https://github.com/0xkuze/pi-chalin#readme",
-  "packageManager": "bun@1.3.14",
+  "packageManager": "pnpm@11.5.1",
   "type": "module",
   "main": "src/index.ts",
   "exports": {
@@ -48,35 +48,9 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "bun test",
-    "typecheck": "bun tsc --noEmit",
-    "typecheck:stable": "bun tsc --noEmit --stableTypeOrdering",
-    "eval:orchestration": "bun evals/orchestration.eval.ts",
-    "eval": "bun run eval:orchestration",
-    "eval:skills": "bun evals/skills.eval.ts",
-    "eval:skills:compare": "bun evals/skills-comparison.eval.ts",
-    "eval:orchestration:sdk": "bun evals/orchestration.eval.ts --runner=sdk --limit=1",
-    "eval:sdk": "bun run eval:orchestration:sdk",
-    "eval:memory": "bun evals/memory.eval.ts",
-    "eval:resume-session": "bun evals/resume-session.eval.ts",
-    "eval:quality": "bun evals/quality-ab.eval.ts",
-    "eval:quality:sdk": "bun evals/quality-ab.eval.ts --mode=sdk",
-    "eval:all": "bun run eval:orchestration && bun run eval:skills && bun run eval:skills:compare && bun run eval:memory && bun run eval:claims && bun run eval:mutation && bun run eval:trajectory && bun run eval:long",
-    "eval:mutation": "bun evals/mutation.eval.ts",
-    "eval:claims": "bun evals/structured-claims.eval.ts",
-    "eval:trajectory": "bun evals/trajectory.eval.ts",
-    "eval:trace": "bun evals/trace-quality.eval.ts",
-    "eval:workflow": "bun evals/workflow-quality.eval.ts",
-    "eval:workflow:sharded": "bun evals/workflow-sharded.eval.ts --preset=community",
-    "eval:workflow:matrix": "bun evals/workflow-quality.eval.ts --preset=matrix",
-    "eval:workflow:harness": "bun evals/workflow-quality.eval.ts --preset=harness",
-    "eval:workflow:harness-ab": "bun evals/workflow-quality.eval.ts --preset=harness-ab",
-    "eval:workflow:complex": "bun evals/workflow-quality.eval.ts --preset=complex",
-    "eval:workflow:routed": "bun evals/workflow-quality.eval.ts --preset=routed",
-    "eval:workflow:community": "bun evals/workflow-quality.eval.ts --preset=community",
-    "eval:skills:llm-ab": "bun evals/workflow-quality.eval.ts --preset=skills-ab",
-    "eval:workflow:improvement": "bun evals/workflow-improvement.eval.ts",
-    "eval:long": "bun evals/long-running.eval.ts"
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "typecheck:stable": "tsc --noEmit --stableTypeOrdering"
   },
   "keywords": [
     "pi-package",
@@ -106,23 +80,26 @@
     }
   },
   "dependencies": {
-    "effect": "^3.21.2",
-    "sql.js-fts5": "^1.4.0",
-    "typebox": "^1.1.38"
+    "effect": "3.21.2",
+    "sql.js-fts5": "1.4.0",
+    "typebox": "1.1.39"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.75.4",
-    "@earendil-works/pi-tui": "^0.75.4",
-    "@types/bun": "^1.3.14",
-    "@types/node": "^25.9.1",
-    "typescript": "^6.0.3"
+    "@earendil-works/pi-coding-agent": "0.78.0",
+    "@earendil-works/pi-tui": "0.78.0",
+    "@types/node": "25.9.1",
+    "typescript": "6.0.3",
+    "vitest": "4.1.8"
   },
   "engines": {
-    "bun": ">=1.3.14"
+    "node": ">=26.3.0",
+    "pnpm": ">=11.5.1"
   },
-  "trustedDependencies": [
-    "@google/genai",
-    "koffi",
-    "protobufjs"
-  ]
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": "26.3.0",
+      "onFail": "download"
+    }
+  }
 }

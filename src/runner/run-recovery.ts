@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { resolveChalinPaths, type ChalinPathsOptions } from "../config/paths.ts";
 import type { RunRecoveryState, RunState, RunStepState } from "../domain/schemas.ts";
-import { isUsableStepStatus, normalizeLegacyBudgetCappedRun } from "../runtime/status.ts";
+import { isUsableStepStatus } from "../runtime/status.ts";
 import { refreshWorkUnitStatuses } from "./work-units.ts";
 
 export interface FailedRunDiagnostic {
@@ -28,6 +28,28 @@ export function loadFailedRunDiagnostic(options: ChalinPathsOptions & { runId?: 
 export function markBlockedDependentsSkipped(run: RunState, failedStep?: RunStepState): number {
   const blocker = failedStep ?? firstFailedStep(run);
   if (!blocker) return 0;
+  return markDependentsSkipped(run, blocker, {
+    reason: `Skipped because upstream ${blocker.agent}/${blocker.id} failed: ${blocker.error ?? "unknown failure"}.`,
+    recovery: "failed",
+  });
+}
+
+export function markHumanBlockedDependentsSkipped(run: RunState, blocker: RunStepState, questions: string[] = []): number {
+  run.intentContract = {
+    ...(run.intentContract ?? { originalPrompt: run.rootTask ?? run.route.reason, explicitConstraints: [], forbiddenPaths: [] }),
+    requiresInterview: true,
+  };
+  run.recoveryState = {
+    ...(run.recoveryState ?? { pendingUnits: [], reviewersNotRun: [], resumeKind: "none", repairOptions: [] }),
+    blockedByHumanInput: true,
+  };
+  const reason = questions.length
+    ? `Skipped because upstream ${blocker.agent}/${blocker.id} requires human input: ${questions.join("; ")}.`
+    : `Skipped because upstream ${blocker.agent}/${blocker.id} requires human input before safe continuation.`;
+  return markDependentsSkipped(run, blocker, { reason, recovery: "human-input", questions });
+}
+
+function markDependentsSkipped(run: RunState, blocker: RunStepState, options: { reason: string; recovery: "failed" | "human-input"; questions?: string[] }): number {
   const blockerIndex = run.steps.indexOf(blocker);
   const hasExplicitDependencies = run.steps.some((step) => (step.dependencies?.length ?? 0) > 0);
   let skipped = 0;
@@ -38,12 +60,24 @@ export function markBlockedDependentsSkipped(run: RunState, failedStep?: RunStep
     const dependsOnBlocker = stepDependsOn(run, step, blocker.id) || (!hasExplicitDependencies && run.route.plan?.kind !== "dag" && blockerIndex >= 0 && index > blockerIndex);
     if (!dependsOnBlocker) continue;
     step.status = "skipped";
-    step.skipReason = `Skipped because upstream ${blocker.agent}/${blocker.id} failed: ${blocker.error ?? "unknown failure"}.`;
+    step.skipReason = options.reason;
     step.endedAt = new Date().toISOString();
     if (step.agent === "reviewer") reviewersNotRun.push(step.id);
     skipped += 1;
   }
-  updateRecoveryState(run, blocker, reviewersNotRun);
+  if (options.recovery === "human-input") {
+    run.recoveryState = {
+      ...(run.recoveryState ?? { pendingUnits: [], reviewersNotRun: [], resumeKind: "none", repairOptions: [] }),
+      blockedByHumanInput: true,
+      repairOptions: [...new Set([
+        ...(run.recoveryState?.repairOptions ?? []),
+        ...(options.questions?.length ? options.questions : ["Ask the user the blocking question(s), then rerun or resume with the chosen scope."]),
+      ])],
+    };
+    updateRecoveryState(run, undefined, reviewersNotRun);
+  } else {
+    updateRecoveryState(run, blocker, reviewersNotRun);
+  }
   refreshWorkUnitStatuses(run);
   return skipped;
 }
@@ -64,7 +98,10 @@ export function updateRecoveryState(run: RunState, failedStep?: RunStepState, re
   const blocker = failedStep ?? firstFailedStep(run);
   const pendingUnits = (run.workUnits ?? []).filter((unit) => unit.status === "pending").map((unit) => unit.id);
   const existingReviewersNotRun = run.recoveryState?.reviewersNotRun ?? [];
-  const repairOptions = repairOptionsFor(run, blocker);
+  const baseRepairOptions = repairOptionsFor(run, blocker);
+  const repairOptions = run.recoveryState?.blockedByHumanInput
+    ? [...new Set([...(run.recoveryState.repairOptions ?? []), ...baseRepairOptions])]
+    : baseRepairOptions;
   const recovery: RunRecoveryState = {
     failedUnitId: blocker?.workUnitId,
     failedStepId: blocker?.id,
@@ -102,6 +139,7 @@ export function formatFailedRunDiagnostic(run: RunState, failedStep = firstFaile
 }
 
 export function repairOptionsFor(run: RunState, failedStep?: RunStepState): string[] {
+  if (run.intentContract?.requiresInterview || run.recoveryState?.blockedByHumanInput) return ["Ask the user the blocking interview questions, then rerun the route."];
   if (!failedStep) return ["Start a new routed run with clearer scope."];
   const policyViolations = failedStep.metrics?.policyViolations ?? [];
   if (policyViolations.some(isWorkUnitScopeContractViolation)) {
@@ -112,7 +150,6 @@ export function repairOptionsFor(run: RunState, failedStep?: RunStepState): stri
   }
   if (failedStep.agent === "worker") return ["Run a repair route from the failed worker step.", "Retry the failed work unit after fixing the handoff contract."];
   if (failedStep.agent === "reviewer") return ["Run an implementation repair route from the reviewer findings.", "Retry review after adding missing verification evidence."];
-  if (run.intentContract?.requiresInterview || run.recoveryState?.blockedByHumanInput) return ["Ask the user the blocking interview questions, then rerun the route."];
   return ["Retry the failed step with a narrower work unit.", "Rerun the workflow from the last usable handoff."];
 }
 
@@ -131,7 +168,7 @@ function readRunsNewestFirst(options: ChalinPathsOptions): RunState[] {
     .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)
     .flatMap((file) => {
       try {
-        const parsed = normalizeLegacyBudgetCappedRun(JSON.parse(fs.readFileSync(file, "utf-8")) as RunState);
+        const parsed = JSON.parse(fs.readFileSync(file, "utf-8")) as RunState;
         parsed.logsPath ??= file;
         return [parsed];
       } catch {

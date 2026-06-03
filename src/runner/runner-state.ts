@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { estimateBudgetPreflight } from "../budget/budget.ts";
 import { resolveChalinPaths, type ChalinPathsOptions } from "../config/paths.ts";
 import type { AgentStep, RouteDecision, RoutePlan, RunState, RunStepState } from "../domain/schemas.ts";
-import { isUsableStepStatus, normalizeLegacyBudgetCappedRun } from "../runtime/status.ts";
+import { isUsableStepStatus } from "../runtime/status.ts";
 import { buildIntentContract } from "./intent-contract.ts";
 import { updateRecoveryState } from "./run-recovery.ts";
 import { planStepsWithWorkUnits } from "./work-units.ts";
@@ -107,7 +107,7 @@ export function loadResumableRunState(options: ChalinPathsOptions & { runId?: st
     .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
   for (const file of files) {
     try {
-      const parsed = normalizeLegacyBudgetCappedRun(JSON.parse(fs.readFileSync(file, "utf-8")) as RunState);
+      const parsed = JSON.parse(fs.readFileSync(file, "utf-8")) as RunState;
       if (options.runId && parsed.id !== options.runId) continue;
       if (isResumableRun(parsed)) {
         parsed.logsPath ??= file;

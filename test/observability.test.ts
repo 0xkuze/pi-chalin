@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "bun:test";
+import { test } from "vitest";
 import { buildPromptTokenomics, buildTokenomicsFromCharCounts, buildToolOutputTokenomics, createStructuredSpan, mergeTraceSpans } from "../src/observability/observability.ts";
 
 test("buildPromptTokenomics estimates stable and variable prompt phases separately", () => {

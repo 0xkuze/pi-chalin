@@ -1,5 +1,5 @@
-export type DirectToolEventPhase = "start" | "completed";
-export type DirectNudgeKind =
+export type InlineToolEventPhase = "start" | "completed";
+export type InlineNudgeKind =
   | "workspace-boundary"
   | "docs-shell"
   | "terminal-completion"
@@ -7,7 +7,6 @@ export type DirectNudgeKind =
   | "pre-mutation-verification"
   | "post-verification-shell"
   | "post-verification-exploration"
-  | "docs-evidence-loop"
   | "locator-loop"
   | "existing-file-rewrite"
   | "mutation-loop"
@@ -23,8 +22,8 @@ export type DirectNudgeKind =
   | "failure"
   | "completion";
 
-export interface DirectToolEvent {
-  phase: DirectToolEventPhase;
+export interface InlineToolEvent {
+  phase: InlineToolEventPhase;
   toolName: string;
   isError?: boolean;
   command?: string;
@@ -32,8 +31,8 @@ export interface DirectToolEvent {
   argsText?: string;
 }
 
-export interface DirectNudgePlan {
-  kind: DirectNudgeKind;
+export interface InlineNudgePlan {
+  kind: InlineNudgeKind;
   verificationCommand?: string;
   docsOnlyMutation: boolean;
   judge: PolicyJudgeDecision;
@@ -44,17 +43,19 @@ export type PolicyJudgeNextAction = "continue" | "nudge" | "verify" | "repair" |
 export interface SemanticPolicyJudgeRequest {
   key: string;
   turnId: number;
-  trigger: DirectNudgeKind | "uncertain-continue";
+  trigger: InlineNudgeKind | "uncertain-continue";
   reasons: string[];
-  snapshot: DirectPolicySnapshot;
+  snapshot: InlinePolicySnapshot;
 }
 
 export interface SemanticPolicyJudgeResult {
   nextAction: PolicyJudgeNextAction;
+  nudgeKind?: InlineNudgeKind;
   reason: string;
   confidence: number;
   blockingGap: boolean;
   requiredEvidence: string[];
+  steerMessage?: string;
   trace?: SemanticPolicyJudgeTrace;
 }
 
@@ -87,13 +88,13 @@ export interface PolicyJudgeDecision {
   reason: string;
   confidence: number;
   blockingGap: boolean;
-  nudgeKind?: DirectNudgeKind;
+  nudgeKind?: InlineNudgeKind;
   source?: "deterministic" | "semantic";
   semanticReview?: SemanticPolicyJudgeRequest;
   semanticResult?: SemanticPolicyJudgeResult;
 }
 
-export interface DirectToolCompletionAdapter {
+export interface InlineToolCompletionAdapter {
   shouldProgressNudge: boolean;
   shouldReadyToVerifyNudge: boolean;
   shouldFailureNudge: boolean;
@@ -109,7 +110,6 @@ export interface DirectToolCompletionAdapter {
   shouldPreMutationVerificationNudge: boolean;
   shouldPostVerificationShellNudge: boolean;
   shouldPostVerificationExplorationNudge: boolean;
-  shouldDocsEvidenceLoopNudge: boolean;
   shouldLocatorLoopNudge: boolean;
   shouldExistingFileRewriteNudge: boolean;
   shouldMutationLoopNudge: boolean;
@@ -118,17 +118,16 @@ export interface DirectToolCompletionAdapter {
   shouldPostFailureEvidenceNudge: boolean;
   verificationCommand?: string;
   docsOnlyMutation: boolean;
-  plan?: DirectNudgePlan;
+  plan?: InlineNudgePlan;
   policyJudge?: PolicyJudgeDecision;
 }
 
-type DirectNudgeFlag = Exclude<keyof DirectToolCompletionAdapter, "verificationCommand" | "docsOnlyMutation" | "plan" | "policyJudge">;
+type InlineNudgeFlag = Exclude<keyof InlineToolCompletionAdapter, "verificationCommand" | "docsOnlyMutation" | "plan" | "policyJudge">;
 
-export type DirectNudgeSelectorInput = Omit<DirectToolCompletionAdapter, "plan" | "policyJudge">;
+export type InlineNudgeSelectorInput = Omit<InlineToolCompletionAdapter, "plan" | "policyJudge">;
 
-export interface DirectPolicySnapshot {
+export interface InlinePolicySnapshot {
   cwd?: string;
-  docsOnlyPathPrompt: boolean;
   mutationObserved: boolean;
   sourceMutationObserved: boolean;
   testMutationObserved: boolean;
@@ -139,7 +138,7 @@ export interface DirectPolicySnapshot {
   changedPaths: string[];
   readPaths: string[];
   promptCodePaths: string[];
-  toolEvents: DirectToolEvent[];
+  toolEvents: InlineToolEvent[];
   counters: {
     mutationToolCount: number;
     evidenceToolCount: number;
@@ -150,7 +149,7 @@ export interface DirectPolicySnapshot {
   };
 }
 
-export const DIRECT_NUDGE_FLAGS = [
+export const INLINE_NUDGE_FLAGS = [
   "shouldProgressNudge",
   "shouldReadyToVerifyNudge",
   "shouldFailureNudge",
@@ -166,16 +165,15 @@ export const DIRECT_NUDGE_FLAGS = [
   "shouldPreMutationVerificationNudge",
   "shouldPostVerificationShellNudge",
   "shouldPostVerificationExplorationNudge",
-  "shouldDocsEvidenceLoopNudge",
   "shouldLocatorLoopNudge",
   "shouldExistingFileRewriteNudge",
   "shouldMutationLoopNudge",
   "shouldSourceAndTestReadyNudge",
   "shouldVerificationLoopNudge",
   "shouldPostFailureEvidenceNudge",
-] as const satisfies readonly DirectNudgeFlag[];
+] as const satisfies readonly InlineNudgeFlag[];
 
-const DIRECT_NUDGE_PRIORITY = [
+const INLINE_NUDGE_PRIORITY = [
   ["workspace-boundary", "shouldWorkspaceBoundaryNudge"],
   ["weak-test-coverage", "shouldWeakTestCoverageNudge"],
   ["package-metadata", "shouldPackageMetadataNudge"],
@@ -189,7 +187,6 @@ const DIRECT_NUDGE_PRIORITY = [
   ["pre-mutation-verification", "shouldPreMutationVerificationNudge"],
   ["post-verification-shell", "shouldPostVerificationShellNudge"],
   ["post-verification-exploration", "shouldPostVerificationExplorationNudge"],
-  ["docs-evidence-loop", "shouldDocsEvidenceLoopNudge"],
   ["locator-loop", "shouldLocatorLoopNudge"],
   ["existing-file-rewrite", "shouldExistingFileRewriteNudge"],
   ["mutation-loop", "shouldMutationLoopNudge"],
@@ -198,59 +195,64 @@ const DIRECT_NUDGE_PRIORITY = [
   ["post-failure-evidence", "shouldPostFailureEvidenceNudge"],
   ["ready-to-verify", "shouldReadyToVerifyNudge"],
   ["progress", "shouldProgressNudge"],
-] as const satisfies readonly (readonly [DirectNudgeKind, DirectNudgeFlag])[];
+] as const satisfies readonly (readonly [InlineNudgeKind, InlineNudgeFlag])[];
 
-const semanticJudgeRelevantNudges = new Set<DirectNudgeKind>([
-  "docs-evidence-loop",
+const semanticJudgeRelevantNudges = new Set<InlineNudgeKind>([
+  "docs-shell",
   "locator-loop",
+  "source-and-test-ready",
+  "ready-to-verify",
   "post-failure-evidence",
   "test-coverage",
   "weak-test-coverage",
   "package-metadata",
+  "parallel-surface",
   "verification-loop",
+  "post-verification-shell",
+  "post-verification-exploration",
+  "completion",
 ]);
 
-export function selectDirectNudgePlan(input: DirectNudgeSelectorInput): DirectNudgePlan | undefined {
-  const judge = judgeDirectCompletionPolicy(input);
+export function selectInlineNudgePlan(input: InlineNudgeSelectorInput): InlineNudgePlan | undefined {
+  const judge = judgeInlineCompletionPolicy(input);
   if (!judge.nudgeKind) return undefined;
   return { kind: judge.nudgeKind, verificationCommand: input.verificationCommand, docsOnlyMutation: input.docsOnlyMutation, judge };
 }
 
-export function judgeDirectCompletionPolicy(input: DirectNudgeSelectorInput): PolicyJudgeDecision {
-  for (const [kind, flag] of DIRECT_NUDGE_PRIORITY) {
+export function judgeInlineCompletionPolicy(input: InlineNudgeSelectorInput): PolicyJudgeDecision {
+  for (const [kind, flag] of INLINE_NUDGE_PRIORITY) {
     if (input[flag]) return policyJudgeForKind(kind, input);
   }
   return {
     nextAction: "continue",
-    reason: "No direct-work policy gap is currently signaled by runtime telemetry.",
+    reason: "No inline-work policy gap is currently signaled by runtime telemetry.",
     confidence: 0.65,
     blockingGap: false,
     source: "deterministic",
   };
 }
 
-export function directNudgeFlagForKind(kind: DirectNudgeKind): DirectNudgeFlag {
-  const matched = DIRECT_NUDGE_PRIORITY.find(([item]) => item === kind);
+export function inlineNudgeFlagForKind(kind: InlineNudgeKind): InlineNudgeFlag {
+  const matched = INLINE_NUDGE_PRIORITY.find(([item]) => item === kind);
   if (!matched) return "shouldProgressNudge";
   return matched[1];
 }
 
-export function isSemanticJudgeRelevantNudge(kind: DirectNudgeKind): boolean {
+export function isSemanticJudgeRelevantNudge(kind: InlineNudgeKind): boolean {
   return semanticJudgeRelevantNudges.has(kind);
 }
 
-function policyJudgeForKind(kind: DirectNudgeKind, input: DirectNudgeSelectorInput): PolicyJudgeDecision {
+function policyJudgeForKind(kind: InlineNudgeKind, input: InlineNudgeSelectorInput): PolicyJudgeDecision {
   const command = input.verificationCommand ? ` Latest verification: ${input.verificationCommand}.` : "";
   const docs = input.docsOnlyMutation ? " Docs-only mutation is active." : "";
-  const reasonByKind: Record<DirectNudgeKind, string> = {
+  const reasonByKind: Record<InlineNudgeKind, string> = {
     "workspace-boundary": "A mutation or verification left the current workspace boundary.",
     "docs-shell": "Docs-only work needs readback evidence rather than shell activity.",
-    "terminal-completion": "A terminal direct action completed the user's external workflow.",
-    "post-terminal-drift": "Tool use continued after a terminal direct action already completed the user's external workflow.",
+    "terminal-completion": "A terminal external action completed the user's external workflow.",
+    "post-terminal-drift": "Tool use continued after a terminal external action already completed the user's external workflow.",
     "pre-mutation-verification": "Verification ran before any mutation, so it cannot prove the requested change.",
     "post-verification-shell": "Shell use continued after passing verification without a new mutation.",
     "post-verification-exploration": "Exploration continued after passing verification without a new mutation.",
-    "docs-evidence-loop": "Read-only docs evidence is looping without converging on the requested change.",
     "locator-loop": "Locator/search activity is looping before mutation.",
     "existing-file-rewrite": "An existing file was rewritten through a write path after it had been read.",
     "mutation-loop": "Several mutations happened without verification.",
@@ -276,7 +278,7 @@ function policyJudgeForKind(kind: DirectNudgeKind, input: DirectNudgeSelectorInp
   };
 }
 
-function nextActionForNudge(kind: DirectNudgeKind): PolicyJudgeNextAction {
+function nextActionForNudge(kind: InlineNudgeKind): PolicyJudgeNextAction {
   if (kind === "completion" || kind === "terminal-completion") return "finalize";
   if (kind === "ready-to-verify" || kind === "source-and-test-ready" || kind === "pre-mutation-verification") return "verify";
   if (kind === "failure" || kind === "post-failure-evidence" || kind === "verification-loop") return "repair";
@@ -284,13 +286,13 @@ function nextActionForNudge(kind: DirectNudgeKind): PolicyJudgeNextAction {
   return "nudge";
 }
 
-function confidenceForNudge(kind: DirectNudgeKind): number {
+function confidenceForNudge(kind: InlineNudgeKind): number {
   if (kind === "completion" || kind === "terminal-completion" || kind === "workspace-boundary" || kind === "failure") return 0.9;
   if (kind === "weak-test-coverage" || kind === "package-metadata" || kind === "parallel-surface") return 0.82;
   if (kind === "progress") return 0.58;
   return 0.72;
 }
 
-function blockingGapForNudge(kind: DirectNudgeKind): boolean {
+function blockingGapForNudge(kind: InlineNudgeKind): boolean {
   return kind !== "progress" && kind !== "completion" && kind !== "terminal-completion";
 }

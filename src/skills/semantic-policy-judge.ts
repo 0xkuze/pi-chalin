@@ -1,6 +1,6 @@
 import { complete, completeSimple, StringEnum, Type, type Api, type AssistantMessage, type Context, type Model, type ProviderStreamOptions, type Tool } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
-import type { PolicyJudgeDecision, PolicyJudgeNextAction, SemanticPolicyJudgeRequest, SemanticPolicyJudgeResult, SemanticPolicyJudgeTrace } from "../runtime/direct-policy.ts";
+import type { InlineNudgeKind, PolicyJudgeDecision, PolicyJudgeNextAction, SemanticPolicyJudgeRequest, SemanticPolicyJudgeResult, SemanticPolicyJudgeTrace } from "../runtime/inline-policy.ts";
 
 export interface SemanticPolicyJudgeContext {
   model?: Model<Api>;
@@ -52,20 +52,22 @@ export async function runSemanticPolicyJudge(input: SemanticPolicyJudgeInput): P
 export function shouldApplySemanticPolicyJudgeResult(deterministic: PolicyJudgeDecision, semantic: SemanticPolicyJudgeResult | undefined): semantic is SemanticPolicyJudgeResult {
   if (!semantic) return false;
   if (!semantic.blockingGap) return false;
-  if (semantic.confidence < 0.74) return false;
+  if (semantic.confidence < 0.7) return false;
   if (semantic.nextAction === "continue" || semantic.nextAction === "finalize") return false;
-  return actionStrictness(semantic.nextAction) > actionStrictness(deterministic.nextAction);
+  return actionStrictness(semantic.nextAction) >= actionStrictness(deterministic.nextAction);
 }
 
 export function formatSemanticPolicyJudgeSteer(result: SemanticPolicyJudgeResult): string {
   return [
-    "pi-chalin semantic policy judge.",
+    "pi-chalin semantic inline-work judge.",
     `Decision: ${result.nextAction} (${Math.round(result.confidence * 100)}% confidence).`,
+    result.nudgeKind ? `Gap: ${result.nudgeKind}.` : undefined,
     `Reason: ${result.reason}`,
+    result.steerMessage ? `Next: ${result.steerMessage}` : undefined,
     result.requiredEvidence.length
       ? `Required evidence before final: ${result.requiredEvidence.map((item) => `\`${item}\``).join(", ")}.`
       : undefined,
-    "This semantic judge cannot override deterministic hard stops. Treat it as an extra review signal: patch or verify the named gap, then finish only with concrete evidence.",
+    "This judge cannot relax deterministic hard stops. Patch, verify, or ask for the named evidence before finalizing.",
   ].filter((line): line is string => Boolean(line)).join("\n");
 }
 
@@ -82,28 +84,58 @@ function semanticPolicyJudgePayload(input: SemanticPolicyJudgeInput): Record<str
       trigger: input.request.trigger,
       reasons: input.request.reasons,
     },
-    directWorkSnapshot: input.request.snapshot,
+    inlineWorkSnapshot: input.request.snapshot,
   };
 }
 
 function semanticPolicyJudgeSystemPrompt(): string {
   return [
-    "You are pi-chalin's semantic policy judge for direct coding work.",
-    "Use the deterministic decision as the baseline. Never relax deterministic safety, workspace, or verification constraints.",
-    "Only make the decision stricter when the snapshot shows a semantic quality or evidence gap that code rules may miss.",
+    "You are pi-chalin's semantic policy judge for Primary Pi inline coding work.",
+    "You receive mechanical telemetry plus a baseline runtime decision. The baseline is a signal, not a source of truth.",
+    "Use semantic judgment over task evidence, changed files, commands, failures, test quality, package metadata, and finalization risk.",
+    "Never relax deterministic hard safety, workspace, or terminal-action constraints.",
+    "For soft quality/evidence signals, decide whether to continue, nudge, verify, repair, finalize, or block from the snapshot itself.",
+    "Prefer no steer when the telemetry is a harmless false positive and the latest evidence is sufficient.",
+    "Require repair or verification when finalization would skip requested behavior, credible tests, package/API coherence, or concrete failure evidence.",
     "When a semantic_policy_judge_result tool is available, call it exactly once with the final decision.",
-    "Otherwise return JSON only with fields: nextAction, reason, confidence, blockingGap, requiredEvidence.",
+    "Otherwise return JSON only with fields: nextAction, nudgeKind, reason, confidence, blockingGap, requiredEvidence, steerMessage.",
     "nextAction must be one of: continue, nudge, verify, repair, finalize, block.",
+    "nudgeKind is optional; when present, choose the closest runtime gap category from the schema.",
     "confidence is 0..1. requiredEvidence is an array of compact path/command/evidence labels.",
+    "steerMessage is a single operational instruction, not a generic reminder. Do not mention internal direct/route labels.",
   ].join("\n");
 }
 
 const SEMANTIC_POLICY_JUDGE_TIMEOUT_MS = 20_000;
 const SEMANTIC_POLICY_JUDGE_ACTIONS = ["continue", "nudge", "verify", "repair", "finalize", "block"] as const satisfies readonly PolicyJudgeNextAction[];
-const SEMANTIC_POLICY_JUDGE_RESULT_KEYS = new Set(["nextAction", "reason", "confidence", "blockingGap", "requiredEvidence"]);
+const SEMANTIC_POLICY_JUDGE_NUDGE_KINDS = [
+  "workspace-boundary",
+  "docs-shell",
+  "terminal-completion",
+  "post-terminal-drift",
+  "pre-mutation-verification",
+  "post-verification-shell",
+  "post-verification-exploration",
+  "locator-loop",
+  "existing-file-rewrite",
+  "mutation-loop",
+  "source-and-test-ready",
+  "verification-loop",
+  "post-failure-evidence",
+  "progress",
+  "ready-to-verify",
+  "test-coverage",
+  "weak-test-coverage",
+  "package-metadata",
+  "parallel-surface",
+  "failure",
+  "completion",
+] as const satisfies readonly InlineNudgeKind[];
+const SEMANTIC_POLICY_JUDGE_RESULT_KEYS = new Set(["nextAction", "nudgeKind", "reason", "confidence", "blockingGap", "requiredEvidence", "steerMessage"]);
 export const SEMANTIC_POLICY_JUDGE_TOOL_NAME = "semantic_policy_judge_result";
 export const SEMANTIC_POLICY_JUDGE_RESULT_SCHEMA = Type.Object({
   nextAction: StringEnum(SEMANTIC_POLICY_JUDGE_ACTIONS, { description: "Strictest next action justified by the runtime snapshot." }),
+  nudgeKind: Type.Optional(StringEnum(SEMANTIC_POLICY_JUDGE_NUDGE_KINDS, { description: "Closest runtime gap category when a steer is needed." })),
   reason: Type.String({ minLength: 1, maxLength: 1_200, description: "Compact technical reason for the decision." }),
   confidence: Type.Number({ minimum: 0, maximum: 1, description: "Judge confidence from 0 to 1." }),
   blockingGap: Type.Boolean({ description: "Whether the gap should block finalization." }),
@@ -111,6 +143,7 @@ export const SEMANTIC_POLICY_JUDGE_RESULT_SCHEMA = Type.Object({
     maxItems: 8,
     description: "Path, command, or evidence labels required before finalization.",
   }),
+  steerMessage: Type.Optional(Type.String({ minLength: 1, maxLength: 1_200, description: "One concrete steer for the assistant to execute next." })),
 }, { additionalProperties: false });
 const SEMANTIC_POLICY_JUDGE_TOOL = {
   name: SEMANTIC_POLICY_JUDGE_TOOL_NAME,
@@ -154,6 +187,8 @@ function parseJsonObject(text: string): Record<string, unknown> | undefined {
 export function validateSemanticPolicyJudgeResult(parsed: Record<string, unknown>): SemanticPolicyJudgeResult | undefined {
   if (Object.keys(parsed).some((key) => !SEMANTIC_POLICY_JUDGE_RESULT_KEYS.has(key))) return undefined;
   if (!isPolicyJudgeNextAction(parsed.nextAction)) return undefined;
+  const nudgeKind = parsed.nudgeKind === undefined ? undefined : isInlineNudgeKind(parsed.nudgeKind) ? parsed.nudgeKind : undefined;
+  if (parsed.nudgeKind !== undefined && !nudgeKind) return undefined;
   const reason = compactString(parsed.reason, 1_200);
   if (!reason) return undefined;
   if (typeof parsed.confidence !== "number" || !Number.isFinite(parsed.confidence) || parsed.confidence < 0 || parsed.confidence > 1) return undefined;
@@ -161,12 +196,16 @@ export function validateSemanticPolicyJudgeResult(parsed: Record<string, unknown
   if (!Array.isArray(parsed.requiredEvidence) || parsed.requiredEvidence.length > 8) return undefined;
   const requiredEvidence = validateRequiredEvidence(parsed.requiredEvidence);
   if (!requiredEvidence) return undefined;
+  const steerMessage = parsed.steerMessage === undefined ? undefined : compactString(parsed.steerMessage, 1_200);
+  if (parsed.steerMessage !== undefined && !steerMessage) return undefined;
   return {
     nextAction: parsed.nextAction,
+    ...(nudgeKind ? { nudgeKind } : {}),
     reason,
     confidence: parsed.confidence,
     blockingGap: parsed.blockingGap,
     requiredEvidence,
+    ...(steerMessage ? { steerMessage } : {}),
   };
 }
 
@@ -244,6 +283,10 @@ function compactString(value: unknown, maxLength: number): string | undefined {
 
 function isPolicyJudgeNextAction(value: unknown): value is PolicyJudgeNextAction {
   return typeof value === "string" && SEMANTIC_POLICY_JUDGE_ACTIONS.includes(value as PolicyJudgeNextAction);
+}
+
+function isInlineNudgeKind(value: unknown): value is InlineNudgeKind {
+  return typeof value === "string" && SEMANTIC_POLICY_JUDGE_NUDGE_KINDS.includes(value as InlineNudgeKind);
 }
 
 function actionStrictness(action: PolicyJudgeNextAction): number {

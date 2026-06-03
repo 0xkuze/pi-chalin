@@ -1,7 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Context, Effect, Layer } from "effect";
 import { registerChalinAutoRouter } from "./routing/autoroute.ts";
-import { hideLegacyTopLevelChildSessions } from "./runtime/child-sessions.ts";
 import { registerChalinCommands } from "./commands/commands.ts";
 import { resetRuntimeState } from "./runtime/state.ts";
 import { registerChalinTools } from "./tools/tools.ts";
@@ -36,14 +35,6 @@ function registerPiChalinUnsafe(pi: ExtensionAPI): void {
 
   pi.on("session_start", (_event, ctx) => {
     resetRuntimeState();
-    void hideLegacyTopLevelChildSessions(ctx).then((result) => {
-      if (ctx.hasUI && result.moved.length > 0) {
-        ctx.ui.notify(`pi-chalin hid ${result.moved.length} legacy child session(s) from Pi resume.`, "info");
-      }
-    }).catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      console.warn(`pi-chalin legacy child session cleanup failed: ${message}`);
-    });
     if (!ctx.hasUI) return;
     setChalinStatus(ctx, { kind: "idle" });
   });

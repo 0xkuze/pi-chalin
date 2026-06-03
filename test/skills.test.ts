@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, test } from "bun:test";
+import { afterEach, test } from "vitest";
 import { AgentCatalog } from "../src/agents/agents.ts";
 import { ArtifactStore } from "../src/artifacts/artifacts.ts";
 import { createChildToolPolicy } from "../src/tools/child-tools.ts";
@@ -10,7 +10,7 @@ import { loadEffectiveConfig } from "../src/config/config.ts";
 import { createSkillTraceEvent } from "../src/observability/observability.ts";
 import { buildSdkPrompt, childToolNames } from "../src/runner/runner-prompt.ts";
 import { activateSkillForTurn, disableSkillForTurn, getSkillOverridesForTurn, resetRuntimeState } from "../src/runtime/state.ts";
-import type { AgentDefinition } from "../src/domain/schemas.ts";
+import type { AgentDefinition, RouteKind } from "../src/domain/schemas.ts";
 import {
   SkillCatalog,
   SkillMetricsStore,
@@ -57,7 +57,7 @@ function childSkillHarness(input: {
   cwd: string;
   task: string;
   rootTask?: string;
-  routeKind?: "bypass" | "multi-agent-sequential" | "multi-agent-sequential" | "multi-agent-dag" | "multi-agent-dag";
+  routeKind?: RouteKind;
   explicitSkills?: string[];
 }) {
   const resolution = resolveSkillsForStep({
@@ -417,7 +417,7 @@ trust: trusted
   assert.deepEqual(tools.sort(), ["edit", "grep", "read"].sort());
 
   const policy = createChildToolPolicy({ cwd, maxToolCalls: 10, allowedTools: tools });
-  assert.equal(policy.beforeTool("bash", { command: "bun test" }).allowed, false);
+  assert.equal(policy.beforeTool("bash", { command: "pnpm test" }).allowed, false);
   assert.equal(policy.beforeTool("edit", { path: "src/example.ts", edits: [] }).allowed, true);
 });
 
@@ -522,7 +522,7 @@ allowedTools:
   - chalin_project_discovery
 trust: trusted
 `, "## Rules\n- Discover the verification command from repository evidence before running it.\n");
-  writeSkill(path.join(cwd, ".pi-chalin", "skills", "run-verify-project", "SKILL.md"), projectSkillFrontmatter, "## Rules\n- Run `bun test test/checkout.test.ts` before final handoff.\n- Do not rediscover package scripts unless this command fails.\n");
+  writeSkill(path.join(cwd, ".pi-chalin", "skills", "run-verify-project", "SKILL.md"), projectSkillFrontmatter, "## Rules\n- Run `pnpm test -- test/checkout.test.ts` before final handoff.\n- Do not rediscover package scripts unless this command fails.\n");
   const catalog = SkillCatalog.load({ cwd, packageRoot });
   const agent = worker();
 
@@ -536,7 +536,7 @@ trust: trusted
   const baseTools = childToolNames(agent, "verify checkout smoke after the cart change", true);
 
   assert.deepEqual(guided.resolution.active.map((item) => item.skill.qualifiedName), ["project:run-verify-project"]);
-  assert.match(guided.prompt, /bun test test\/checkout\.test\.ts/);
+  assert.match(guided.prompt, /pnpm test -- test\/checkout\.test\.ts/);
   assert.doesNotMatch(guided.prompt, /Discover the verification command/);
   assert.ok(baseTools.includes("grep"));
   assert.ok(baseTools.includes("find"));
@@ -580,7 +580,7 @@ trust: reviewed
   assert.match(userGuided.prompt, /npm run verify:team/);
   assert.deepEqual(userGuided.effectiveTools.sort(), ["bash", "read"].sort());
 
-  writeSkill(path.join(cwd, ".pi-chalin", "skills", "team-runbook", "SKILL.md"), userSkill.replace("scope: user", "scope: project").replace("User global", "Project local"), "## Rules\n- Use the project command `bun run verify:project`.\n");
+  writeSkill(path.join(cwd, ".pi-chalin", "skills", "team-runbook", "SKILL.md"), userSkill.replace("scope: user", "scope: project").replace("User global", "Project local"), "## Rules\n- Use the project command `pnpm run verify:project`.\n");
   catalog = SkillCatalog.load({ cwd, userRoot, packageRoot });
   const projectGuided = childSkillHarness({
     catalog,
@@ -590,7 +590,7 @@ trust: reviewed
   });
 
   assert.deepEqual(projectGuided.resolution.active.map((item) => item.skill.qualifiedName), ["project:team-runbook"]);
-  assert.match(projectGuided.prompt, /bun run verify:project/);
+  assert.match(projectGuided.prompt, /pnpm run verify:project/);
   assert.doesNotMatch(projectGuided.prompt, /npm run verify:team/);
 });
 
@@ -608,7 +608,7 @@ test("on-demand worker skills can be promoted and retired with lifecycle metadat
   await store.saveWorkerSkill("checkout-flow", {
     name: "run-verify-project",
     summary: "Use checkout smoke verification.",
-    rules: ["Run `bun test test/checkout.test.ts` before final."],
+    rules: ["Run `pnpm test -- test/checkout.test.ts` before final."],
   });
 
   const promoted = promoteSkill({

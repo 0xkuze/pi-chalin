@@ -9,9 +9,9 @@
     "rootDir": ".",
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
-    "types": ["node", "bun"],
+    "types": ["node"],
     "noUncheckedSideEffectImports": true,
     "skipLibCheck": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "evals/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts"]
 }

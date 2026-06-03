@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, test } from "bun:test";
+import { afterEach, test } from "vitest";
 import { createMemoryCandidate, MemoryStore } from "../src/memory/memory.ts";
 
 const tempDirs: string[] = [];
@@ -49,14 +49,14 @@ test("MemoryStore keeps generic agent notes pending for human review", async () 
   const [record] = await store.submitCandidates([
     createMemoryCandidate({
       category: "agent-note",
-      content: "The project test suite currently runs through Bun's test runner, so new regression tests should follow the existing bun:test style.",
+      content: "The project test suite currently runs through Vitest, so new regression tests should follow the existing Vitest style.",
       sourceAgent: "reviewer",
       confidence: 0.9,
       scope: "project",
     }),
   ]);
   assert.equal(record?.status, "pending");
-  assert.equal((await store.search("bun:test style")).length, 0, "pending memories are not retrieved until approved");
+  assert.equal((await store.search("Vitest style")).length, 0, "pending memories are not retrieved until approved");
 });
 
 test("MemoryStore rejects logs code snippets and task completion noise", async () => {
@@ -69,7 +69,7 @@ test("MemoryStore rejects logs code snippets and task completion noise", async (
   ]);
 
   assert.deepEqual(records.map((record) => record.status), ["rejected", "rejected", "rejected"]);
-  assert.equal((await store.list()).length, 0, "invalid legacy-style memories should be hidden from review lists");
+  assert.equal((await store.list()).length, 0, "invalid old-format memories should be hidden from review lists");
 });
 
 test("MemoryStore rejects transient verification status as durable memory", async () => {
@@ -85,7 +85,7 @@ test("MemoryStore rejects transient verification status as durable memory", asyn
     }),
     createMemoryCandidate({
       category: "tooling",
-      content: "Project regression tests run through Bun, so new TypeScript tests should use the bun:test API and isolated temporary roots.",
+      content: "Project regression tests run through Vitest, so new TypeScript tests should use the Vitest API and isolated temporary roots.",
       sourceAgent: "reviewer",
       confidence: 0.94,
       scope: "project",
@@ -100,7 +100,7 @@ test("MemoryStore rejects transient verification status as durable memory", asyn
 test("MemoryStore deduplicates normalized candidates before writing", async () => {
   const cwd = tempDir("pi-chalin-memory-");
   const store = new MemoryStore({ cwd });
-  const content = "This project uses Bun for tests, and tests should avoid setTimeout-based waits because they make the suite flaky.";
+  const content = "This project uses Vitest for tests, and tests should avoid setTimeout-based waits because they make the suite flaky.";
   const records = await store.submitCandidates([
     createMemoryCandidate({ category: "tooling", content, sourceAgent: "scout", confidence: 0.9, scope: "project" }),
     createMemoryCandidate({ category: "tooling", content: `${content} `, sourceAgent: "reviewer", confidence: 0.9, scope: "project" }),
@@ -155,24 +155,24 @@ test("MemoryStore does not persist duplicate candidates across agents", async ()
   assert.equal((await store.list()).length, 1);
 });
 
-test("MemoryStore collapses near-duplicate legacy records in review lists", async () => {
+test("MemoryStore collapses near-duplicate old-format records in review lists", async () => {
   const cwd = tempDir("pi-chalin-memory-");
   const store = new MemoryStore({ cwd });
   await store.submitCandidates([
     createMemoryCandidate({
       category: "project-fact",
-      content: "pi-chalin is a Pi Coding Agent extension that routes normal prompts through specialized subagents for project analysis and review.",
+      content: "pi-chalin is a Pi Coding Agent extension that delegates complex work to specialized subagents for project analysis and review.",
       sourceAgent: "scout",
       confidence: 0.9,
       scope: "project",
     }),
     createMemoryCandidate({
       category: "project-fact",
-      content: "pi-chalin is a Pi Coding Agent extension package for routed subagent workflows that analyze and review normal project prompts.",
+      content: "pi-chalin is a Pi Coding Agent extension package that delegates complex prompts through specialized subagents for project analysis and review.",
       sourceAgent: "context-builder",
       confidence: 0.9,
       scope: "project",
-      id: "legacy-near-duplicate",
+      id: "old-format-near-duplicate",
     }),
   ]);
 
@@ -187,7 +187,7 @@ test("MemoryStore revisions topic-key memories instead of duplicating them", asy
   await store.submitCandidates([
     createMemoryCandidate({
       category: "tooling",
-      content: "Testing uses Bun, and asynchronous tests should prefer deterministic promise resolution over setTimeout-based waits because timers make the suite flaky.",
+      content: "Testing uses Vitest, and asynchronous tests should prefer deterministic promise resolution over setTimeout-based waits because timers make the suite flaky.",
       sourceAgent: "scout",
       confidence: 0.93,
       scope: "project",
@@ -196,7 +196,7 @@ test("MemoryStore revisions topic-key memories instead of duplicating them", asy
   await store.submitCandidates([
     createMemoryCandidate({
       category: "testing",
-      content: "Project tests run on Bun; avoid setTimeout sleeps in tests and use deterministic promise hooks or controlled fakes to prevent flaky timing behavior.",
+      content: "Project tests run on Vitest; avoid setTimeout sleeps in tests and use deterministic promise hooks or controlled fakes to prevent flaky timing behavior.",
       sourceAgent: "reviewer",
       confidence: 0.95,
       scope: "project",
@@ -214,7 +214,7 @@ test("MemoryStore revisions topic-key memories instead of duplicating them", asy
 test("MemoryStore counts exact duplicate sightings without cluttering review", async () => {
   const cwd = tempDir("pi-chalin-memory-");
   const store = new MemoryStore({ cwd });
-  const content = "The project uses bun:test for extension regression tests, so new tests should import from node:assert/strict and keep temporary project roots isolated.";
+  const content = "The project uses Vitest for extension regression tests, so new tests should import from node:assert/strict and keep temporary project roots isolated.";
   await store.submitCandidates([createMemoryCandidate({ category: "testing", content, sourceAgent: "scout", confidence: 0.91, scope: "project" })]);
   await store.submitCandidates([createMemoryCandidate({ category: "testing", content: `${content} `, sourceAgent: "context-builder", confidence: 0.92, scope: "project" })]);
 
@@ -250,7 +250,7 @@ test("MemoryStore retrieves compact token-budgeted context and audits usage", as
   await store.submitCandidates([
     createMemoryCandidate({
       category: "testing",
-      content: "Project tests use Bun, and async retry tests should avoid setTimeout sleeps in favor of deterministic fake timers or promise hooks.",
+      content: "Project tests use Vitest, and async retry tests should avoid setTimeout sleeps in favor of deterministic fake timers or promise hooks.",
       sourceAgent: "reviewer",
       confidence: 0.95,
       scope: "project",
@@ -264,7 +264,7 @@ test("MemoryStore retrieves compact token-budgeted context and audits usage", as
     }),
   ]);
 
-  const bundle = await store.retrieve({ query: "Bun retry tests validation contracts", sourceAgent: "worker", tokenBudget: 80, limit: 5 });
+  const bundle = await store.retrieve({ query: "Vitest retry tests validation contracts", sourceAgent: "worker", tokenBudget: 80, limit: 5 });
 
   assert.match(bundle.text, /Memory context/);
   assert.ok(bundle.estimatedTokens <= 80);
@@ -291,16 +291,16 @@ test("MemoryStore revises incorrect memories with audited provenance", async () 
 
   const revised = await store.revise(record.id, {
     category: "testing",
-    content: "Project tests use Bun's test runner for extension regression tests and should keep temporary project roots isolated.",
+    content: "Project tests use Vitest for extension regression tests and should keep temporary project roots isolated.",
     sourceAgent: "reviewer",
     confidence: 0.98,
     evidence: "package.json test script and existing test/*.test.ts files",
-    reason: "Current repository evidence contradicts the old Vitest memory.",
+    reason: "Current repository evidence contradicts the old test layout memory.",
   });
 
   assert.equal(revised?.revisionCount, 2);
-  assert.match(revised?.content ?? "", /Bun's test runner/);
+  assert.match(revised?.content ?? "", /Vitest/);
   assert.match(revised?.evidence ?? "", /package\.json/);
   const events = await store.events(record.id);
-  assert.ok(events.some((event) => event.type === "revise" && event.previousContent?.includes("Vitest") && event.nextContent?.includes("Bun")));
+  assert.ok(events.some((event) => event.type === "revise" && event.previousContent?.includes("src/__tests__") && event.nextContent?.includes("temporary project roots")));
 });

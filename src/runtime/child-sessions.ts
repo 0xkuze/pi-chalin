@@ -5,7 +5,6 @@ import { resolveChalinPaths } from "../config/paths.ts";
 import type { RunStepState } from "../domain/schemas.ts";
 
 const CHILD_SESSION_SCOPE = "pi-chalin";
-const LEGACY_CHILD_SESSION_ARCHIVE = ".pi-chalin-hidden-child-sessions";
 
 export interface ChildSessionDirOptions {
   cwd: string;
@@ -20,11 +19,6 @@ export interface ChildSessionManagerOptions {
   runId: string;
   step: RunStepState;
   extensionContext?: Pick<ExtensionContext, "sessionManager">;
-}
-
-export interface LegacyChildSessionCleanupResult {
-  moved: string[];
-  failed: string[];
 }
 
 export function chalinChildSessionRoot(options: Pick<ChildSessionDirOptions, "cwd" | "runId" | "parentSessionFile">): string {
@@ -59,33 +53,6 @@ export function createChalinChildSessionManager(options: ChildSessionManagerOpti
   return manager;
 }
 
-export async function hideLegacyTopLevelChildSessions(ctx: Pick<ExtensionContext, "sessionManager">): Promise<LegacyChildSessionCleanupResult> {
-  const sessionDir = ctx.sessionManager.getSessionDir();
-  const currentSessionFile = ctx.sessionManager.getSessionFile();
-  const sessions = await SessionManager.list(ctx.sessionManager.getCwd(), sessionDir);
-  const result: LegacyChildSessionCleanupResult = { moved: [], failed: [] };
-
-  for (const session of sessions) {
-    if (session.path === currentSessionFile) continue;
-    if (!isPiChalinChildSessionPreview(session.firstMessage)) continue;
-
-    const destination = hiddenLegacyChildSessionPath(sessionDir, session.path);
-    try {
-      fs.mkdirSync(path.dirname(destination), { recursive: true });
-      fs.renameSync(session.path, destination);
-      result.moved.push(destination);
-    } catch {
-      result.failed.push(session.path);
-    }
-  }
-
-  return result;
-}
-
-export function isPiChalinChildSessionPreview(firstMessage: string): boolean {
-  return /^You are pi-chalin [a-zA-Z0-9._-]+:/.test(firstMessage.trimStart());
-}
-
 function safePathSegment(value: string): string {
   const normalized = value
     .trim()
@@ -93,16 +60,4 @@ function safePathSegment(value: string): string {
     .replace(/^-+|-+$/g, "")
     .slice(0, 80);
   return normalized || "session";
-}
-
-function hiddenLegacyChildSessionPath(sessionDir: string, sourceFile: string): string {
-  const sourceBaseName = path.basename(sourceFile, ".jsonl");
-  const archiveDir = path.join(sessionDir, LEGACY_CHILD_SESSION_ARCHIVE, safePathSegment(sourceBaseName));
-  let candidate = path.join(archiveDir, path.basename(sourceFile));
-  let suffix = 1;
-  while (fs.existsSync(candidate)) {
-    candidate = path.join(archiveDir, `${sourceBaseName}-${suffix}.jsonl`);
-    suffix += 1;
-  }
-  return candidate;
 }

@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, test } from "bun:test";
+import { afterEach, test } from "vitest";
 import { createChildToolPolicy, createChildTools } from "../src/tools/child-tools.ts";
 import { DEFAULT_CONFIG, type ChalinConfig } from "../src/config/config.ts";
 import { ChalinKernel, routeFromPlan } from "../src/kernel/kernel.ts";
@@ -236,8 +236,8 @@ test("subagent memory tools honor project-configured Engram provider", async () 
   fake.observations.push(fakeObservation({
     id: 1,
     type: "pattern",
-    title: "Bun async retry assertions",
-    content: "Bun async retry assertions should use deterministic fake timers or promise hooks instead of setTimeout sleeps.",
+    title: "Vitest async retry assertions",
+    content: "Vitest async retry assertions should use deterministic fake timers or promise hooks instead of setTimeout sleeps.",
   }));
   const policy = createChildToolPolicy({
     cwd,
@@ -253,7 +253,7 @@ test("subagent memory tools honor project-configured Engram provider", async () 
   assert.ok(write);
   assert.ok(revise);
 
-  const found = await search.execute("mem-1", { query: "Bun async retry assertions", tokenBudget: 160 }, undefined, undefined, undefined as never);
+  const found = await search.execute("mem-1", { query: "Vitest async retry assertions", tokenBudget: 160 }, undefined, undefined, undefined as never);
   assert.match(String((found.content?.[0] as { text?: string } | undefined)?.text ?? ""), /Engram memory context/);
 
   const written = await write.execute("mem-2", {

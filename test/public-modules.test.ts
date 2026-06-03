@@ -1,4 +1,4 @@
-import { describe, test } from "bun:test";
+import { describe, test } from "vitest";
 import assert from "node:assert/strict";
 
 describe("public module surface", () => {
@@ -16,6 +16,7 @@ describe("public module surface", () => {
     const runRecovery = await import("pi-chalin/runner/run-recovery");
     const contextPacket = await import("pi-chalin/runner/context-packet");
     const intentContract = await import("pi-chalin/runner/intent-contract");
+    const inlinePolicy = await import("pi-chalin/runtime/inline-policy");
 
     assert.equal(typeof runner.MockWorkerRunner, "function");
     assert.equal(typeof runner.parseAgentOutput, "function");
@@ -31,6 +32,7 @@ describe("public module surface", () => {
     assert.equal(typeof runRecovery.loadFailedRunDiagnostic, "function");
     assert.equal(typeof contextPacket.buildContextPacket, "function");
     assert.equal(typeof intentContract.buildIntentContract, "function");
+    assert.equal(typeof inlinePolicy.judgeInlineCompletionPolicy, "function");
   });
 
   test("does not expose removed root implementation imports", async () => {
@@ -43,6 +45,7 @@ describe("public module surface", () => {
       "pi-chalin/src/runner.ts",
       "pi-chalin/src/tools.ts",
       "pi-chalin/src/runtime-state.ts",
+      "pi-chalin/runtime/direct-policy",
     ];
 
     for (const specifier of removedRootPaths) {

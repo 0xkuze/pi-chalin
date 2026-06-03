@@ -9,10 +9,10 @@ import { evaluateBudgetUsage, policyForStep, recordBudgetCheckpoint, scoreProgre
 import { claimsNeedingAudit, claimsRequireAudit } from "../observability/evidence-claims.ts";
 import type { ChalinPathsOptions } from "../config/paths.ts";
 import { createConfiguredMemoryStore } from "../memory/memory-provider.ts";
-import type { AgentOutput, AgentStep, BudgetCapHit, EvidenceClaim, RouteDecision, RouteExpectedEffect, RoutePlan, RunState, RunStepMetrics, RunStepState, TokenUsageSummary, ToolBudgetProfile, WorkUnit } from "../domain/schemas.ts";
+import type { AgentOutput, AgentStep, BudgetCapHit, EvidenceClaim, RouteDecision, RouteExpectedEffect, RoutePlan, RunState, RunStepMetrics, RunStepRepairKind, RunStepState, TokenUsageSummary, ToolBudgetProfile, WorkUnit } from "../domain/schemas.ts";
 import { createChildToolPolicy, createChildTools, type ChalinDelegateParamsShape, type ChildToolActivity, type ChildToolPolicy } from "../tools/child-tools.ts";
 import { createChalinChildSessionManager } from "../runtime/child-sessions.ts";
-import { buildProjectSnapshot, formatProjectSnapshot } from "../project/snapshot.ts";
+import { buildProjectDiscoveryIndex, formatProjectDiscoveryIndex } from "../project/discovery.ts";
 import { ArtifactStore } from "../artifacts/artifacts.ts";
 import { buildPromptTokenomics, buildRunLifecycleSpans, buildToolOutputTokenomics, createSkillTraceEvent, createStructuredSpan, createTrajectoryEvent, mergeTraceSpans, mergeTrajectoryEvents, type SkillTraceEvent, type StructuredTraceSpan, type StructuredTraceSpanKind, type TokenomicsSummary, type TrajectoryEvent } from "../observability/observability.ts";
 import { resolveAgentModel, resolveAgentThinking, resolveInheritedModelFallback, type ResolvedAgentModel } from "./model-resolution.ts";
@@ -26,7 +26,7 @@ import { checkpointSummary, isUsableStepStatus } from "../runtime/status.ts";
 import { normalizeRouteForExecution } from "../routing/route-guards.ts";
 import { parseAgentOutput } from "./agent-output.ts";
 import { buildContextPacket, formatContextPacket, sanitizeWorkspacePathList, sanitizeWorkspaceTextForRoots } from "./context-packet.ts";
-import { markBlockedDependentsSkipped, updateRecoveryState } from "./run-recovery.ts";
+import { markBlockedDependentsSkipped, markHumanBlockedDependentsSkipped, updateRecoveryState } from "./run-recovery.ts";
 import { isRecord, truncateText } from "./runner-utils.ts";
 import { expandWorkUnitsFromBestHandoff, expandWorkUnitsFromHandoff, refreshWorkUnitStatuses } from "./work-units.ts";
 
@@ -195,10 +195,12 @@ export class SdkWorkerRunner implements WorkerRunner {
       let previous = "";
       for (let index = 0; index < run.steps.length; index += 1) {
         const step = run.steps[index]!;
+        if (runBlockedByHumanInput(run) || step.status === "skipped") break;
         const result = await runSdkStep(step, context, extensionContext, run, { previous, cwd: context.cwd });
         if (result.aborted || result.paused) break;
         previous = result.handoff ?? previous;
         afterStepHandoff(run, step);
+        if (runBlockedByHumanInput(run)) break;
         maybeAppendWorkerScopeGapRepair(run, step);
         maybeAppendImplementationReviewRepair(run, step);
         if (step.status === "failed") break;
@@ -229,9 +231,11 @@ export class SdkWorkerRunner implements WorkerRunner {
       let previous = "";
       for (let index = 0; index < run.steps.length; index += 1) {
         const step = run.steps[index]!;
+        if (runBlockedByHumanInput(run) || step.status === "skipped") break;
         if (isUsableStepHandoff(step)) {
           previous = step.output?.handoff ?? step.output?.text ?? previous;
           afterStepHandoff(run, step);
+          if (runBlockedByHumanInput(run)) break;
           maybeAppendWorkerScopeGapRepair(run, step);
           maybeAppendImplementationReviewRepair(run, step);
           if (step.status === "failed") break;
@@ -241,6 +245,7 @@ export class SdkWorkerRunner implements WorkerRunner {
         if (result.aborted || result.paused) break;
         previous = result.handoff ?? previous;
         afterStepHandoff(run, step);
+        if (runBlockedByHumanInput(run)) break;
         maybeAppendWorkerScopeGapRepair(run, step);
         maybeAppendImplementationReviewRepair(run, step);
         if (step.status === "failed") break;
@@ -255,10 +260,12 @@ async function runMockDag(run: RunState, stages: Extract<RoutePlan, { kind: "dag
   let previous = "";
   for (let stageIndex = 0; stageIndex < stages.length; stageIndex += 1) {
     const stage = stages[stageIndex]!;
+    if (runBlockedByHumanInput(run)) break;
     throwIfAborted(context.signal);
     const stageSteps = run.steps.filter((step) => step.id.startsWith(`${stage.id}:`));
     const outputs = await runParallel(stageSteps, context, previous, run, `mock-dag:${stage.id}`);
     afterStageHandoffs(run, stageSteps);
+    if (runBlockedByHumanInput(run)) break;
     for (const step of stageSteps) {
       maybeAppendWorkerScopeGapRepair(run, step);
       maybeAppendImplementationReviewRepair(run, step);
@@ -271,11 +278,13 @@ async function resumeMockDag(run: RunState, stages: Extract<RoutePlan, { kind: "
   let previous = "";
   for (let stageIndex = 0; stageIndex < stages.length; stageIndex += 1) {
     const stage = stages[stageIndex]!;
+    if (runBlockedByHumanInput(run)) break;
     throwIfAborted(context.signal);
     const stageSteps = run.steps.filter((step) => step.id.startsWith(`${stage.id}:`));
     if (stageSteps.every((step) => isUsableStepHandoff(step))) {
       previous = aggregateStageHandoff(stageSteps);
       afterStageHandoffs(run, stageSteps);
+      if (runBlockedByHumanInput(run)) break;
       for (const step of stageSteps) {
         maybeAppendWorkerScopeGapRepair(run, step);
         maybeAppendImplementationReviewRepair(run, step);
@@ -293,6 +302,7 @@ async function resumeMockDag(run: RunState, stages: Extract<RoutePlan, { kind: "
       .filter((step) => isUsableStepHandoff(step))
       .map((step) => ({ agent: step.agent, text: step.output?.handoff ?? step.output?.text ?? "" }));
     afterStageHandoffs(run, stageSteps);
+    if (runBlockedByHumanInput(run)) break;
     for (const step of stageSteps) {
       maybeAppendWorkerScopeGapRepair(run, step);
       maybeAppendImplementationReviewRepair(run, step);
@@ -329,7 +339,7 @@ async function runSdkParallelSteps(
 
   try {
     await Effect.runPromise(Effect.forEach(
-      run.steps,
+      run.steps.filter(isRunnableStep),
       (step) => Effect.tryPromise(() => {
         const worktree = isolation?.worktrees.find((item) => item.stepId === step.id);
         return runSdkStep(step, context, extensionContext, run, { cwd: worktree?.path ?? context.cwd });
@@ -469,6 +479,7 @@ async function runSdkDag(
   let previous = "";
   for (let stageIndex = 0; stageIndex < stages.length; stageIndex += 1) {
     const stage = stages[stageIndex]!;
+    if (runBlockedByHumanInput(run)) break;
     if (context.signal?.aborted) {
       markRunAborted(run, context, "pi-chalin run stopped by user.");
       break;
@@ -489,6 +500,7 @@ async function runSdkDag(
       context.onUpdate?.(run);
     }
     afterStageHandoffs(run, stageSteps);
+    if (runBlockedByHumanInput(run)) break;
     for (const step of stageSteps) {
       maybeAppendWorkerScopeGapRepair(run, step);
       maybeAppendImplementationReviewRepair(run, step);
@@ -522,7 +534,7 @@ function maybeAppendWorkerScopeGapRepair(run: RunState, step: RunStepState): boo
   const stepIndex = run.steps.indexOf(step);
   if (stepIndex < 0 || hasLaterImplementationRepair(run, stepIndex)) return false;
 
-  const existingRepairCycles = implementationReviewRepairCycleCount(run);
+  const existingRepairCycles = repairCycleCount(run, "scope-gap");
   const maxRepairCycles = maxImplementationReviewRepairCycles();
   if (existingRepairCycles >= maxRepairCycles) {
     step.status = "failed";
@@ -533,11 +545,12 @@ function maybeAppendWorkerScopeGapRepair(run: RunState, step: RunStepState): boo
   }
 
   const cycle = existingRepairCycles + 1;
-  const repairUnit = ensureWorkerScopeGapRepairScope(run, step, gapFiles, cycle);
+  const sequence = nextReviewRepairSequence(run);
+  const repairUnit = ensureWorkerScopeGapRepairScope(run, step, gapFiles, sequence);
   const originalTask = run.rootTask ?? run.route.reason;
   const workerText = truncateText(step.output?.handoff ?? step.output?.text ?? "", 900);
   const repairWorker: RunStepState = {
-    id: `review-repair-${cycle}-worker`,
+    id: `review-repair-${sequence}-worker`,
     agent: "worker",
     task: [
       "Repair the worker-reported WorkUnit scope gap.",
@@ -552,9 +565,10 @@ function maybeAppendWorkerScopeGapRepair(run: RunState, step: RunStepState): boo
     workUnitId: repairUnit.id,
     dependencies: [step.id],
     repairCycle: cycle,
+    repairKind: "scope-gap",
   };
   const repairReviewer: RunStepState = {
-    id: `review-repair-${cycle}-reviewer`,
+    id: `review-repair-${sequence}-reviewer`,
     agent: "reviewer",
     task: [
       "Review the scope-gap repair against the original task, the previous worker handoff, and the repair WorkUnit scope.",
@@ -567,11 +581,12 @@ function maybeAppendWorkerScopeGapRepair(run: RunState, step: RunStepState): boo
     status: "pending",
     workUnitId: repairUnit.id,
     repairCycle: cycle,
+    repairKind: "scope-gap",
   };
 
   appendImplementationReviewRepair(
     run,
-    cycle,
+    sequence,
     repairWorker,
     repairReviewer,
     "because a worker reported a WorkUnit scope gap",
@@ -589,28 +604,30 @@ function maybeAppendImplementationReviewRepair(run: RunState, step: RunStepState
   const expectsVerify = routeExpectedEffects(run).has("verify");
   const reviewerMissingVerdict = reviewerMissingStructuredVerdictNeedsRepair(step);
   const reviewerEvidenceGap = reviewerMissingVerdict || reviewerPassNeedsEvidenceRepair(step, { expectsReviewedContent: true, expectsVerify });
-  const existingRepairCycles = implementationReviewRepairCycleCount(run);
+  const existingEvidenceRepairCycles = repairCycleCount(run, "review-evidence");
+  const existingImplementationRepairCycles = repairCycleCount(run, "implementation");
   const maxRepairCycles = maxImplementationReviewRepairCycles();
-  if (reviewerEvidenceGap && existingRepairCycles >= maxRepairCycles) {
+  if (reviewerEvidenceGap && existingEvidenceRepairCycles >= maxRepairCycles) {
     if (reviewerEvidenceGap) {
       step.reviewGate = "missing-evidence";
       markVerificationLedgerGap(run, step, "Structured Reviewer Verdict PASS lacks required contractual evidence.");
     }
     step.status = "failed";
-    step.error = `Reviewer still reports missing required review evidence after ${existingRepairCycles} repair cycle(s).`;
+    step.error = `Reviewer still reports missing required review evidence after ${existingEvidenceRepairCycles} repair cycle(s).`;
     run.warnings.push(`${step.error} Stopping instead of finalizing incomplete routed implementation.`);
     persistRun(run);
     return false;
   }
 
-  const cycle = existingRepairCycles + 1;
   const reviewText = truncateText(step.output?.handoff ?? step.output?.text ?? "", 1200);
   const originalTask = run.rootTask ?? run.route.reason;
   const priorVerificationEvidence = compactRunVerificationEvidence(run);
   const reviewerUnitContext = formatReviewRepairUnitContext(run, step);
   if (reviewerEvidenceGap) {
+    const cycle = existingEvidenceRepairCycles + 1;
+    const sequence = nextReviewRepairSequence(run);
     const repairReviewer: RunStepState = {
-      id: `review-repair-${cycle}-reviewer`,
+      id: `review-repair-${sequence}-reviewer`,
       agent: "reviewer",
       task: [
         "Re-audit the previous implementation review evidence, not the implementation itself unless a named claim needs one targeted read.",
@@ -627,10 +644,11 @@ function maybeAppendImplementationReviewRepair(run: RunState, step: RunStepState
       workUnitId: step.workUnitId,
       dependencies: [step.id],
       repairCycle: cycle,
+      repairKind: "review-evidence",
     };
     appendReviewerEvidenceRepair(
       run,
-      cycle,
+      sequence,
       repairReviewer,
       reviewerMissingVerdict
         ? "because the reviewer omitted the structured verdict contract"
@@ -648,15 +666,17 @@ function maybeAppendImplementationReviewRepair(run: RunState, step: RunStepState
   if (reviewerGap && downgradeOutOfScopeReviewerEvidenceRepairGap(run, step)) reviewerGap = false;
   const permanentTestGap = !reviewerGap && implementationPassNeedsPermanentTestRepair(run, workerIndex, stepIndex);
   if (!reviewerGap && !permanentTestGap) return false;
-  if (existingRepairCycles >= maxRepairCycles) {
+  if (existingImplementationRepairCycles >= maxRepairCycles) {
     const gap = reviewerGap ? "a blocking FAIL/GAP" : "missing permanent test coverage";
     step.status = "failed";
-    step.error = `Implementation reviewer still reports ${gap} after ${existingRepairCycles} repair cycle(s).`;
+    step.error = `Implementation reviewer still reports ${gap} after ${existingImplementationRepairCycles} repair cycle(s).`;
     run.warnings.push(`${step.error} Stopping instead of finalizing incomplete routed implementation.`);
     persistRun(run);
     return false;
   }
 
+  const cycle = existingImplementationRepairCycles + 1;
+  const sequence = nextReviewRepairSequence(run);
   const implementationUnitId = run.steps[workerIndex]?.workUnitId ?? step.workUnitId;
   const repairIntro = reviewerGap
     ? "Repair the blocking implementation-review findings from the Previous Handoff."
@@ -664,11 +684,11 @@ function maybeAppendImplementationReviewRepair(run: RunState, step: RunStepState
   const repairScope = reviewerGap
     ? "Use the previous reviewer handoff as the gap list; do not repeat broad discovery unless a named file is missing."
     : "Add/update permanent runner-discoverable tests for the changed behavior. Preserve the implementation unless the new tests reveal a bug. Ignore narrower step wording that prohibited tests unless the Original User Goal explicitly prohibited test edits.";
-  const repairUnit = reviewerGap ? ensureCrossWorkUnitRepairScope(run, step, implementationUnitId, cycle) : undefined;
+  const repairUnit = reviewerGap ? ensureCrossWorkUnitRepairScope(run, step, implementationUnitId, sequence) : undefined;
   const repairWorkUnitId = repairUnit?.id ?? implementationUnitId;
   const repairUnitContext = repairUnit ? formatRepairUnitContext(repairUnit) : formatImplementationRepairUnitContext(run, step, implementationUnitId);
   const repairWorker: RunStepState = {
-    id: `review-repair-${cycle}-worker`,
+    id: `review-repair-${sequence}-worker`,
     agent: "worker",
     task: [
       repairIntro,
@@ -684,9 +704,10 @@ function maybeAppendImplementationReviewRepair(run: RunState, step: RunStepState
     workUnitId: repairWorkUnitId,
     dependencies: [step.id],
     repairCycle: cycle,
+    repairKind: "implementation",
   };
   const repairReviewer: RunStepState = {
-    id: `review-repair-${cycle}-reviewer`,
+    id: `review-repair-${sequence}-reviewer`,
     agent: "reviewer",
     task: [
       "Re-review the repaired implementation against the original task and the previous reviewer findings.",
@@ -700,11 +721,12 @@ function maybeAppendImplementationReviewRepair(run: RunState, step: RunStepState
     status: "pending",
     workUnitId: repairWorkUnitId,
     repairCycle: cycle,
+    repairKind: "implementation",
   };
 
   appendImplementationReviewRepair(
     run,
-    cycle,
+    sequence,
     repairWorker,
     repairReviewer,
     reviewerGap
@@ -1229,19 +1251,28 @@ function insertDagStagesAfter(plan: Extract<RoutePlan, { kind: "dag" }>, afterSt
   plan.stages.splice(stageIndex + 1, 0, ...stages);
 }
 
-function implementationReviewRepairCycleCount(run: RunState): number {
+function repairCycleCount(run: RunState, kind: RunStepRepairKind): number {
   const cycles = new Set<string>();
-  for (const step of run.steps) {
-    const numbered = /^review-repair-(\d+)-(?:worker|reviewer)$/.exec(step.id);
-    if (numbered?.[1]) {
-      cycles.add(numbered[1]);
-      continue;
-    }
-    if (/^review-repair-(?:worker|reviewer)$/.test(step.id)) cycles.add("legacy");
-    const dagNumbered = /^review-repair-(\d+)-(?:worker|reviewer):/.exec(step.id);
-    if (dagNumbered?.[1]) cycles.add(dagNumbered[1]);
+  const repairSteps = run.steps
+    .map((step) => ({ step, sequence: reviewRepairSequence(step.id) }))
+    .filter((entry): entry is { step: RunStepState; sequence: string } => Boolean(entry.sequence));
+  for (const { step, sequence } of repairSteps) {
+    if (step.repairKind === kind) cycles.add(`${step.repairKind}:${sequence}`);
   }
   return cycles.size;
+}
+
+function nextReviewRepairSequence(run: RunState): number {
+  const sequences = run.steps
+    .map((step) => Number(reviewRepairSequence(step.id)))
+    .filter((sequence) => Number.isFinite(sequence));
+  return Math.max(0, ...sequences) + 1;
+}
+
+function reviewRepairSequence(stepId: string): string | undefined {
+  const numbered = /^review-repair-(\d+)-(?:worker|reviewer)(?::|$)/.exec(stepId);
+  if (numbered?.[1]) return numbered[1];
+  return undefined;
 }
 
 function hasLaterImplementationRepair(run: RunState, stepIndex: number): boolean {
@@ -1294,7 +1325,20 @@ export function applyStructuredHandoffContract(run: RunState | undefined, step: 
   if (isReviewerStep(step, agent) && output.reviewerVerdict) return "accept";
   if (output.structuredHandoff) {
     const fieldGaps = structuredHandoffFieldGaps(run, step, agent);
-    if (fieldGaps.length === 0) return "accept";
+    if (fieldGaps.length === 0) {
+      const blockedNoMutationReason = structuredHandoffBlockedNoMutationReason(run, step, agent);
+      if (blockedNoMutationReason) {
+        output.warnings = appendUnique(output.warnings, blockedNoMutationReason);
+        if (run) pushUniqueWarnings(run, [blockedNoMutationReason]);
+        if (step.status === "complete") {
+          step.status = "failed";
+          step.error = blockedNoMutationReason;
+          return "fail";
+        }
+        return "warn";
+      }
+      return "accept";
+    }
     const action = structuredHandoffContractAction(run, step, agent);
     const reason = structuredHandoffFieldGapReason(step, fieldGaps);
     output.warnings = appendUnique(output.warnings, reason);
@@ -1370,7 +1414,12 @@ function structuredHandoffFieldGaps(run: RunState | undefined, step: RunStepStat
   if (!handoff) return [];
   const expectedEffects = expectedEffectsForStep(run, step);
   const gaps: string[] = [];
-  if (requiresChangedFilesInStructuredHandoff(expectedEffects, step, agent) && handoff.changedFiles.length === 0 && !isVerifiedNoMutationHandoff(step, handoff)) {
+  if (
+    requiresChangedFilesInStructuredHandoff(expectedEffects, step, agent)
+    && handoff.changedFiles.length === 0
+    && !isVerifiedNoMutationHandoff(step, handoff)
+    && !isVerifiedBlockedNoMutationHandoff(step, handoff)
+  ) {
     gaps.push("changedFiles is required for writer/write handoffs");
   }
   if (requiresVerificationInStructuredHandoff(expectedEffects, step, agent) && handoff.verification.length === 0) {
@@ -1393,6 +1442,27 @@ function isVerifiedNoMutationHandoff(step: RunStepState, handoff: NonNullable<Ag
     && (step.metrics?.filesTouched?.length ?? 0) === 0
     && handoff.risks.length === 0
     && handoff.nextActions.length === 0;
+}
+
+function isVerifiedBlockedNoMutationHandoff(step: RunStepState, handoff: NonNullable<AgentOutput["structuredHandoff"]>): boolean {
+  return handoff.changedFiles.length === 0
+    && handoff.verification.length > 0
+    && (step.metrics?.filesTouched?.length ?? 0) === 0
+    && (handoff.risks.length > 0 || handoff.nextActions.length > 0);
+}
+
+function structuredHandoffBlockedNoMutationReason(run: RunState | undefined, step: RunStepState, agent?: AgentDefinition): string | undefined {
+  const handoff = step.output?.structuredHandoff;
+  if (!handoff) return undefined;
+  const expectedEffects = expectedEffectsForStep(run, step);
+  if (!requiresChangedFilesInStructuredHandoff(expectedEffects, step, agent)) return undefined;
+  if (!isVerifiedBlockedNoMutationHandoff(step, handoff)) return undefined;
+  const details = [
+    handoff.summary ? truncateText(handoff.summary, 220) : undefined,
+    handoff.risks[0] ? `risk: ${truncateText(handoff.risks[0], 180)}` : undefined,
+    handoff.nextActions[0] ? `next action: ${truncateText(handoff.nextActions[0], 180)}` : undefined,
+  ].filter((item): item is string => Boolean(item)).join(" ");
+  return `${step.agent}/${step.id} verified that no writer mutation was safe or possible despite a write contract${details ? `: ${details}` : "."}`;
 }
 
 function isWriteResponsibleStep(step: RunStepState, agent?: AgentDefinition): boolean {
@@ -1427,9 +1497,7 @@ function sameExpectedEffects(left: RouteExpectedEffect[], right: RouteExpectedEf
 }
 
 function structuredHandoffContractReason(step: RunStepState, contract: NonNullable<AgentOutput["handoffContract"]>): string {
-  const mode = contract === "legacy-degraded"
-    ? "fell back to legacy ## Handoff text"
-    : "did not provide a usable handoff";
+  const mode = contract === "structured" ? "provided a structured handoff" : "did not provide a usable handoff";
   return `${step.agent}/${step.id} ${mode}; structured ## Agent Handoff is required before treating this step as a contractual multi-agent result.`;
 }
 
@@ -1559,6 +1627,8 @@ export function reconcileDeclaredGeneratedScopeViolations(run: RunState, step: R
 
 function isFatalToolPolicyViolation(reason: string): boolean {
   return reason.startsWith("outside_work_unit_scope:")
+    || reason.startsWith("work_unit_scope_gap:")
+    || reason.startsWith("policy_stopped_after_scope_violation:")
     || reason === "bash_denied_for_work_unit_scope";
 }
 
@@ -1624,8 +1694,6 @@ function isDependencyManifestPath(filePath: string): boolean {
 
 const DEPENDENCY_RESOLUTION_ARTIFACTS = new Set([
   ".terraform.lock.hcl",
-  "bun.lock",
-  "bun.lockb",
   "cargo.lock",
   "composer.lock",
   "deno.lock",
@@ -1800,6 +1868,22 @@ function appendUnique<T>(items: T[], item: T): T[] {
   return items.includes(item) ? items : [...items, item];
 }
 
+function runBlockedByHumanInput(run: Pick<RunState, "intentContract" | "recoveryState">): boolean {
+  return run.intentContract?.requiresInterview === true || run.recoveryState?.blockedByHumanInput === true;
+}
+
+function isRunnableStep(step: RunStepState): boolean {
+  return !isUsableStepHandoff(step) && step.status !== "failed" && step.status !== "skipped";
+}
+
+function markStepSkippedForHumanInputBlock(run: RunState, step: RunStepState): void {
+  if (isUsableStepHandoff(step) || step.status === "failed" || step.status === "skipped") return;
+  step.status = "skipped";
+  step.skipReason ??= "Skipped because a prior step requires human input before safe continuation.";
+  step.endedAt = new Date().toISOString();
+  run.warnings = appendUnique(run.warnings, `${step.agent}/${step.id} was not executed because the run is blocked by required human input.`);
+}
+
 async function runSdkStage(
   run: RunState,
   stage: Extract<RoutePlan, { kind: "dag" }>["stages"][number],
@@ -1809,7 +1893,8 @@ async function runSdkStage(
   previous: string,
 ): Promise<{ paused: boolean; isolated: boolean }> {
   let isolation: WorktreeIsolationPlan | undefined;
-  const runnableSteps = stageSteps.filter((step) => !isUsableStepHandoff(step));
+  if (runBlockedByHumanInput(run)) return { paused: true, isolated: false };
+  const runnableSteps = stageSteps.filter(isRunnableStep);
   if (runnableSteps.length === 0) return { paused: false, isolated: false };
   const isolationSteps = isolationAgentStepsForRunSteps(stageSteps);
   if (needsWorktreeIsolation(isolationSteps, context.agents)) {
@@ -1869,6 +1954,13 @@ async function runSdkStep(
   run: RunState,
   options: { cwd: string; previous?: string },
 ): Promise<{ aborted: boolean; paused?: boolean; handoff?: string }> {
+  if (runBlockedByHumanInput(run)) {
+    markStepSkippedForHumanInputBlock(run, step);
+    persistRun(run);
+    context.onUpdate?.(run);
+    return { aborted: false, paused: true };
+  }
+  if (step.status === "skipped") return { aborted: false, paused: runBlockedByHumanInput(run) };
   if (context.signal?.aborted) {
     markRunAborted(run, context, "pi-chalin run stopped by user.");
     return { aborted: true };
@@ -2238,6 +2330,7 @@ async function runNestedDelegation(params: ChalinDelegateParamsShape, input: {
   route = normalizeRouteForExecution(route, {
     requiresWorkspaceMutation: Boolean(params.requiresWorkspaceMutation || route.expectedEffects?.includes("write")),
     task: params.task,
+    agents: input.context.agents,
   });
   const missing = route.agents.filter((agent) => !input.context.agents.has(agent));
   if (missing.length > 0) {
@@ -2394,6 +2487,7 @@ function buildPromptOptionsForStep(run: RunState, step: RunStepState, agent: Age
     previousClaims,
     workUnitStrategy: run.route.workUnitStrategy,
     expectedEffects: run.route.expectedEffects ?? ["read"],
+    fanoutAuthorized: run.intentContract?.fanoutAuthorized === true,
     ...(contextPacket ? { contextPacket } : {}),
     ...(isHandoffGapReadMode(agent, previous, policy.profile === "deep") ? { synthesisGapReadLimit: synthesisGapReadLimit() } : {}),
   };
@@ -2510,6 +2604,12 @@ function aggregateHandoff(items: Array<{ agent: string; text: string }>): string
 
 function afterStageHandoffs(run: RunState, stageSteps: RunStepState[]): void {
   for (const step of stageSteps) afterStepHandoff(run, step, { expandWorkUnits: false });
+  if (run.recoveryState?.blockedByHumanInput) {
+    refreshWorkUnitStatuses(run);
+    updateRecoveryState(run, run.steps.find((candidate) => candidate.status === "failed"));
+    persistRun(run);
+    return;
+  }
   expandWorkUnitsFromBestHandoff(run, stageSteps);
   refreshWorkUnitStatuses(run);
   updateRecoveryState(run, run.steps.find((candidate) => candidate.status === "failed"));
@@ -2518,10 +2618,38 @@ function afterStageHandoffs(run: RunState, stageSteps: RunStepState[]): void {
 
 function afterStepHandoff(run: RunState, step: RunStepState, options: { expandWorkUnits?: boolean } = {}): void {
   recordStepLedgers(run, step);
+  if (maybePauseForHumanInput(run, step)) {
+    persistRun(run);
+    return;
+  }
   if (options.expandWorkUnits !== false && isUsableStepHandoff(step)) expandWorkUnitsFromHandoff(run, step);
   refreshWorkUnitStatuses(run);
   updateRecoveryState(run, run.steps.find((candidate) => candidate.status === "failed"));
   persistRun(run);
+}
+
+function maybePauseForHumanInput(run: RunState, step: RunStepState): boolean {
+  const handoff = step.output?.structuredHandoff;
+  if (!handoff?.requiresHumanInput) return false;
+  if (shouldProceedWithAuthorizedPartialFanout(run, step)) {
+    run.warnings.push(`Human input questions from ${step.agent}/${step.id} recorded as non-blocking authorized fanout risks; proceeding with ${step.output?.structuredHandoff?.workUnits?.length ?? 0} safe WorkUnit(s).`);
+    return false;
+  }
+  const questions = handoff.humanInputQuestions?.length ? handoff.humanInputQuestions : handoff.nextActions;
+  const skipped = markHumanBlockedDependentsSkipped(run, step, questions);
+  run.warnings.push(`Human input required by ${step.agent}/${step.id}; skipped ${skipped} dependent step(s) until the user answers.`);
+  return true;
+}
+
+export function shouldProceedWithAuthorizedPartialFanout(run: Pick<RunState, "route" | "intentContract" | "workUnits">, step: Pick<RunStepState, "workUnitId" | "output">): boolean {
+  const handoff = step.output?.structuredHandoff;
+  if (!handoff?.requiresHumanInput) return false;
+  if (run.intentContract?.fanoutAuthorized !== true) return false;
+  if (run.route.workUnitStrategy !== "discover") return false;
+  if (!run.route.expectedEffects?.includes("write")) return false;
+  if ((handoff.workUnits?.length ?? 0) < 2) return false;
+  const sourceUnit = run.workUnits?.find((unit) => unit.id === step.workUnitId);
+  return sourceUnit?.createdFrom !== "fanout";
 }
 
 function recordStepLedgers(run: RunState, step: RunStepState): void {
@@ -2606,9 +2734,11 @@ function runChainEffect(
   return Effect.gen(function* () {
     let previous = options.initialPrevious ?? "";
     for (const step of steps) {
+      if (runBlockedByHumanInput(run) || step.status === "skipped") break;
       if (options.resume && isUsableStepHandoff(step)) {
         previous = aggregateHandoff([{ agent: step.agent, text: step.output?.handoff ?? step.output?.text ?? previous }]);
         afterStepHandoff(run, step);
+        if (runBlockedByHumanInput(run)) break;
         maybeAppendWorkerScopeGapRepair(run, step);
         maybeAppendImplementationReviewRepair(run, step);
         continue;
@@ -2617,6 +2747,7 @@ function runChainEffect(
       const output = yield* runStepEffect(step, context, previous, run);
       previous = output.handoff ?? output.text;
       afterStepHandoff(run, step);
+      if (runBlockedByHumanInput(run)) break;
       maybeAppendWorkerScopeGapRepair(run, step);
       maybeAppendImplementationReviewRepair(run, step);
       if (step.status === "failed") break;
@@ -2642,7 +2773,7 @@ function runParallelEffect(
   span: string,
 ): Effect.Effect<AgentOutput[], RunnerError> {
   return Effect.forEach(
-    steps,
+    steps.filter(isRunnableStep),
     (step) => runStepEffect(step, context, previous, run),
     { concurrency: "unbounded" },
   ).pipe(Effect.withSpan(span));
@@ -2654,6 +2785,13 @@ async function runStep(step: RunStepState, context: WorkerRunnerContext, previou
 
 function runStepEffect(step: RunStepState, context: WorkerRunnerContext, previous: string | undefined, run?: RunState): Effect.Effect<AgentOutput, RunnerError> {
   return Effect.gen(function* () {
+    if (run && runBlockedByHumanInput(run)) {
+      markStepSkippedForHumanInputBlock(run, step);
+      persistRun(run);
+      context.onUpdate?.(run);
+      return parseAgentOutput(step.agent, "");
+    }
+    if (step.status === "skipped") return parseAgentOutput(step.agent, "");
     step.status = "running";
     step.startedAt = new Date().toISOString();
     if (run) persistRun(run);
@@ -2676,10 +2814,10 @@ function runStepEffect(step: RunStepState, context: WorkerRunnerContext, previou
 }
 
 function buildMockOutput(step: RunStepState, context: WorkerRunnerContext, previous: string | undefined, agent: AgentDefinition | undefined): string {
-  const snapshot = buildProjectSnapshot({ cwd: context.cwd });
-  const summary = formatProjectSnapshot(snapshot);
-  const gitSummary = snapshot.git ? `Git context: branch=${snapshot.git.branch ?? "unknown"}; recent changed files=${snapshot.git.changedFiles.slice(0, 8).join(", ") || "none"}.` : "";
-  const projectFiles = snapshot.entries.filter((entry) => entry.type === "file").map((entry) => entry.path).slice(0, 8);
+  const index = buildProjectDiscoveryIndex(context.cwd);
+  const summary = formatProjectDiscoveryIndex(index);
+  const gitSummary = "";
+  const projectFiles = index.entries.filter((entry) => entry.type === "file").map((entry) => entry.path).slice(0, 8);
   const findings = mockFindings(step, summary, gitSummary, projectFiles, previous);
   const handoff = mockHandoff(step, summary, gitSummary, projectFiles, previous);
   const structuredHandoff = mockStructuredHandoff(step, handoff, projectFiles);
@@ -2812,8 +2950,9 @@ function completeRun(run: RunState, context: WorkerRunnerContext): RunState {
   return run;
 }
 
-export function terminalRunStatusForSteps(run: Pick<RunState, "steps">, agents: Map<string, AgentDefinition>): RunState["status"] {
+export function terminalRunStatusForSteps(run: Pick<RunState, "steps"> & Partial<Pick<RunState, "intentContract" | "recoveryState">>, agents: Map<string, AgentDefinition>): RunState["status"] {
   if (hasUnrecoverableFailedSteps(run, agents)) return "failed";
+  if (run.intentContract?.requiresInterview || run.recoveryState?.blockedByHumanInput) return "paused";
   if (run.steps.some((step) => step.status === "paused" || step.status === "pending" || step.status === "running")) return "paused";
   if (hasBlockingCheckpointedSteps(run)) return "paused";
   return "complete";
@@ -2849,7 +2988,7 @@ export function normalizeThinkingForBudget(
   profile: ToolBudgetProfile,
   options: { handoffOnly?: boolean; hasPrevious?: boolean; agent?: AgentDefinition; model?: ExtensionContext["model"] } = {},
 ): ReturnType<typeof resolveAgentThinking> {
-  const cap = thinkingCapForBudget(profile, options);
+  const cap = evalAgentThinkingOverrideEnabled() ? undefined : thinkingCapForBudget(profile, options);
   const current = thinking.label === "inherit" ? undefined : thinking.label;
   const capped = cap && (!current || thinkingRank(current) > thinkingRank(cap)) ? cap : current;
   const effective = chooseSupportedThinkingAtOrBelow(capped, options.model);
@@ -2859,6 +2998,11 @@ export function normalizeThinkingForBudget(
   if (!effective) return thinking;
   if (effective === thinking.level && effective === thinking.label) return thinking;
   return { ...thinking, level: effective, label: effective };
+}
+
+function evalAgentThinkingOverrideEnabled(): boolean {
+  const value = process.env.PI_CHALIN_EVAL_AGENT_THINKING?.trim();
+  return value === "off" || value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh";
 }
 
 function thinkingCapForBudget(profile: ToolBudgetProfile, options: { handoffOnly?: boolean; hasPrevious?: boolean; agent?: AgentDefinition }): Exclude<AgentThinkingLevel, "inherit"> | undefined {
@@ -3127,17 +3271,29 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-function extractLastAssistantText(messages: unknown[]): string {
-  for (const message of [...messages].reverse()) {
-    if (!message || typeof message !== "object") continue;
-    const maybe = message as { role?: unknown; content?: unknown };
-    if (maybe.role !== "assistant") continue;
-    if (typeof maybe.content === "string") return maybe.content;
-    if (Array.isArray(maybe.content)) {
-      return maybe.content.map((part) => typeof part?.text === "string" ? part.text : "").join("\n").trim();
-    }
+export function extractLastAssistantText(messages: unknown[]): string {
+  const texts = messages
+    .map(assistantTextFromMessage)
+    .filter((text) => text.trim().length > 0);
+  const last = texts.at(-1) ?? "";
+  const contractual = [...texts].reverse().find(hasAgentContractSection) ?? "";
+  if (contractual && contractual !== last && !hasAgentContractSection(last)) return [contractual, last].filter(Boolean).join("\n\n");
+  return last || contractual;
+}
+
+function assistantTextFromMessage(message: unknown): string {
+  if (!message || typeof message !== "object") return "";
+  const maybe = message as { role?: unknown; content?: unknown };
+  if (maybe.role !== "assistant") return "";
+  if (typeof maybe.content === "string") return maybe.content;
+  if (Array.isArray(maybe.content)) {
+    return maybe.content.map((part) => typeof part?.text === "string" ? part.text : "").join("\n").trim();
   }
   return "";
+}
+
+function hasAgentContractSection(text: string): boolean {
+  return /(?:^|\n)##\s+(?:Agent Handoff|Structured Handoff|Reviewer Verdict|Handoff)\b/i.test(text);
 }
 
 export function extractAssistantRuntimeError(messages: unknown[]): string | undefined {
@@ -3545,8 +3701,8 @@ function extractFindingLines(text: string): string[] {
 
 function firstSignalToolCall(metrics: RunStepMetrics): number {
   const readCalls = metrics.toolCallsByName.read ?? 0;
-  const snapshotCalls = metrics.toolCallsByName.chalin_project_snapshot ?? 0;
-  if ((metrics.filesRead?.length ?? 0) > 0 || snapshotCalls > 0) return Math.max(1, Math.min(metrics.toolCalls, snapshotCalls || readCalls || 1));
+  const discoveryCalls = metrics.toolCallsByName.chalin_project_discovery ?? 0;
+  if ((metrics.filesRead?.length ?? 0) > 0 || discoveryCalls > 0) return Math.max(1, Math.min(metrics.toolCalls, discoveryCalls || readCalls || 1));
   return metrics.toolCalls;
 }
 

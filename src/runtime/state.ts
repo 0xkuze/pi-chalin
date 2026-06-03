@@ -1,44 +1,40 @@
 import { Context, Effect, Layer, Ref } from "effect";
 import type { RouteDecision, RunState } from "../domain/schemas.ts";
 import {
-  DIRECT_NUDGE_FLAGS,
-  directNudgeFlagForKind,
+  INLINE_NUDGE_FLAGS,
+  inlineNudgeFlagForKind,
   isSemanticJudgeRelevantNudge,
-  judgeDirectCompletionPolicy,
-} from "./direct-policy.ts";
+  judgeInlineCompletionPolicy,
+} from "./inline-policy.ts";
 import type {
-  DirectNudgeKind,
-  DirectNudgePlan,
-  DirectNudgeSelectorInput,
-  DirectPolicySnapshot,
-  DirectToolCompletionAdapter,
-  DirectToolEvent,
-  DirectToolEventPhase,
+  InlineNudgeKind,
+  InlineNudgePlan,
+  InlineNudgeSelectorInput,
+  InlinePolicySnapshot,
+  InlineToolCompletionAdapter,
+  InlineToolEvent,
+  InlineToolEventPhase,
   PolicyJudgeDecision,
   SemanticPolicyJudgeRequest,
   SemanticPolicyJudgeResult,
-} from "./direct-policy.ts";
-export { judgeDirectCompletionPolicy, selectDirectNudgePlan } from "./direct-policy.ts";
+} from "./inline-policy.ts";
+export { judgeInlineCompletionPolicy, selectInlineNudgePlan } from "./inline-policy.ts";
 export type {
-  DirectNudgeKind,
-  DirectNudgePlan,
-  DirectNudgeSelectorInput,
-  DirectPolicySnapshot,
-  DirectToolCompletionAdapter,
-  DirectToolEvent,
-  DirectToolEventPhase,
+  InlineNudgeKind,
+  InlineNudgePlan,
+  InlineNudgeSelectorInput,
+  InlinePolicySnapshot,
+  InlineToolCompletionAdapter,
+  InlineToolEvent,
+  InlineToolEventPhase,
   PolicyJudgeDecision,
   PolicyJudgeNextAction,
   SemanticPolicyJudgeRequest,
   SemanticPolicyJudgeResult,
   SemanticPolicyJudgeTrace,
-} from "./direct-policy.ts";
+} from "./inline-policy.ts";
 
 export type ChalinRouteOutcome = "dry-run" | "ask" | "block" | "failed" | "paused" | "complete";
-
-interface DecisionToolGateState {
-  originalTools: string[];
-}
 
 interface ChalinRouteInvocation {
   id: number;
@@ -47,11 +43,10 @@ interface ChalinRouteInvocation {
   outcome?: ChalinRouteOutcome;
 }
 
-interface DirectCompletionState {
+interface InlineWorkState {
   turnId: number;
-  docsOnlyPathPrompt: boolean;
   cwd?: string;
-  toolEvents: DirectToolEvent[];
+  toolEvents: InlineToolEvent[];
   mutationObserved: boolean;
   sourceMutationObserved: boolean;
   testMutationObserved: boolean;
@@ -90,7 +85,6 @@ interface DirectCompletionState {
   postVerificationShellNudgeSent: boolean;
   postVerificationExplorationNudgeSent: boolean;
   readbackStopNudgeSent: boolean;
-  docsEvidenceLoopNudgeSent: boolean;
   existingFileRewriteNudgeSent: boolean;
   mutationLoopNudgeSent: boolean;
   sourceAndTestReadyNudgeSent: boolean;
@@ -113,7 +107,7 @@ interface RuntimeStateServiceShape {
   readonly lastRun: Ref.Ref<RunState | undefined>;
   readonly liveStepSessions: Ref.Ref<Map<string, LiveStepSessionRef>>;
   readonly routeInvocations: Ref.Ref<ChalinRouteInvocation[]>;
-  readonly directCompletion: Ref.Ref<DirectCompletionState>;
+  readonly inlineWork: Ref.Ref<InlineWorkState>;
   readonly skillOverrides: Ref.Ref<SkillOverrideState>;
 }
 
@@ -129,7 +123,7 @@ const RuntimeStateLayer = Layer.effect(RuntimeStateService, Effect.gen(function*
     lastRun: yield* Ref.make<RunState | undefined>(undefined),
     liveStepSessions: yield* Ref.make(new Map<string, LiveStepSessionRef>()),
     routeInvocations: yield* Ref.make<ChalinRouteInvocation[]>([]),
-    directCompletion: yield* Ref.make(freshDirectCompletionState()),
+    inlineWork: yield* Ref.make(freshInlineWorkState()),
     skillOverrides: yield* Ref.make<SkillOverrideState>(freshSkillOverrideState()),
   };
 }));
@@ -141,13 +135,9 @@ const runtimeState = Effect.runSync(Effect.gen(function* () {
 const lastRunRef = runtimeState.lastRun;
 const liveStepSessions = refBackedMap(runtimeState.liveStepSessions);
 const routeInvocations = refBackedArray(runtimeState.routeInvocations);
-const directCompletion = refBackedObject(runtimeState.directCompletion);
+const inlineWork = refBackedObject(runtimeState.inlineWork);
 const skillOverridesRef = runtimeState.skillOverrides;
-const decisionToolGates = new WeakMap<object, DecisionToolGateState>();
-const resolvedDecisionToolGates = new WeakSet<object>();
-let directDecisionConfirmedOwners = new WeakSet<object>();
-let latestDecisionToolGate: DecisionToolGateState | undefined;
-let directCompletionTurnSequence = directCompletion.turnId;
+let inlineWorkTurnSequence = inlineWork.turnId;
 
 function getRef<T>(ref: Ref.Ref<T>): T {
   return Effect.runSync(Ref.get(ref));
@@ -264,62 +254,60 @@ export function clearSkillOverridesForTurn(): void {
 
 export function beginChalinTurn(options: { prompt?: string; cwd?: string } = {}): void {
   resetRefBackedArray(routeInvocations);
-  replaceRefBackedObject(directCompletion, freshDirectCompletionState(nextDirectCompletionTurnId()));
+  replaceRefBackedObject(inlineWork, freshInlineWorkState(nextInlineWorkTurnId()));
   clearSkillOverridesForTurn();
-  directCompletion.cwd = options.cwd;
-  directCompletion.promptCodePaths = new Set(promptPathTokens(options.prompt ?? "").filter(isCodeLikePath).map(normalizeWorkflowPath));
-  directCompletion.docsOnlyPathPrompt = promptLooksDocsPathOnly(options.prompt ?? "");
+  inlineWork.cwd = options.cwd;
+  inlineWork.promptCodePaths = new Set(promptPathTokens(options.prompt ?? "").filter(isCodeLikePath).map(normalizeWorkflowPath));
 }
 
-export function recordDirectToolStart(options: Omit<DirectToolEvent, "phase">): void {
-  appendDirectToolEvent({ ...options, phase: "start" });
+export function recordInlineToolStart(options: Omit<InlineToolEvent, "phase">): void {
+  appendInlineToolEvent({ ...options, phase: "start" });
 }
 
-export function getDirectToolEventsForTests(): DirectToolEvent[] {
-  return directCompletion.toolEvents.map((event) => ({ ...event }));
+export function getInlineToolEventsForTests(): InlineToolEvent[] {
+  return inlineWork.toolEvents.map((event) => ({ ...event }));
 }
 
-export function getDirectPolicySnapshot(): DirectPolicySnapshot {
-  return directPolicySnapshot();
+export function getInlinePolicySnapshot(): InlinePolicySnapshot {
+  return inlinePolicySnapshot();
 }
 
 export function recordSemanticPolicyJudgeResult(result: SemanticPolicyJudgeResult): void {
-  directCompletion.semanticJudgeResults.push(result);
-  if (directCompletion.semanticJudgeResults.length > 20) {
-    directCompletion.semanticJudgeResults.splice(0, directCompletion.semanticJudgeResults.length - 20);
+  inlineWork.semanticJudgeResults.push(result);
+  if (inlineWork.semanticJudgeResults.length > 20) {
+    inlineWork.semanticJudgeResults.splice(0, inlineWork.semanticJudgeResults.length - 20);
   }
 }
 
 export function getSemanticPolicyJudgeResultsForTests(): SemanticPolicyJudgeResult[] {
-  return directCompletion.semanticJudgeResults.map(cloneSemanticPolicyJudgeResult);
+  return inlineWork.semanticJudgeResults.map(cloneSemanticPolicyJudgeResult);
 }
 
 export function isSemanticPolicyJudgeRequestFresh(request: SemanticPolicyJudgeRequest): boolean {
-  if (request.turnId !== directCompletion.turnId) return false;
-  if (!directCompletion.semanticJudgeRequestKeys.has(request.key)) return false;
+  if (request.turnId !== inlineWork.turnId) return false;
+  if (!inlineWork.semanticJudgeRequestKeys.has(request.key)) return false;
   return request.key === semanticPolicyJudgeRequestKey(request.trigger, {
-    verificationCommand: directCompletion.verificationCommand,
-    docsOnlyMutation: directDocsOnlyMutation(),
+    verificationCommand: inlineWork.verificationCommand,
+    docsOnlyMutation: inlineDocsOnlyMutation(),
   });
 }
 
-export function getDirectDerivedGapDiagnosticsForTests(): { weakTestCoverage: boolean; packageMetadata: boolean; parallelSurface?: { expected: string; actual: string[] } } {
+export function getInlineDerivedGapDiagnosticsForTests(): { weakTestCoverage: boolean; packageMetadata: boolean; parallelSurface?: { expected: string; actual: string[] } } {
   return {
-    weakTestCoverage: directWeakTestCoverageGap(),
-    packageMetadata: directPackageMetadataGap(),
-    parallelSurface: directParallelSurfaceGap(),
+    weakTestCoverage: inlineWeakTestCoverageGap(),
+    packageMetadata: inlinePackageMetadataGap(),
+    parallelSurface: inlineParallelSurfaceGap(),
   };
 }
 
-export function recordDirectToolCompletion(options: { toolName: string; isError?: boolean; command?: string; path?: string; argsText?: string }): DirectToolCompletionAdapter {
-  appendDirectToolEvent({ ...options, phase: "completed" });
+export function recordInlineToolCompletion(options: { toolName: string; isError?: boolean; command?: string; path?: string; argsText?: string }): InlineToolCompletionAdapter {
+  appendInlineToolEvent({ ...options, phase: "completed" });
   let shouldProgressNudge = false;
   let shouldWorkspaceBoundaryNudge = false;
   let shouldDocsShellNudge = false;
   let shouldPreMutationVerificationNudge = false;
   let shouldPostVerificationShellNudge = false;
   let shouldPostVerificationExplorationNudge = false;
-  let shouldDocsEvidenceLoopNudge = false;
   let shouldLocatorLoopNudge = false;
   let shouldExistingFileRewriteNudge = false;
   let shouldMutationLoopNudge = false;
@@ -334,285 +322,281 @@ export function recordDirectToolCompletion(options: { toolName: string; isError?
   let shouldTerminalCompletionNudge = false;
   let shouldPostTerminalDriftNudge = false;
   if (
-    directCompletion.terminalActionObserved
+    inlineWork.terminalActionObserved
     && !options.isError
     && isPostTerminalDriftTool(options.toolName)
     && !isAllowedTerminalFollowupCommand(options.command)
-    && !directCompletion.postTerminalDriftNudgeSent
+    && !inlineWork.postTerminalDriftNudgeSent
   ) {
     shouldPostTerminalDriftNudge = true;
-    directCompletion.postTerminalDriftNudgeSent = true;
+    inlineWork.postTerminalDriftNudgeSent = true;
   }
-  const coverageReviewWasRequested = directCompletion.testCoverageNudgeSent;
-  if (!directCompletion.mutationObserved && !options.isError) {
+  const coverageReviewWasRequested = inlineWork.testCoverageNudgeSent;
+  if (!inlineWork.mutationObserved && !options.isError) {
     recordPreMutationEvidenceTool(options.toolName);
-    if (shouldNudgeDocsEvidenceLoop()) {
-      shouldDocsEvidenceLoopNudge = true;
-      directCompletion.docsEvidenceLoopNudgeSent = true;
-    }
     if (shouldNudgeLocatorLoop()) {
       shouldLocatorLoopNudge = true;
-      directCompletion.locatorLoopNudgeSent = true;
+      inlineWork.locatorLoopNudgeSent = true;
     }
   }
   if (options.toolName === "read" && options.path && !options.isError) {
-    directCompletion.readPaths.add(normalizeWorkflowPath(options.path));
+    inlineWork.readPaths.add(normalizeWorkflowPath(options.path));
   }
   if (options.toolName === "edit" || options.toolName === "write") {
-    if (options.isError) return directCompletionAdapter({ shouldProgressNudge: false, shouldReadyToVerifyNudge: false, shouldFailureNudge: false, shouldCompletionNudge: false, shouldTestCoverageNudge: false, shouldWeakTestCoverageNudge: false, shouldPackageMetadataNudge: false, shouldParallelSurfaceNudge: false, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldTerminalCompletionNudge, shouldPostTerminalDriftNudge, shouldPreMutationVerificationNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldDocsEvidenceLoopNudge, shouldLocatorLoopNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, docsOnlyMutation: directDocsOnlyMutation() });
+    if (options.isError) return inlineWorkAdapter({ shouldProgressNudge: false, shouldReadyToVerifyNudge: false, shouldFailureNudge: false, shouldCompletionNudge: false, shouldTestCoverageNudge: false, shouldWeakTestCoverageNudge: false, shouldPackageMetadataNudge: false, shouldParallelSurfaceNudge: false, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldTerminalCompletionNudge, shouldPostTerminalDriftNudge, shouldPreMutationVerificationNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldLocatorLoopNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, docsOnlyMutation: inlineDocsOnlyMutation() });
     justMutated = true;
-    const recoveringFromVerificationFailure = directCompletion.failedVerificationNudgeSent && !directCompletion.verificationObserved;
-    directCompletion.mutationObserved = true;
-    directCompletion.mutationToolCount += 1;
-    if (!recoveringFromVerificationFailure && !directCompletion.mutationLoopNudgeSent && directCompletion.mutationToolCount >= 3 && !directCompletion.verificationObserved) {
+    const recoveringFromVerificationFailure = inlineWork.failedVerificationNudgeSent && !inlineWork.verificationObserved;
+    inlineWork.mutationObserved = true;
+    inlineWork.mutationToolCount += 1;
+    if (!recoveringFromVerificationFailure && !inlineWork.mutationLoopNudgeSent && inlineWork.mutationToolCount >= 3 && !inlineWork.verificationObserved) {
       shouldMutationLoopNudge = true;
-      directCompletion.mutationLoopNudgeSent = true;
+      inlineWork.mutationLoopNudgeSent = true;
     }
     const changedPath = options.path ?? extractPathFromArgsText(options.argsText);
     if (changedPath) {
-      directCompletion.changedPaths.add(changedPath);
-      if (markOutOfWorkspaceMutation(changedPath) && !directCompletion.outOfWorkspaceMutationNudgeSent) {
+      inlineWork.changedPaths.add(changedPath);
+      if (markOutOfWorkspaceMutation(changedPath) && !inlineWork.outOfWorkspaceMutationNudgeSent) {
         shouldWorkspaceBoundaryNudge = true;
-        directCompletion.outOfWorkspaceMutationNudgeSent = true;
+        inlineWork.outOfWorkspaceMutationNudgeSent = true;
       }
       if (
         options.toolName === "write"
         && !isDocsMarkdownPath(changedPath)
-        && directCompletion.readPaths.has(normalizeWorkflowPath(changedPath))
-        && !directCompletion.existingFileRewriteNudgeSent
+        && inlineWork.readPaths.has(normalizeWorkflowPath(changedPath))
+        && !inlineWork.existingFileRewriteNudgeSent
         && !isSmallFullFileWrite(options.argsText)
       ) {
         shouldExistingFileRewriteNudge = true;
-        directCompletion.existingFileRewriteNudgeSent = true;
+        inlineWork.existingFileRewriteNudgeSent = true;
       }
       if (isTestLikePath(changedPath)) {
-        directCompletion.testMutationObserved = true;
-        if (!directWeakTestCoverageGap()) directCompletion.weakTestCoverageNudgeSent = false;
+        inlineWork.testMutationObserved = true;
+        if (!inlineWeakTestCoverageGap()) inlineWork.weakTestCoverageNudgeSent = false;
       } else if (!isDocsMarkdownPath(changedPath)) {
-        directCompletion.sourceMutationObserved = true;
+        inlineWork.sourceMutationObserved = true;
       }
       if (isPackageJsonPath(changedPath)) {
-        if (!directPackageMetadataGap()) directCompletion.packageMetadataNudgeSent = false;
+        if (!inlinePackageMetadataGap()) inlineWork.packageMetadataNudgeSent = false;
       }
       if (coverageReviewWasRequested && !isDocsMarkdownPath(changedPath)) {
-        directCompletion.testCoverageReviewObserved = true;
+        inlineWork.testCoverageReviewObserved = true;
       }
     } else {
-      directCompletion.sourceMutationObserved = true;
-      if (coverageReviewWasRequested) directCompletion.testCoverageReviewObserved = true;
+      inlineWork.sourceMutationObserved = true;
+      if (coverageReviewWasRequested) inlineWork.testCoverageReviewObserved = true;
     }
-    if (directCompletion.verificationObserved || directCompletion.verificationCommand || directCompletion.failedVerificationNudgeSent || directCompletion.nudgeSent) {
+    if (inlineWork.verificationObserved || inlineWork.verificationCommand || inlineWork.failedVerificationNudgeSent || inlineWork.nudgeSent) {
       staleVerificationReset = true;
-      directCompletion.verificationObserved = false;
-      directCompletion.verificationCommand = undefined;
-      directCompletion.readyToVerifyNudgeSent = false;
-      directCompletion.failedVerificationNudgeSent = false;
-      directCompletion.postVerificationShellNudgeSent = false;
-      directCompletion.postVerificationExplorationNudgeSent = false;
-      directCompletion.readbackStopNudgeSent = false;
-      directCompletion.verificationLoopNudgeSent = false;
-      directCompletion.sourceAndTestReadyNudgeSent = false;
-      directCompletion.postFailureEvidenceToolCount = 0;
-      directCompletion.postFailureEvidenceNudgeSent = false;
-      directCompletion.verificationAttemptCount = 0;
-      directCompletion.weakTestCoverageNudgeSent = false;
-      directCompletion.packageMetadataNudgeSent = false;
-      directCompletion.parallelSurfaceNudgeSent = false;
-      directCompletion.nudgeSent = false;
+      inlineWork.verificationObserved = false;
+      inlineWork.verificationCommand = undefined;
+      inlineWork.readyToVerifyNudgeSent = false;
+      inlineWork.failedVerificationNudgeSent = false;
+      inlineWork.postVerificationShellNudgeSent = false;
+      inlineWork.postVerificationExplorationNudgeSent = false;
+      inlineWork.readbackStopNudgeSent = false;
+      inlineWork.verificationLoopNudgeSent = false;
+      inlineWork.sourceAndTestReadyNudgeSent = false;
+      inlineWork.postFailureEvidenceToolCount = 0;
+      inlineWork.postFailureEvidenceNudgeSent = false;
+      inlineWork.verificationAttemptCount = 0;
+      inlineWork.weakTestCoverageNudgeSent = false;
+      inlineWork.packageMetadataNudgeSent = false;
+      inlineWork.parallelSurfaceNudgeSent = false;
+      inlineWork.nudgeSent = false;
     }
     if (
-      !directCompletion.sourceAndTestReadyNudgeSent
-      && !directCompletion.verificationObserved
-      && directCompletion.sourceMutationObserved
-      && directCompletion.testMutationObserved
-      && directCompletion.mutationToolCount >= 2
+      !inlineWork.sourceAndTestReadyNudgeSent
+      && !inlineWork.verificationObserved
+      && inlineWork.sourceMutationObserved
+      && inlineWork.testMutationObserved
+      && inlineWork.mutationToolCount >= 2
     ) {
       shouldSourceAndTestReadyNudge = true;
-      directCompletion.sourceAndTestReadyNudgeSent = true;
+      inlineWork.sourceAndTestReadyNudgeSent = true;
     }
-    shouldProgressNudge = !directCompletion.progressNudgeSent;
-    if (shouldProgressNudge) directCompletion.progressNudgeSent = true;
+    shouldProgressNudge = !inlineWork.progressNudgeSent;
+    if (shouldProgressNudge) inlineWork.progressNudgeSent = true;
   }
   let shouldFailureNudge = false;
-  const docsOnlyMutation = directDocsOnlyMutation();
+  const docsOnlyMutation = inlineDocsOnlyMutation();
   const verificationLeftWorkspace = options.toolName === "bash"
-    && directCompletion.mutationObserved
+    && inlineWork.mutationObserved
     && bashCommandLeavesWorkspace(options.command);
-  if (verificationLeftWorkspace && !directCompletion.outOfWorkspaceMutationNudgeSent) {
+  if (verificationLeftWorkspace && !inlineWork.outOfWorkspaceMutationNudgeSent) {
     shouldWorkspaceBoundaryNudge = true;
-    directCompletion.outOfWorkspaceMutationNudgeSent = true;
+    inlineWork.outOfWorkspaceMutationNudgeSent = true;
   }
   if (
     options.toolName === "bash"
-    && !directCompletion.mutationObserved
-    && directCompletion.promptCodePaths.size > 0
+    && !inlineWork.mutationObserved
+    && inlineWork.promptCodePaths.size > 0
     && isVerificationCommand(options.command)
-    && !directCompletion.preMutationVerificationNudgeSent
+    && !inlineWork.preMutationVerificationNudgeSent
   ) {
     shouldPreMutationVerificationNudge = true;
-    directCompletion.preMutationVerificationNudgeSent = true;
+    inlineWork.preMutationVerificationNudgeSent = true;
   }
-  if (options.toolName === "read" && options.path && directCompletion.testCoverageNudgeSent && isCoverageReviewPath(options.path) && !options.isError) {
-    directCompletion.testCoverageReviewObserved = true;
+  if (options.toolName === "read" && options.path && inlineWork.testCoverageNudgeSent && isCoverageReviewPath(options.path) && !options.isError) {
+    inlineWork.testCoverageReviewObserved = true;
   }
-  if (options.toolName === "bash" && directCompletion.docsOnlyPathPrompt && docsOnlyMutation) {
-      shouldDocsShellNudge = !directCompletion.docsPostWriteShellNudgeSent;
-      directCompletion.docsPostWriteShellNudgeSent = true;
+  if (options.toolName === "bash" && docsOnlyMutation) {
+      shouldDocsShellNudge = !inlineWork.docsPostWriteShellNudgeSent;
+      inlineWork.docsPostWriteShellNudgeSent = true;
   }
   if (
     options.toolName === "bash"
-    && directCompletion.mutationObserved
-    && directCompletion.verificationObserved
-    && !directDocsOnlyMutation()
-    && !directCompletion.postVerificationShellNudgeSent
+    && inlineWork.mutationObserved
+    && inlineWork.verificationObserved
+    && !inlineDocsOnlyMutation()
+    && !inlineWork.postVerificationShellNudgeSent
   ) {
     shouldPostVerificationShellNudge = true;
-    directCompletion.postVerificationShellNudgeSent = true;
+    inlineWork.postVerificationShellNudgeSent = true;
   }
-  if (options.toolName === "read" && docsOnlyMutation && options.path && [...directCompletion.changedPaths].some((changedPath) => sameWorkflowPath(changedPath, options.path ?? "")) && !options.isError) {
-    directCompletion.verificationObserved = true;
-    directCompletion.verificationCommand = `read ${options.path}`;
+  if (options.toolName === "read" && docsOnlyMutation && options.path && [...inlineWork.changedPaths].some((changedPath) => sameWorkflowPath(changedPath, options.path ?? "")) && !options.isError) {
+    inlineWork.verificationObserved = true;
+    inlineWork.verificationCommand = `read ${options.path}`;
   } else if (options.toolName === "bash" && docsOnlyMutation) {
-    directCompletion.verificationObserved = false;
-    directCompletion.verificationCommand = undefined;
-  } else if (options.toolName === "bash" && directCompletion.mutationObserved && isVerificationCommand(options.command)) {
-    directCompletion.verificationCommand = options.command?.trim();
-    directCompletion.verificationAttemptCount += 1;
+    inlineWork.verificationObserved = false;
+    inlineWork.verificationCommand = undefined;
+  } else if (options.toolName === "bash" && inlineWork.mutationObserved && isVerificationCommand(options.command)) {
+    inlineWork.verificationCommand = options.command?.trim();
+    inlineWork.verificationAttemptCount += 1;
     if (verificationLeftWorkspace) {
-      directCompletion.verificationObserved = false;
+      inlineWork.verificationObserved = false;
     } else if (options.isError) {
-      shouldFailureNudge = !directCompletion.failedVerificationNudgeSent;
-      if (shouldFailureNudge) directCompletion.failedVerificationNudgeSent = true;
-      if (!directCompletion.verificationLoopNudgeSent && directCompletion.verificationAttemptCount >= 2) {
+      shouldFailureNudge = !inlineWork.failedVerificationNudgeSent;
+      if (shouldFailureNudge) inlineWork.failedVerificationNudgeSent = true;
+      if (!inlineWork.verificationLoopNudgeSent && inlineWork.verificationAttemptCount >= 2) {
         shouldVerificationLoopNudge = true;
-        directCompletion.verificationLoopNudgeSent = true;
+        inlineWork.verificationLoopNudgeSent = true;
       }
     } else {
-      directCompletion.verificationObserved = true;
-      if (directCompletion.outOfWorkspaceMutationObserved && hasInWorkspaceMutation()) {
-        directCompletion.outOfWorkspaceMutationObserved = false;
-        directCompletion.outOfWorkspaceMutationPath = undefined;
+      inlineWork.verificationObserved = true;
+      if (inlineWork.outOfWorkspaceMutationObserved && hasInWorkspaceMutation()) {
+        inlineWork.outOfWorkspaceMutationObserved = false;
+        inlineWork.outOfWorkspaceMutationPath = undefined;
       }
-      if (!directCompletion.verificationLoopNudgeSent && directCompletion.verificationAttemptCount >= 3) {
+      if (!inlineWork.verificationLoopNudgeSent && inlineWork.verificationAttemptCount >= 3) {
         shouldVerificationLoopNudge = true;
-        directCompletion.verificationLoopNudgeSent = true;
+        inlineWork.verificationLoopNudgeSent = true;
       }
     }
-  } else if (options.toolName === "bash" && directCompletion.mutationObserved && options.isError) {
-    shouldFailureNudge = !directCompletion.failedVerificationNudgeSent;
-    if (shouldFailureNudge) directCompletion.failedVerificationNudgeSent = true;
+  } else if (options.toolName === "bash" && inlineWork.mutationObserved && options.isError) {
+    shouldFailureNudge = !inlineWork.failedVerificationNudgeSent;
+    if (shouldFailureNudge) inlineWork.failedVerificationNudgeSent = true;
   } else if (options.isError) {
-    return directCompletionAdapter({ shouldProgressNudge, shouldReadyToVerifyNudge: false, shouldFailureNudge: false, shouldCompletionNudge: false, shouldTestCoverageNudge: false, shouldWeakTestCoverageNudge: false, shouldPackageMetadataNudge: false, shouldParallelSurfaceNudge: false, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldTerminalCompletionNudge, shouldPostTerminalDriftNudge, shouldPreMutationVerificationNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldDocsEvidenceLoopNudge, shouldLocatorLoopNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, verificationCommand: directCompletion.verificationCommand, docsOnlyMutation });
+    return inlineWorkAdapter({ shouldProgressNudge, shouldReadyToVerifyNudge: false, shouldFailureNudge: false, shouldCompletionNudge: false, shouldTestCoverageNudge: false, shouldWeakTestCoverageNudge: false, shouldPackageMetadataNudge: false, shouldParallelSurfaceNudge: false, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldTerminalCompletionNudge, shouldPostTerminalDriftNudge, shouldPreMutationVerificationNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldLocatorLoopNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, verificationCommand: inlineWork.verificationCommand, docsOnlyMutation });
   }
-  if (options.toolName === "bash" && !options.isError && isTerminalDirectCommand(options.command)) {
-    directCompletion.terminalActionObserved = true;
-    directCompletion.terminalActionCommand = options.command?.trim();
-    if (!directCompletion.terminalCompletionNudgeSent) {
+  if (options.toolName === "bash" && !options.isError && isTerminalExternalActionCommand(options.command)) {
+    inlineWork.terminalActionObserved = true;
+    inlineWork.terminalActionCommand = options.command?.trim();
+    if (!inlineWork.terminalCompletionNudgeSent) {
       shouldTerminalCompletionNudge = true;
-      directCompletion.terminalCompletionNudgeSent = true;
+      inlineWork.terminalCompletionNudgeSent = true;
     }
   }
   if (
-    directCompletion.failedVerificationNudgeSent
-    && !directCompletion.verificationObserved
+    inlineWork.failedVerificationNudgeSent
+    && !inlineWork.verificationObserved
     && !justMutated
     && isPostFailureEvidenceTool(options.toolName, options.command)
     && !options.isError
   ) {
-    directCompletion.postFailureEvidenceToolCount += 1;
-    if (!directCompletion.postFailureEvidenceNudgeSent && directCompletion.postFailureEvidenceToolCount >= 2) {
+    inlineWork.postFailureEvidenceToolCount += 1;
+    if (!inlineWork.postFailureEvidenceNudgeSent && inlineWork.postFailureEvidenceToolCount >= 2) {
       shouldPostFailureEvidenceNudge = true;
-      directCompletion.postFailureEvidenceNudgeSent = true;
+      inlineWork.postFailureEvidenceNudgeSent = true;
     }
   }
-  const shouldReadyToVerifyNudge = directCompletion.mutationObserved
-    && !directCompletion.verificationObserved
-    && !directCompletion.readyToVerifyNudgeSent
+  const shouldReadyToVerifyNudge = inlineWork.mutationObserved
+    && !inlineWork.verificationObserved
+    && !inlineWork.readyToVerifyNudgeSent
     && options.toolName !== "bash"
     && !shouldSourceAndTestReadyNudge
     && (docsOnlyMutation || staleVerificationReset || (!justMutated && !shouldFailureNudge && !options.isError));
-  if (shouldReadyToVerifyNudge) directCompletion.readyToVerifyNudgeSent = true;
-  const needsWeakTestCoverageReview = directCompletion.verificationObserved
-    && directCompletion.sourceMutationObserved
-    && directCompletion.testMutationObserved
-    && directWeakTestCoverageGap();
-  const shouldWeakTestCoverageNudge = directCompletion.sourceMutationObserved
-    && directCompletion.testMutationObserved
-    && directWeakTestCoverageGap()
-    && !directCompletion.weakTestCoverageNudgeSent
-    && (justMutated || directCompletion.verificationObserved);
-  if (shouldWeakTestCoverageNudge) directCompletion.weakTestCoverageNudgeSent = true;
-  const needsPackageMetadataReview = directCompletion.verificationObserved
-    && directPackageMetadataGap();
-  const shouldPackageMetadataNudge = directPackageMetadataGap()
-    && !directCompletion.packageMetadataNudgeSent
-    && (justMutated || directCompletion.verificationObserved);
-  if (shouldPackageMetadataNudge) directCompletion.packageMetadataNudgeSent = true;
-  const parallelSurfaceGap = directParallelSurfaceGap();
-  const shouldParallelSurfaceNudge = Boolean(parallelSurfaceGap) && !directCompletion.parallelSurfaceNudgeSent;
-  if (shouldParallelSurfaceNudge) directCompletion.parallelSurfaceNudgeSent = true;
-  const needsMissingTestCoverageReview = directCompletion.verificationObserved
+  if (shouldReadyToVerifyNudge) inlineWork.readyToVerifyNudgeSent = true;
+  const needsWeakTestCoverageReview = inlineWork.verificationObserved
+    && inlineWork.sourceMutationObserved
+    && inlineWork.testMutationObserved
+    && inlineWeakTestCoverageGap();
+  const shouldWeakTestCoverageNudge = inlineWork.sourceMutationObserved
+    && inlineWork.testMutationObserved
+    && inlineWeakTestCoverageGap()
+    && !inlineWork.weakTestCoverageNudgeSent
+    && (justMutated || inlineWork.verificationObserved);
+  if (shouldWeakTestCoverageNudge) inlineWork.weakTestCoverageNudgeSent = true;
+  const needsPackageMetadataReview = inlineWork.verificationObserved
+    && inlinePackageMetadataGap();
+  const shouldPackageMetadataNudge = inlinePackageMetadataGap()
+    && !inlineWork.packageMetadataNudgeSent
+    && (justMutated || inlineWork.verificationObserved);
+  if (shouldPackageMetadataNudge) inlineWork.packageMetadataNudgeSent = true;
+  const parallelSurfaceGap = inlineParallelSurfaceGap();
+  const shouldParallelSurfaceNudge = Boolean(parallelSurfaceGap) && !inlineWork.parallelSurfaceNudgeSent;
+  if (shouldParallelSurfaceNudge) inlineWork.parallelSurfaceNudgeSent = true;
+  const needsMissingTestCoverageReview = inlineWork.verificationObserved
     && sourceMutationWithoutTestMutation();
   const needsTestCoverageReview = needsMissingTestCoverageReview || needsWeakTestCoverageReview || needsPackageMetadataReview || Boolean(parallelSurfaceGap);
-  const shouldTestCoverageNudge = needsMissingTestCoverageReview && !directCompletion.testCoverageNudgeSent;
-  if (shouldTestCoverageNudge) directCompletion.testCoverageNudgeSent = true;
+  const shouldTestCoverageNudge = needsMissingTestCoverageReview && !inlineWork.testCoverageNudgeSent;
+  if (shouldTestCoverageNudge) inlineWork.testCoverageNudgeSent = true;
   const changedPathReadbackObserved = options.toolName === "read"
     && Boolean(options.path)
     && !options.isError
-    && [...directCompletion.changedPaths].some((changedPath) => sameWorkflowPath(changedPath, options.path ?? ""));
+    && [...inlineWork.changedPaths].some((changedPath) => sameWorkflowPath(changedPath, options.path ?? ""));
   if (
-    directCompletion.mutationObserved
-    && directCompletion.verificationObserved
+    inlineWork.mutationObserved
+    && inlineWork.verificationObserved
     && !needsTestCoverageReview
     && !changedPathReadbackObserved
-    && !directDocsOnlyMutation()
+    && !inlineDocsOnlyMutation()
     && isPostVerificationExplorationTool(options.toolName)
-    && !directCompletion.postVerificationExplorationNudgeSent
+    && !inlineWork.postVerificationExplorationNudgeSent
   ) {
     shouldPostVerificationExplorationNudge = true;
-    directCompletion.postVerificationExplorationNudgeSent = true;
+    inlineWork.postVerificationExplorationNudgeSent = true;
   }
-  let shouldCompletionNudge = directCompletion.mutationObserved
-    && directCompletion.verificationObserved
+  let shouldCompletionNudge = inlineWork.mutationObserved
+    && inlineWork.verificationObserved
     && !needsTestCoverageReview
-    && !directCompletion.outOfWorkspaceMutationObserved
-    && !directCompletion.nudgeSent;
+    && !inlineWork.outOfWorkspaceMutationObserved
+    && !inlineWork.nudgeSent;
   if (
     !shouldCompletionNudge
     && changedPathReadbackObserved
-    && directCompletion.mutationObserved
-    && directCompletion.verificationObserved
+    && inlineWork.mutationObserved
+    && inlineWork.verificationObserved
     && !needsTestCoverageReview
-    && !directCompletion.outOfWorkspaceMutationObserved
-    && !directDocsOnlyMutation()
-    && !directCompletion.readbackStopNudgeSent
+    && !inlineWork.outOfWorkspaceMutationObserved
+    && !inlineDocsOnlyMutation()
+    && !inlineWork.readbackStopNudgeSent
   ) {
     shouldCompletionNudge = true;
-    directCompletion.readbackStopNudgeSent = true;
+    inlineWork.readbackStopNudgeSent = true;
   }
-  if (shouldCompletionNudge) directCompletion.nudgeSent = true;
-  return directCompletionAdapter({ shouldProgressNudge, shouldReadyToVerifyNudge, shouldFailureNudge, shouldCompletionNudge, shouldTestCoverageNudge, shouldWeakTestCoverageNudge, shouldPackageMetadataNudge, shouldParallelSurfaceNudge, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldTerminalCompletionNudge, shouldPostTerminalDriftNudge, shouldPreMutationVerificationNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldDocsEvidenceLoopNudge, shouldLocatorLoopNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, verificationCommand: directCompletion.verificationCommand, docsOnlyMutation });
+  if (shouldCompletionNudge) inlineWork.nudgeSent = true;
+  return inlineWorkAdapter({ shouldProgressNudge, shouldReadyToVerifyNudge, shouldFailureNudge, shouldCompletionNudge, shouldTestCoverageNudge, shouldWeakTestCoverageNudge, shouldPackageMetadataNudge, shouldParallelSurfaceNudge, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldTerminalCompletionNudge, shouldPostTerminalDriftNudge, shouldPreMutationVerificationNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldLocatorLoopNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, verificationCommand: inlineWork.verificationCommand, docsOnlyMutation });
 }
 
-function directCompletionAdapter(raw: DirectNudgeSelectorInput): DirectToolCompletionAdapter {
-  const policyJudge = withAutomaticSemanticPolicyReview(judgeDirectCompletionPolicy(raw), raw);
+function inlineWorkAdapter(raw: InlineNudgeSelectorInput): InlineToolCompletionAdapter {
+  const policyJudge = withAutomaticSemanticPolicyReview(judgeInlineCompletionPolicy(raw), raw);
   const plan = policyJudge.nudgeKind
     ? { kind: policyJudge.nudgeKind, verificationCommand: raw.verificationCommand, docsOnlyMutation: raw.docsOnlyMutation, judge: policyJudge }
     : undefined;
-  const adapter: DirectToolCompletionAdapter = { ...raw, plan, policyJudge };
-  for (const flag of DIRECT_NUDGE_FLAGS) {
+  const adapter: InlineToolCompletionAdapter = { ...raw, plan, policyJudge };
+  for (const flag of INLINE_NUDGE_FLAGS) {
     adapter[flag] = false;
   }
-  if (plan) adapter[directNudgeFlagForKind(plan.kind)] = true;
+  if (plan) adapter[inlineNudgeFlagForKind(plan.kind)] = true;
   return adapter;
 }
 
-function withAutomaticSemanticPolicyReview(judge: PolicyJudgeDecision, input: DirectNudgeSelectorInput): PolicyJudgeDecision {
+function withAutomaticSemanticPolicyReview(judge: PolicyJudgeDecision, input: InlineNudgeSelectorInput): PolicyJudgeDecision {
   const request = semanticPolicyJudgeRequest(judge, input);
   return request ? { ...judge, semanticReview: request } : judge;
 }
 
-function semanticPolicyJudgeRequest(judge: PolicyJudgeDecision, input: DirectNudgeSelectorInput): SemanticPolicyJudgeRequest | undefined {
+function semanticPolicyJudgeRequest(judge: PolicyJudgeDecision, input: InlineNudgeSelectorInput): SemanticPolicyJudgeRequest | undefined {
   const reasons = semanticPolicyJudgeReasons(judge, input);
   if (reasons.length === 0) return undefined;
   const trigger = judge.nudgeKind ?? "uncertain-continue";
@@ -620,71 +604,83 @@ function semanticPolicyJudgeRequest(judge: PolicyJudgeDecision, input: DirectNud
     verificationCommand: input.verificationCommand,
     docsOnlyMutation: input.docsOnlyMutation,
   });
-  if (directCompletion.semanticJudgeRequestKeys.has(key)) return undefined;
-  directCompletion.semanticJudgeRequestKeys.add(key);
+  if (inlineWork.semanticJudgeRequestKeys.has(key)) return undefined;
+  inlineWork.semanticJudgeRequestKeys.add(key);
   return {
     key,
-    turnId: directCompletion.turnId,
+    turnId: inlineWork.turnId,
     trigger,
     reasons,
-    snapshot: directPolicySnapshot(),
+    snapshot: inlinePolicySnapshot(),
   };
 }
 
 function semanticPolicyJudgeRequestKey(trigger: SemanticPolicyJudgeRequest["trigger"], options: { verificationCommand?: string; docsOnlyMutation: boolean }): string {
   return [
-    directCompletion.turnId,
+    inlineWork.turnId,
     trigger,
     options.verificationCommand ?? "",
     options.docsOnlyMutation ? "docs" : "code",
-    [...directCompletion.changedPaths].sort().join(","),
-    directCompletion.toolEvents.length,
+    [...inlineWork.changedPaths].sort().join(","),
+    inlineWork.toolEvents.length,
   ].join("|");
 }
 
-function semanticPolicyJudgeReasons(judge: PolicyJudgeDecision, input: DirectNudgeSelectorInput): string[] {
+function semanticPolicyJudgeReasons(judge: PolicyJudgeDecision, input: InlineNudgeSelectorInput): string[] {
   const reasons: string[] = [];
   if (judge.nudgeKind && isSemanticJudgeRelevantNudge(judge.nudgeKind)) {
-    reasons.push(`deterministic ${judge.nudgeKind} depends on semantic quality or sufficiency, not only a mechanical invariant`);
+    reasons.push(`runtime signal '${judge.nudgeKind}' depends on semantic quality or evidence sufficiency, not only a mechanical invariant`);
   }
-  if (input.shouldCompletionNudge && directCompletion.sourceMutationObserved && !directCompletion.testMutationObserved) {
-    reasons.push("completion was reached after source mutation without observed permanent test mutation");
+  if (input.shouldDocsShellNudge) reasons.push("decide whether docs-only work really needs no shell command now, or whether the command provided necessary evidence");
+  if (input.shouldLocatorLoopNudge) reasons.push("decide whether search/read activity is genuinely stuck before mutation or still gathering necessary target evidence");
+  if (input.shouldSourceAndTestReadyNudge) reasons.push("decide whether source and tests are ready for verification or whether a required artifact/source/test is still missing");
+  if (input.shouldReadyToVerifyNudge) reasons.push("decide whether the next safe action is verification, a focused repair, a clarification, or no steer");
+  if (input.shouldWeakTestCoverageNudge) reasons.push("judge whether changed tests substantively cover the user-requested behavior and at least one meaningful boundary/preservation path");
+  if (input.shouldPackageMetadataNudge) reasons.push("judge whether package metadata is actually incoherent with delivered entrypoints/module shape or the signal is a false positive");
+  if (input.shouldParallelSurfaceNudge) reasons.push("judge whether the changed files bypassed the prompt/starter surface or whether the alternate surface is legitimate for this repo");
+  if (input.shouldVerificationLoopNudge) reasons.push("decide whether repeated verification needs a repair before another command");
+  if (input.shouldPostFailureEvidenceNudge) reasons.push("decide whether post-failure evidence gathering should stop and convert into a focused repair");
+  if (input.shouldPostVerificationShellNudge || input.shouldPostVerificationExplorationNudge) reasons.push("decide whether verification already proved the latest mutation and finalization is safer than more tool use");
+  if (input.shouldCompletionNudge && inlineWork.sourceMutationObserved && !inlineWork.testMutationObserved) {
+    reasons.push("completion was reached after source mutation without observed permanent test mutation; decide if existing/inline tests are still sufficient");
+  } else if (input.shouldCompletionNudge) {
+    reasons.push("completion was reached; audit whether finalization is supported by the latest mutation and verification evidence");
   }
   return reasons;
 }
 
-export function getDirectChangedPaths(): string[] {
-  return [...directCompletion.changedPaths].sort((left, right) => normalizeWorkflowPath(left).localeCompare(normalizeWorkflowPath(right)));
+export function getInlineChangedPaths(): string[] {
+  return [...inlineWork.changedPaths].sort((left, right) => normalizeWorkflowPath(left).localeCompare(normalizeWorkflowPath(right)));
 }
 
-export function getDirectCriticalGuardContextMessage(): string | undefined {
-  if (directCompletion.terminalActionObserved) {
-    const command = directCompletion.terminalActionCommand ? ` with \`${directCompletion.terminalActionCommand}\`` : "";
-    const drift = directCompletion.postTerminalDriftNudgeSent
+export function getInlineCriticalGuardContextMessage(): string | undefined {
+  if (inlineWork.terminalActionObserved) {
+    const command = inlineWork.terminalActionCommand ? ` with \`${inlineWork.terminalActionCommand}\`` : "";
+    const drift = inlineWork.postTerminalDriftNudgeSent
       ? " Later tool use already tried to mutate or inspect support artifacts after that terminal action."
       : "";
     return [
-      "pi-chalin critical direct-work guard.",
+      "pi-chalin critical inline-work guard.",
       `Hard stop: the user's external workflow already completed${command}.${drift}`,
       "Your next assistant action must be the final answer in the user's language with the resulting PR/action, verification already performed, and compact notes.",
       "Do not call more tools, rewrite PR body files, rerun support commands, or keep polishing local artifacts after the external action succeeded.",
     ].join("\n");
   }
-  if (!directCompletion.verificationObserved && !directCompletion.outOfWorkspaceMutationObserved) return undefined;
+  if (!inlineWork.verificationObserved && !inlineWork.outOfWorkspaceMutationObserved) return undefined;
   const reasons: string[] = [];
   const parallelSurfaceGap = promptCanonicalSurfaceBypassed() ?? pythonRootDuplicateTestSurface();
-  if (directCompletion.outOfWorkspaceMutationObserved) {
-    const path = directCompletion.outOfWorkspaceMutationPath ? ` (${directCompletion.outOfWorkspaceMutationPath})` : "";
+  if (inlineWork.outOfWorkspaceMutationObserved) {
+    const path = inlineWork.outOfWorkspaceMutationPath ? ` (${inlineWork.outOfWorkspaceMutationPath})` : "";
     reasons.push(`a mutation or verification targeted a path outside the current workspace root${path}`);
   }
   if (
-    directCompletion.sourceMutationObserved
-    && directCompletion.testMutationObserved
-    && directWeakTestCoverageGap()
+    inlineWork.sourceMutationObserved
+    && inlineWork.testMutationObserved
+    && inlineWeakTestCoverageGap()
   ) {
     reasons.push("the changed tests still look like trivial smoke/empty coverage instead of assertions for the requested behavior");
   }
-  if (directPackageMetadataGap()) {
+  if (inlinePackageMetadataGap()) {
     reasons.push("the scaffold package metadata still does not agree with delivered bin/main/export/module entrypoints");
   }
   if (parallelSurfaceGap) {
@@ -692,12 +688,12 @@ export function getDirectCriticalGuardContextMessage(): string | undefined {
   }
   if (
     reasons.length === 0
-    && directCompletion.verificationObserved
-    && (directCompletion.postVerificationShellNudgeSent || directCompletion.postVerificationExplorationNudgeSent)
+    && inlineWork.verificationObserved
+    && (inlineWork.postVerificationShellNudgeSent || inlineWork.postVerificationExplorationNudgeSent)
   ) {
-    const command = directCompletion.verificationCommand ? ` with \`${directCompletion.verificationCommand}\`` : "";
+    const command = inlineWork.verificationCommand ? ` with \`${inlineWork.verificationCommand}\`` : "";
     return [
-      "pi-chalin critical direct-work guard.",
+      "pi-chalin critical inline-work guard.",
       `Hard stop: verification already passed${command} after the latest mutation, and later tool use did not include a new edit.`,
       "Your next assistant action must be the final answer in the user's language with changed files, verification, and compact notes.",
       "Do not call more tools, rerun tests, or read files just to summarize. If a later tool exposed a concrete defect, patch only that root cause and rerun the nearest verification once before final.",
@@ -705,9 +701,9 @@ export function getDirectCriticalGuardContextMessage(): string | undefined {
   }
   if (reasons.length === 0) return undefined;
   return [
-    "pi-chalin critical direct-work guard.",
+    "pi-chalin critical inline-work guard.",
     `Hard stop: a final answer is invalid because ${reasons.join(" and ")}.`,
-    directCompletion.outOfWorkspaceMutationObserved
+    inlineWork.outOfWorkspaceMutationObserved
       ? "Your next assistant action must recreate or move the required artifacts under the current workspace root using relative paths, then rerun the nearest verification from that root."
       : parallelSurfaceGap
       ? "Your next assistant action must consolidate the implementation and tests into the prompt/starter source and runner-discovered test paths, remove the parallel sibling files, then rerun the nearest verification once."
@@ -744,48 +740,11 @@ export function getChalinRouteInvocations(): readonly ChalinRouteInvocation[] {
   return routeInvocations;
 }
 
-export function beginDecisionToolGate(owner: object, originalTools: readonly string[]): void {
-  const gate = { originalTools: [...originalTools] };
-  decisionToolGates.set(owner, gate);
-  latestDecisionToolGate = gate;
-}
-
-export function releaseDecisionToolGate(owner: object): string[] | undefined {
-  const gate = decisionToolGates.get(owner) ?? latestDecisionToolGate;
-  if (!gate) return undefined;
-  decisionToolGates.delete(owner);
-  if (latestDecisionToolGate === gate) latestDecisionToolGate = undefined;
-  return [...gate.originalTools];
-}
-
-export function markDecisionToolGateResolved(owner: object): void {
-  resolvedDecisionToolGates.add(owner);
-}
-
-export function markDirectDecisionConfirmed(owner: object): void {
-  directDecisionConfirmedOwners.add(owner);
-}
-
-export function isDirectDecisionConfirmed(owner: object): boolean {
-  return directDecisionConfirmedOwners.has(owner);
-}
-
-export function isDecisionToolGateResolved(owner: object): boolean {
-  return resolvedDecisionToolGates.has(owner);
-}
-
-export function resetDecisionToolGateResolved(owner: object): void {
-  resolvedDecisionToolGates.delete(owner);
-  directDecisionConfirmedOwners.delete(owner);
-}
-
 export function resetRuntimeState(): void {
   setLatestRun(undefined);
   liveStepSessions.clear();
   resetRefBackedArray(routeInvocations);
-  latestDecisionToolGate = undefined;
-  directDecisionConfirmedOwners = new WeakSet<object>();
-  replaceRefBackedObject(directCompletion, freshDirectCompletionState(nextDirectCompletionTurnId()));
+  replaceRefBackedObject(inlineWork, freshInlineWorkState(nextInlineWorkTurnId()));
   clearSkillOverridesForTurn();
 }
 
@@ -793,15 +752,14 @@ function liveStepKey(runId: string, stepId: string): string {
   return `${runId}:${stepId}`;
 }
 
-function nextDirectCompletionTurnId(): number {
-  directCompletionTurnSequence += 1;
-  return directCompletionTurnSequence;
+function nextInlineWorkTurnId(): number {
+  inlineWorkTurnSequence += 1;
+  return inlineWorkTurnSequence;
 }
 
-function freshDirectCompletionState(turnId = 0): DirectCompletionState {
+function freshInlineWorkState(turnId = 0): InlineWorkState {
   return {
     turnId,
-    docsOnlyPathPrompt: false,
     cwd: undefined,
     toolEvents: [],
     mutationObserved: false,
@@ -842,7 +800,6 @@ function freshDirectCompletionState(turnId = 0): DirectCompletionState {
     postVerificationShellNudgeSent: false,
     postVerificationExplorationNudgeSent: false,
     readbackStopNudgeSent: false,
-    docsEvidenceLoopNudgeSent: false,
     existingFileRewriteNudgeSent: false,
     mutationLoopNudgeSent: false,
     sourceAndTestReadyNudgeSent: false,
@@ -869,57 +826,56 @@ function cloneSemanticPolicyJudgeResult(result: SemanticPolicyJudgeResult): Sema
   };
 }
 
-function directPolicySnapshot(): DirectPolicySnapshot {
+function inlinePolicySnapshot(): InlinePolicySnapshot {
   return {
-    cwd: directCompletion.cwd,
-    docsOnlyPathPrompt: directCompletion.docsOnlyPathPrompt,
-    mutationObserved: directCompletion.mutationObserved,
-    sourceMutationObserved: directCompletion.sourceMutationObserved,
-    testMutationObserved: directCompletion.testMutationObserved,
-    verificationObserved: directCompletion.verificationObserved,
-    verificationCommand: directCompletion.verificationCommand,
-    terminalActionCommand: directCompletion.terminalActionCommand,
-    docsOnlyMutation: directDocsOnlyMutation(),
-    changedPaths: [...directCompletion.changedPaths].sort(),
-    readPaths: [...directCompletion.readPaths].sort(),
-    promptCodePaths: [...directCompletion.promptCodePaths].sort(),
-    toolEvents: directCompletion.toolEvents.slice(-16).map((event) => ({ ...event })),
+    cwd: inlineWork.cwd,
+    mutationObserved: inlineWork.mutationObserved,
+    sourceMutationObserved: inlineWork.sourceMutationObserved,
+    testMutationObserved: inlineWork.testMutationObserved,
+    verificationObserved: inlineWork.verificationObserved,
+    verificationCommand: inlineWork.verificationCommand,
+    terminalActionCommand: inlineWork.terminalActionCommand,
+    docsOnlyMutation: inlineDocsOnlyMutation(),
+    changedPaths: [...inlineWork.changedPaths].sort(),
+    readPaths: [...inlineWork.readPaths].sort(),
+    promptCodePaths: [...inlineWork.promptCodePaths].sort(),
+    toolEvents: inlineWork.toolEvents.slice(-16).map((event) => ({ ...event })),
     counters: {
-      mutationToolCount: directCompletion.mutationToolCount,
-      evidenceToolCount: directCompletion.evidenceToolCount,
-      searchToolCount: directCompletion.searchToolCount,
-      readToolCount: directCompletion.readToolCount,
-      verificationAttemptCount: directCompletion.verificationAttemptCount,
-      postFailureEvidenceToolCount: directCompletion.postFailureEvidenceToolCount,
+      mutationToolCount: inlineWork.mutationToolCount,
+      evidenceToolCount: inlineWork.evidenceToolCount,
+      searchToolCount: inlineWork.searchToolCount,
+      readToolCount: inlineWork.readToolCount,
+      verificationAttemptCount: inlineWork.verificationAttemptCount,
+      postFailureEvidenceToolCount: inlineWork.postFailureEvidenceToolCount,
     },
   };
 }
 
-function appendDirectToolEvent(event: DirectToolEvent): void {
-  directCompletion.toolEvents.push(event);
-  if (directCompletion.toolEvents.length > 200) {
-    directCompletion.toolEvents.splice(0, directCompletion.toolEvents.length - 200);
+function appendInlineToolEvent(event: InlineToolEvent): void {
+  inlineWork.toolEvents.push(event);
+  if (inlineWork.toolEvents.length > 200) {
+    inlineWork.toolEvents.splice(0, inlineWork.toolEvents.length - 200);
   }
 }
 
-function directWeakTestCoverageGap(): boolean {
+function inlineWeakTestCoverageGap(): boolean {
   const latestByPath = latestChangedFileContents((path) => isTestLikePath(path));
   return [...latestByPath.values()].some((content) => looksLikeWeakTestCoverage(content));
 }
 
-function directPackageMetadataGap(): boolean {
+function inlinePackageMetadataGap(): boolean {
   const latestPackage = [...latestChangedFileContents((path) => isPackageJsonPath(path)).values()].at(-1);
   return latestPackage !== undefined && packageJsonLikelyNeedsModuleType(latestPackage);
 }
 
-function directParallelSurfaceGap(): { expected: string; actual: string[] } | undefined {
-  if (!directCompletion.verificationObserved) return undefined;
+function inlineParallelSurfaceGap(): { expected: string; actual: string[] } | undefined {
+  if (!inlineWork.verificationObserved) return undefined;
   return promptCanonicalSurfaceBypassed() ?? pythonRootDuplicateTestSurface();
 }
 
 function latestChangedFileContents(predicate: (path: string) => boolean): Map<string, string> {
   const latest = new Map<string, string>();
-  for (const event of directCompletion.toolEvents) {
+  for (const event of inlineWork.toolEvents) {
     if (event.phase !== "completed" || event.isError || (event.toolName !== "edit" && event.toolName !== "write")) continue;
     const path = normalizeWorkflowPath(event.path ?? extractPathFromArgsText(event.argsText) ?? "");
     if (!path || !predicate(path)) continue;
@@ -938,11 +894,11 @@ function cloneSkillOverrideState(state: SkillOverrideState): SkillOverrideState 
 }
 
 function isPostVerificationExplorationTool(toolName: string): boolean {
-  return ["read", "grep", "find", "ls", "chalin_project_discovery", "chalin_project_snapshot"].includes(toolName);
+  return ["read", "grep", "find", "ls", "chalin_project_discovery"].includes(toolName);
 }
 
 function isPostTerminalDriftTool(toolName: string): boolean {
-  return ["bash", "read", "grep", "find", "ls", "edit", "write", "chalin_project_discovery", "chalin_project_snapshot"].includes(toolName);
+  return ["bash", "read", "grep", "find", "ls", "edit", "write", "chalin_project_discovery"].includes(toolName);
 }
 
 function isAllowedTerminalFollowupCommand(command: string | undefined): boolean {
@@ -950,7 +906,7 @@ function isAllowedTerminalFollowupCommand(command: string | undefined): boolean 
   return match?.subcommand === "view";
 }
 
-function isTerminalDirectCommand(command: string | undefined): boolean {
+function isTerminalExternalActionCommand(command: string | undefined): boolean {
   const match = ghPrCommand(command);
   return match?.subcommand === "create" && !match.args.includes("--dry-run");
 }
@@ -972,18 +928,18 @@ function isGhExecutableToken(token: string): boolean {
 }
 
 function isPostFailureEvidenceTool(toolName: string, command: string | undefined): boolean {
-  if (["read", "grep", "find", "ls", "chalin_project_discovery", "chalin_project_snapshot"].includes(toolName)) return true;
+  if (["read", "grep", "find", "ls", "chalin_project_discovery"].includes(toolName)) return true;
   return toolName === "bash" && !isVerificationCommand(command);
 }
 
 function recordPreMutationEvidenceTool(toolName: string): void {
-  if (!["read", "grep", "find", "ls", "chalin_project_discovery", "chalin_project_snapshot"].includes(toolName)) return;
-  directCompletion.evidenceToolCount += 1;
-  if (["grep", "find", "ls", "chalin_project_discovery", "chalin_project_snapshot"].includes(toolName)) {
-    directCompletion.searchToolCount += 1;
+  if (!["read", "grep", "find", "ls", "chalin_project_discovery"].includes(toolName)) return;
+  inlineWork.evidenceToolCount += 1;
+  if (["grep", "find", "ls", "chalin_project_discovery"].includes(toolName)) {
+    inlineWork.searchToolCount += 1;
   }
   if (toolName === "read") {
-    directCompletion.readToolCount += 1;
+    inlineWork.readToolCount += 1;
   }
 }
 
@@ -995,69 +951,56 @@ function recordDeletedPathsFromCommand(command: string): void {
       const word = words[pathIndex] ?? "";
       if (!word || word === "&&" || word === ";" || word === "||") break;
       if (word.startsWith("-")) continue;
-      directCompletion.deletedPaths.add(normalizeWorkflowPath(word));
+      inlineWork.deletedPaths.add(normalizeWorkflowPath(word));
     }
   }
 }
 
-function shouldNudgeDocsEvidenceLoop(): boolean {
-  return directCompletion.docsOnlyPathPrompt
-    && !directCompletion.docsEvidenceLoopNudgeSent
-    && !directCompletion.mutationObserved
-    && (
-      directCompletion.readToolCount >= 3
-      ||
-      (directCompletion.evidenceToolCount >= 4 && directCompletion.searchToolCount >= 1 && directCompletion.readToolCount >= 2)
-      || (directCompletion.evidenceToolCount >= 5 && directCompletion.searchToolCount >= 3 && directCompletion.readToolCount >= 1)
-    );
-}
-
 function shouldNudgeLocatorLoop(): boolean {
-  return !directCompletion.docsOnlyPathPrompt
-    && !directCompletion.locatorLoopNudgeSent
-    && !directCompletion.mutationObserved
+  return !inlineWork.locatorLoopNudgeSent
+    && !inlineWork.mutationObserved
     && (
-      directCompletion.searchToolCount >= 3
-      || (directCompletion.promptCodePaths.size > 0
+      inlineWork.searchToolCount >= 3
+      || (inlineWork.promptCodePaths.size > 0
         ? hasSearchAfterPromptCodePathRead()
-        : directCompletion.readToolCount >= 1 && directCompletion.searchToolCount >= 1)
+        : inlineWork.readToolCount >= 1 && inlineWork.searchToolCount >= 1)
     );
 }
 
 function hasSearchAfterPromptCodePathRead(): boolean {
   let promptPathRead = false;
-  for (const event of directCompletion.toolEvents) {
+  for (const event of inlineWork.toolEvents) {
     if (event.phase !== "completed" || event.isError) continue;
     if (event.toolName === "read" && event.path) {
       const readPath = normalizeWorkflowPath(event.path);
-      if ([...directCompletion.promptCodePaths].some((promptPath) => sameWorkflowPath(promptPath, readPath))) {
+      if ([...inlineWork.promptCodePaths].some((promptPath) => sameWorkflowPath(promptPath, readPath))) {
         promptPathRead = true;
       }
       continue;
     }
-    if (promptPathRead && ["grep", "find", "ls", "chalin_project_discovery", "chalin_project_snapshot"].includes(event.toolName)) return true;
+    if (promptPathRead && ["grep", "find", "ls", "chalin_project_discovery"].includes(event.toolName)) return true;
   }
   return false;
 }
 
-function directDocsOnlyMutation(): boolean {
-  return directCompletion.changedPaths.size > 0
-    && !directCompletion.sourceMutationObserved
-    && !directCompletion.testMutationObserved
-    && [...directCompletion.changedPaths].every(isDocsMarkdownPath);
+function inlineDocsOnlyMutation(): boolean {
+  return inlineWork.changedPaths.size > 0
+    && !inlineWork.sourceMutationObserved
+    && !inlineWork.testMutationObserved
+    && [...inlineWork.changedPaths].every(isDocsMarkdownPath);
 }
 
 function sourceMutationWithoutTestMutation(): boolean {
-  return directCompletion.sourceMutationObserved
-    && !directCompletion.testMutationObserved
-    && !directCompletion.testCoverageReviewObserved
+  return inlineWork.sourceMutationObserved
+    && !inlineWork.testMutationObserved
+    && !inlineWork.testCoverageReviewObserved
     && !passingVerificationTargetsReadTest();
 }
 
 function passingVerificationTargetsReadTest(): boolean {
-  const command = directCompletion.verificationCommand;
+  const command = inlineWork.verificationCommand;
   if (!command) return false;
-  return [...directCompletion.readPaths]
+  return [...inlineWork.readPaths]
     .filter(isTestLikePath)
     .some((path) => commandMentionsPath(command, path));
 }
@@ -1072,12 +1015,12 @@ function commandMentionsPath(command: string, path: string): boolean {
 }
 
 function promptCanonicalSurfaceBypassed(): { expected: string; actual: string[] } | undefined {
-  const expectedSources = [...directCompletion.promptCodePaths]
+  const expectedSources = [...inlineWork.promptCodePaths]
     .filter((path) => isCodeLikePath(path) && !isTestLikePath(path) && !isDocsMarkdownPath(path));
   if (expectedSources.length === 0) return undefined;
-  const changedSources = [...directCompletion.changedPaths]
+  const changedSources = [...inlineWork.changedPaths]
     .map(normalizeWorkflowPath)
-    .filter((path) => !directCompletion.deletedPaths.has(path))
+    .filter((path) => !inlineWork.deletedPaths.has(path))
     .filter((path) => isCodeLikePath(path) && !isTestLikePath(path) && !isDocsMarkdownPath(path));
   if (changedSources.length === 0) return undefined;
 
@@ -1092,9 +1035,9 @@ function promptCanonicalSurfaceBypassed(): { expected: string; actual: string[] 
 }
 
 function pythonRootDuplicateTestSurface(): { expected: string; actual: string[] } | undefined {
-  const changedTests = [...directCompletion.changedPaths]
+  const changedTests = [...inlineWork.changedPaths]
     .map(normalizeWorkflowPath)
-    .filter((path) => !directCompletion.deletedPaths.has(path))
+    .filter((path) => !inlineWork.deletedPaths.has(path))
     .filter((path) => path.endsWith(".py") && isTestLikePath(path));
   const runnerDiscovered = changedTests.filter((path) => /^tests\/test_[^/]+\.py$/i.test(path));
   const rootDuplicates = changedTests.filter((path) => /^test_[^/]+\.py$/i.test(path));
@@ -1115,9 +1058,9 @@ function looksLikeParallelSourceSurface(expected: string, actual: string): boole
 
 function sourceHasMatchingChangedTest(sourcePath: string): boolean {
   const sourceStem = pathStem(sourcePath);
-  return [...directCompletion.changedPaths]
+  return [...inlineWork.changedPaths]
     .map(normalizeWorkflowPath)
-    .filter((path) => !directCompletion.deletedPaths.has(path))
+    .filter((path) => !inlineWork.deletedPaths.has(path))
     .filter(isTestLikePath)
     .some((testPath) => testStemMatchesSourceStem(pathStem(testPath), sourceStem));
 }
@@ -1250,7 +1193,7 @@ function isTestLikePath(value: string): boolean {
 }
 
 function isCoverageReviewPath(value: string): boolean {
-  return [...directCompletion.changedPaths].some((changedPath) => sameWorkflowPath(changedPath, value));
+  return [...inlineWork.changedPaths].some((changedPath) => sameWorkflowPath(changedPath, value));
 }
 
 function isSmallFullFileWrite(argsText: string | undefined): boolean {
@@ -1278,8 +1221,8 @@ function normalizeWorkflowPath(value: string): string {
 
 function markOutOfWorkspaceMutation(value: string): boolean {
   if (!pathIsOutsideCurrentWorkspace(value)) return false;
-  directCompletion.outOfWorkspaceMutationObserved = true;
-  directCompletion.outOfWorkspaceMutationPath ??= value;
+  inlineWork.outOfWorkspaceMutationObserved = true;
+  inlineWork.outOfWorkspaceMutationPath ??= value;
   return true;
 }
 
@@ -1297,7 +1240,7 @@ function bashCommandLeavesWorkspace(command: string | undefined): boolean {
 }
 
 function pathIsOutsideCurrentWorkspace(value: string): boolean {
-  const cwd = normalizeFilesystemPath(directCompletion.cwd);
+  const cwd = normalizeFilesystemPath(inlineWork.cwd);
   if (!cwd) return false;
   const target = normalizeFilesystemPath(value);
   if (!target) return false;
@@ -1307,7 +1250,7 @@ function pathIsOutsideCurrentWorkspace(value: string): boolean {
 }
 
 function hasInWorkspaceMutation(): boolean {
-  return [...directCompletion.changedPaths].some((changedPath) => !pathIsOutsideCurrentWorkspace(changedPath));
+  return [...inlineWork.changedPaths].some((changedPath) => !pathIsOutsideCurrentWorkspace(changedPath));
 }
 
 function normalizeFilesystemPath(value: string | undefined): string | undefined {
@@ -1326,11 +1269,6 @@ function isDocsMarkdownPath(value: string): boolean {
   const normalized = value.replaceAll("\\", "/");
   const relative = normalized.startsWith("../") ? normalized.slice(2) : normalized;
   return relative.endsWith(".md");
-}
-
-function promptLooksDocsPathOnly(prompt: string): boolean {
-  const paths = promptPathTokens(prompt);
-  return paths.length > 0 && paths.every(isDocsMarkdownPath);
 }
 
 function promptPathTokens(prompt: string): string[] {
@@ -1375,7 +1313,7 @@ function isVerificationCommand(command: string | undefined): boolean {
   const commandName = tokens[0];
   if (!commandName) return false;
   const args = tokens.slice(1);
-  if (["npm", "pnpm", "yarn", "bun"].includes(commandName)) {
+  if (["npm", "pnpm", "yarn"].includes(commandName)) {
     if (args[0] === "test") return true;
     if (args[0] === "run" && ["test", "typecheck", "lint", "check"].includes(args[1] ?? "")) return true;
     if (args[0] === "exec" && ["vitest", "jest", "tsc", "eslint"].includes(args[1] ?? "")) return true;

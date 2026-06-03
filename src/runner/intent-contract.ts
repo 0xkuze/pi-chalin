@@ -12,6 +12,7 @@ export function buildIntentContract(rootTask: string | undefined, route: RouteDe
     ...(workUnitDiscovery ? {
       workUnitDiscoveryRequested: true,
       decompositionTarget: "work unit",
+      ...(route.fanoutAuthorized === true ? { fanoutAuthorized: true, fanoutTarget: "authorized discovered work units" } : {}),
       ...(requiredReviewMode ? { requiredReviewMode } : {}),
     } : {}),
   };
@@ -35,14 +36,14 @@ export function hasFanoutIntent(input: unknown): boolean {
 export function hasExplicitFanoutIntent(input: unknown): boolean {
   if (!input || typeof input !== "object") return false;
   const record = input as Partial<UserIntentContract>;
-  return record.explicitFanoutRequest === true;
+  return record.fanoutAuthorized === true;
 }
 
 export function hasWorkUnitDiscoveryIntent(input: unknown): boolean {
   if (isRouteDecision(input)) return routeNeedsWorkUnitDiscovery(input);
   if (!input || typeof input !== "object") return false;
   const record = input as Partial<UserIntentContract>;
-  return record.workUnitDiscoveryRequested === true || record.explicitFanoutRequest === true;
+  return record.workUnitDiscoveryRequested === true || record.fanoutAuthorized === true;
 }
 
 function routeHasAgent(plan: RoutePlan | undefined, agent: string): boolean {
