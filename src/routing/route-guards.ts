@@ -18,6 +18,7 @@ export function normalizeRouteForExecutionEffect(route: RouteDecision, options: 
     Effect.map((current) => ensureMutationRouteHasWorkerAndReviewer(current, options.requiresWorkspaceMutation, options.task, options.agents)),
     Effect.map((current) => serializeUnsafeParallelPlannedWriters(current, options.requiresWorkspaceMutation, options.agents)),
     Effect.map((current) => collapseReadOnlyScoutContextRoute(current, options.requiresWorkspaceMutation)),
+    Effect.map((current) => escalateDestructiveRouteRisk(current, options.task)),
     Effect.withSpan("route-guards.normalizeRouteForExecution"),
   );
 }
@@ -55,6 +56,39 @@ function stripPrematureDiscoverWorkUnitExecution(route: RouteDecision): RouteDec
     plan: { kind: "sequential", steps },
     reason: `${route.reason} Discover WorkUnit route normalized by pi-chalin: execution/review steps will be materialized after structured unit discovery.`,
   };
+}
+
+function escalateDestructiveRouteRisk(route: RouteDecision, task: string): RouteDecision {
+  if (route.kind === "ask-user") return route;
+  const text = routeText(route, task);
+  if (!isDestructiveRouteText(text)) return route;
+  return {
+    ...route,
+    risk: "critical",
+    reason: `${route.reason} Destructive action guard escalated this route to critical risk.`,
+  };
+}
+
+function routeText(route: RouteDecision, task: string): string {
+  const planText = !route.plan ? "" : route.plan.kind === "dag"
+    ? route.plan.stages.flatMap((stage) => stage.tasks).map(stepText).join("\n")
+    : route.plan.steps.map(stepText).join("\n");
+  return [task, route.reason, planText, route.expectedEffects?.join(" ")].filter(Boolean).join("\n");
+}
+
+function stepText(step: AgentStep): string {
+  return [step.agent, step.task, ...(step.files ?? [])].join(" ");
+}
+
+function isDestructiveRouteText(text: string): boolean {
+  const normalized = text.toLowerCase();
+  if (/\brm\s+-[^\n]*(?:r|f)|\brm\s+-rf\b|\brm\s+-fr\b/.test(normalized)) return true;
+  if (!/\b(delete|remove|rm|unlink|erase|wipe|truncate)\b/.test(normalized)) return false;
+  return protectedPathPattern().test(text);
+}
+
+function protectedPathPattern(): RegExp {
+  return /(^|[\s"'`/\\])(\.env(?:[.\s"'`/\\]|$)|\.git(?:[\s"'`/\\]|$)|Cargo\.lock|uv\.lock|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?|Cargo\.toml|package\.json|pyproject\.toml)(?=$|[\s"'`/\\])/i;
 }
 
 export function ensureMutationRouteHasWorkerAndReviewer(route: RouteDecision, requiresWorkspaceMutation: boolean, task: string, agents?: ReadonlyMap<string, AgentDefinition>): RouteDecision {

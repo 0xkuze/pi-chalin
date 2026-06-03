@@ -149,8 +149,8 @@ function parseModelRef(ref: string): { provider: string; modelId: string } | und
 }
 
 function agentTier(agentName: string): "fast" | "balanced" | "strong" {
-  if (["scout", "context-builder", "delegate"].includes(agentName)) return "fast";
-  if (["worker", "oracle"].includes(agentName)) return "strong";
+  if (["scout", "context-builder"].includes(agentName)) return "fast";
+  if (["worker"].includes(agentName)) return "strong";
   return "balanced";
 }
 

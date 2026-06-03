@@ -151,7 +151,7 @@ export function estimateBudgetPreflight(input: BudgetPreflightInput): BudgetPref
   const budgetProfile = inferPreflightProfile(input.steps, input.routeKind, input.needsArtifacts);
   const taskKind = inferTaskKind(input.steps, budgetProfile, input.needsArtifacts);
   const risk = input.risk ?? inferRisk(input.steps);
-  const representativeStep = input.steps?.[0] ?? { agent: "delegate", task: input.task, budget: budgetProfile };
+  const representativeStep = input.steps?.[0] ?? { agent: "scout", task: input.task, budget: budgetProfile };
   const policy = policyForStep(undefined, { ...representativeStep, budget: budgetProfile }, input.routeKind, risk);
   const expectedStages = input.routeKind === "multi-agent-dag"
     ? Math.max(2, Math.min(8, input.steps?.length ?? 3))

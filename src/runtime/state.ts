@@ -264,6 +264,10 @@ export function recordInlineToolStart(options: Omit<InlineToolEvent, "phase">): 
   appendInlineToolEvent({ ...options, phase: "start" });
 }
 
+export function hasInlineToolStarted(toolName: string): boolean {
+  return inlineWork.toolEvents.some((event) => event.phase === "start" && event.toolName === toolName);
+}
+
 export function getInlineToolEventsForTests(): InlineToolEvent[] {
   return inlineWork.toolEvents.map((event) => ({ ...event }));
 }

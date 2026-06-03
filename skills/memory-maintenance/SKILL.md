@@ -1,6 +1,6 @@
 ---
 name: memory-maintenance
-description: Suggested memory hygiene procedure for durable project facts, stale corrections, and deduplication.
+description: Memory hygiene procedure for explicit stale-memory, memory-revision, and durable-knowledge maintenance tasks.
 scope: built-in
 extends:
   - reviewer
@@ -8,16 +8,17 @@ extends:
   - planner
 concerns:
   - memory-curation
+  - planning
   - review
   - research
 capabilities:
   - memory-read
   - memory-write
-activation: suggested
+activation: auto
 triggers:
-  - memory
-  - remember
-  - stale
+  - memory hygiene
+  - stale memory
+  - revise memory
   - durable knowledge
 risk: low
 maxActiveWith: []

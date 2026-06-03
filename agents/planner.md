@@ -2,7 +2,7 @@
 name: planner
 description: Inspects local evidence and produces strategies, option comparisons, implementation plans, risks, and validation.
 concern: planning
-capabilities: inspect-files, search-files, memory-read, coordinate
+capabilities: inspect-files, search-files, memory-read, memory-write, coordinate
 model: inherit
 thinking: high
 budget-tool-calls: 25

@@ -10,8 +10,8 @@ capabilities:
   - validate
 activation: auto
 triggers:
-  - review
-  - verification
+  - implementation review
+  - final review
   - changed files
   - mutation
 risk: medium

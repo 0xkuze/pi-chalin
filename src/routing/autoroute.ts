@@ -4,7 +4,7 @@ import { AgentCatalog } from "../agents/agents.ts";
 import { loadEffectiveConfig } from "../config/config.ts";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { buildChalinOrchestratorSystemPrompt } from "../orchestration/orchestration.ts";
-import { isUsableStepHandoff, loadResumableRunState } from "../runner/runner-state.ts";
+import { chalinSessionIdFromContext, isUsableStepHandoff, loadResumableRunState } from "../runner/runner-state.ts";
 import { beginChalinTurn, getInlineChangedPaths, getInlineCriticalGuardContextMessage, isSemanticPolicyJudgeRequestFresh, recordInlineToolCompletion, recordInlineToolStart, recordSemanticPolicyJudgeResult } from "../runtime/state.ts";
 import { formatSemanticPolicyJudgeSteer, runSemanticPolicyJudge, shouldApplySemanticPolicyJudgeResult } from "../skills/semantic-policy-judge.ts";
 import type { InlineNudgeKind, PolicyJudgeDecision } from "../runtime/state.ts";
@@ -42,7 +42,8 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
     const promptText = typeof event.prompt === "string" ? event.prompt : "";
     beginChalinTurn({ prompt: promptText, cwd: ctx.cwd });
     const catalog = AgentCatalog.load({ cwd: ctx.cwd });
-    const resumableRun = loadResumableRunState({ cwd: ctx.cwd, recoverStale: false });
+    const sessionId = chalinSessionIdFromContext(ctx);
+    const resumableRun = sessionId ? loadResumableRunState({ cwd: ctx.cwd, recoverStale: false, sessionId }) : undefined;
     const resumeContext = resumableRun ? compactResumeCandidateMessage(resumableRun) : undefined;
     const systemPrompt = [
       event.systemPrompt,

@@ -28,9 +28,11 @@ test("AgentCatalog loads built-in agents", () => {
   const catalog = AgentCatalog.load({ cwd });
   const names = catalog.list("built-in").map((agent) => agent.name);
 
-  for (const expected of ["scout", "researcher", "context-builder", "planner", "worker", "reviewer", "conflict-resolver", "oracle", "delegate"]) {
+  for (const expected of ["scout", "researcher", "context-builder", "planner", "worker", "reviewer", "conflict-resolver"]) {
     assert.equal(names.includes(expected), true, `${expected} should load`);
   }
+  assert.equal(names.includes("delegate"), false, "generic delegate should not be a built-in agent");
+  assert.equal(names.includes("oracle"), false, "drift checks should live in runner/hooks, not a built-in agent");
 });
 
 test("AgentCatalog loads explicit concern capabilities", () => {

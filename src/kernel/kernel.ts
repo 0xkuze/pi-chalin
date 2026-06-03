@@ -190,10 +190,13 @@ function askUser(reason: string): RouteDecision {
   return { kind: "ask-user", agents: [], risk: "low", ambiguity: "high", needsMemory: false, needsArtifacts: false, reason };
 }
 
-type StrictRoutePlanInput = {
+type RouteBudgetInput = AgentStep["budget"] | "small" | "medium" | "large";
+type RouteStepInput = Omit<AgentStep, "budget"> & { budget?: RouteBudgetInput };
+
+export type StrictRoutePlanInput = {
   topology: "sequential" | "dag";
-  steps?: AgentStep[];
-  stages?: Array<{ id?: string; name?: string; tasks?: AgentStep[] }>;
+  steps?: RouteStepInput[];
+  stages?: Array<{ id?: string; name?: string; tasks?: RouteStepInput[] }>;
   risk?: RouteDecision["risk"];
   needsMemory?: boolean;
   needsArtifacts?: boolean;
@@ -222,7 +225,7 @@ export function routeFromPlan(input: StrictRoutePlanInput): RouteDecision {
       expectedEffects,
       workUnitStrategy: sanitizeWorkUnitStrategy(input.workUnitStrategy),
       ...(typeof input.fanoutAuthorized === "boolean" ? { fanoutAuthorized: input.fanoutAuthorized } : {}),
-      reason: input.reason?.trim() || "Primary Pi agent selected a staged DAG workflow dynamically.",
+      reason: input.reason?.trim() || "pi-chalin selected a staged DAG workflow dynamically.",
       plan: { kind: "dag", stages },
     };
   }
@@ -241,7 +244,7 @@ export function routeFromPlan(input: StrictRoutePlanInput): RouteDecision {
     expectedEffects,
     workUnitStrategy: sanitizeWorkUnitStrategy(input.workUnitStrategy),
     ...(typeof input.fanoutAuthorized === "boolean" ? { fanoutAuthorized: input.fanoutAuthorized } : {}),
-    reason: input.reason?.trim() || "Primary Pi agent selected this chalin workflow dynamically.",
+    reason: input.reason?.trim() || "pi-chalin selected this workflow dynamically.",
     plan: { kind: "sequential", steps },
   };
 }
@@ -258,7 +261,7 @@ function memoryDisabled(): boolean {
   return process.env.PI_CHALIN_DISABLE_MEMORY === "1";
 }
 
-function sanitizeSteps(steps: AgentStep[]): AgentStep[] {
+function sanitizeSteps(steps: RouteStepInput[]): AgentStep[] {
   return steps
     .map((step) => {
       const files = sanitizeStepFiles(step.files);
@@ -274,7 +277,7 @@ function sanitizeSteps(steps: AgentStep[]): AgentStep[] {
     .slice(0, 6);
 }
 
-function sanitizeStages(stages: Array<{ id?: string; name?: string; tasks?: AgentStep[] }>): AgentStage[] {
+function sanitizeStages(stages: Array<{ id?: string; name?: string; tasks?: RouteStepInput[] }>): AgentStage[] {
   return stages
     .map((stage, index) => ({
       id: (stage.id ?? stage.name ?? `stage-${index + 1}`).trim() || `stage-${index + 1}`,
@@ -284,7 +287,10 @@ function sanitizeStages(stages: Array<{ id?: string; name?: string; tasks?: Agen
     .slice(0, 8);
 }
 
-function sanitizeBudget(value: AgentStep["budget"]): AgentStep["budget"] | undefined {
+function sanitizeBudget(value: RouteBudgetInput): AgentStep["budget"] | undefined {
+  if (value === "small") return "tight";
+  if (value === "medium") return "normal";
+  if (value === "large") return "deep";
   return value === "tight" || value === "normal" || value === "deep" || value === "extended" ? value : undefined;
 }
 

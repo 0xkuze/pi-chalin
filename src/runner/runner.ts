@@ -17,7 +17,7 @@ import { ArtifactStore } from "../artifacts/artifacts.ts";
 import { buildPromptTokenomics, buildRunLifecycleSpans, buildToolOutputTokenomics, createSkillTraceEvent, createStructuredSpan, createTrajectoryEvent, mergeTraceSpans, mergeTrajectoryEvents, type SkillTraceEvent, type StructuredTraceSpan, type StructuredTraceSpanKind, type TokenomicsSummary, type TrajectoryEvent } from "../observability/observability.ts";
 import { resolveAgentModel, resolveAgentThinking, resolveInheritedModelFallback, type ResolvedAgentModel } from "./model-resolution.ts";
 import { buildSdkPrompt, childToolNames, handoffReviewToolCallLimit, isHandoffGapReadMode, resolveStepCompletionStatus, synthesisCrossStepDuplicateReadLimit, synthesisGapReadLimit, synthesisToolCallLimit, type SdkPromptOptions } from "./runner-prompt.ts";
-import { createRunState, isUsableStepHandoff, persistRun, prepareRunForResume } from "./runner-state.ts";
+import { chalinSessionIdFromContext, createRunState, isUsableStepHandoff, persistRun, prepareRunForResume } from "./runner-state.ts";
 import { clearLiveStepSession, setLiveStepSession, type LiveStepSessionRef } from "../runtime/state.ts";
 import { cleanupWorktrees, mergeWorktreeChanges, needsWorktreeIsolation, prepareWorktreeIsolation, type WorktreeIsolationPlan } from "../worktrees/worktrees.ts";
 import { DEFAULT_CONFIG, type ChalinConfig } from "../config/config.ts";
@@ -104,6 +104,7 @@ export class MockWorkerRunner implements WorkerRunner {
       parentRunId: context.parentRunId,
       parentStepId: context.parentStepId,
       delegationDepth: context.delegationDepth,
+      sessionId: chalinSessionIdFromContext(context.extensionContext),
     });
     persistRun(run);
     context.onUpdate?.(run);
@@ -184,6 +185,7 @@ export class SdkWorkerRunner implements WorkerRunner {
       parentRunId: context.parentRunId,
       parentStepId: context.parentStepId,
       delegationDepth: context.delegationDepth,
+      sessionId: chalinSessionIdFromContext(context.extensionContext),
     });
     persistRun(run);
     context.onUpdate?.(run);
@@ -2417,7 +2419,10 @@ function sanitizeNestedStages(stages: NonNullable<ChalinDelegateParamsShape["sta
     .slice(0, 3);
 }
 
-function sanitizeNestedBudget(value: AgentStep["budget"]): AgentStep["budget"] | undefined {
+function sanitizeNestedBudget(value: AgentStep["budget"] | "small" | "medium" | "large"): AgentStep["budget"] | undefined {
+  if (value === "small") return "tight";
+  if (value === "medium") return "normal";
+  if (value === "large") return "deep";
   return value === "tight" || value === "normal" || value === "deep" || value === "extended" ? value : undefined;
 }
 

@@ -6,6 +6,8 @@ import { spawnSync } from "node:child_process";
 import { test } from "vitest";
 import { approvalDecision, DEFAULT_CONFIG } from "../src/config/config.ts";
 import { createChildToolPolicy } from "../src/tools/child-tools.ts";
+import { routeFromPlan } from "../src/kernel/kernel.ts";
+import { normalizeRouteForExecution } from "../src/routing/route-guards.ts";
 import type { RouteDecision } from "../src/domain/schemas.ts";
 
 function route(risk: RouteDecision["risk"]): RouteDecision {
@@ -33,6 +35,29 @@ test("approvalDecision can ask for medium risk when explicitly configured", () =
 
 test("approvalDecision blocks critical risk", () => {
   assert.equal(approvalDecision(DEFAULT_CONFIG, route("critical")).action, "block");
+});
+
+test("destructive lockfile deletion routes are escalated to critical risk", () => {
+  const route = routeFromPlan({
+    topology: "sequential",
+    expectedEffects: ["write", "verify"],
+    risk: "low",
+    steps: [
+      {
+        agent: "worker",
+        task: "Delete Cargo.lock and uv.lock from the repository root.",
+        files: ["Cargo.lock", "uv.lock"],
+      },
+    ],
+  });
+
+  const normalized = normalizeRouteForExecution(route, {
+    requiresWorkspaceMutation: true,
+    task: "Delete Cargo.lock and uv.lock now.",
+  });
+
+  assert.equal(normalized.risk, "critical");
+  assert.equal(approvalDecision(DEFAULT_CONFIG, normalized).action, "block");
 });
 
 test("approvalDecision supports disabling approval prompts without disabling critical blocks", () => {
@@ -77,6 +102,15 @@ test("child policy tracks WebFetch output separately for tokenomics attribution"
   const metrics = policy.metrics();
   assert.ok((metrics.outputCharsByToolName.chalin_web_search ?? 0) > 0);
   assert.equal(metrics.outputCharsByToolName.chalin_web_search, metrics.outputChars);
+});
+
+test("child policy blocks destructive shell commands for protected project files", () => {
+  const policy = createChildToolPolicy({ cwd: process.cwd(), maxToolCalls: 4, allowedTools: ["bash"] });
+
+  const blocked = policy.beforeTool("bash", { command: "rm /tmp/example/Cargo.lock /tmp/example/uv.lock" });
+
+  assert.equal(blocked.allowed, false);
+  assert.match(blocked.reason, /destructive_command:rm/);
 });
 
 test("child policy guards repeated cross-step reads as a loop without budget stops", () => {

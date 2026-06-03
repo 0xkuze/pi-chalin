@@ -2,37 +2,17 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { mergedSessionModelOverrides, mergedSessionThinkingOverrides } from "../agents/agent-overrides.ts";
 import { AgentCatalog } from "../agents/agents.ts";
 import { loadEffectiveConfig } from "../config/config.ts";
-import type { RouteExpectedEffect, RouteRisk, RouteWorkUnitStrategy } from "../domain/schemas.ts";
-import { ChalinKernel, routeFromPlan, type ChalinHandleResult } from "../kernel/kernel.ts";
+import { ChalinKernel, type ChalinHandleResult } from "../kernel/kernel.ts";
 import { createConfiguredMemoryStore } from "../memory/memory-provider.ts";
 import { beginChalinRouteInvocation, finishChalinRouteInvocation, setLatestRun } from "../runtime/state.ts";
 import { setChalinStatus } from "../ui/ui-status.ts";
 import { openSafetyApproval } from "../ui/ui.ts";
 import { collapseReadOnlyScoutContextRoute, inferRouteRequiresWorkspaceMutation, normalizeRouteForExecution } from "./route-guards.ts";
 import { chalinRouteUpdateDetails, formatChalinRunWidget } from "./route-widget.ts";
+import { planChalinRoute, type ChalinDelegationStep, type ChalinRoutePlannerInput } from "./route-planner.ts";
 
-export type ChalinDelegationStep = {
-  id?: string;
-  agent: string;
-  task: string;
-  budget?: "tight" | "normal" | "deep" | "extended";
-  files?: string[];
-};
-
-export type ChalinDelegationRouteParams = {
-  task: string;
-  topology: "sequential" | "dag";
-  steps?: ChalinDelegationStep[];
-  stages?: Array<{ id?: string; name?: string; tasks?: ChalinDelegationStep[] }>;
-  risk?: RouteRisk;
-  needsMemory?: boolean;
-  needsArtifacts?: boolean;
-  expectedEffects: RouteExpectedEffect[];
-  workUnitStrategy?: RouteWorkUnitStrategy;
-  fanoutAuthorized?: boolean;
-  requiresWorkspaceMutation?: boolean;
-  reason?: string;
-};
+export type { ChalinDelegationStep };
+export type ChalinDelegationRouteParams = ChalinRoutePlannerInput;
 
 type DelegationToolUpdate = {
   content: Array<{ type: "text"; text: string }>;
@@ -57,9 +37,26 @@ export async function executeDelegatedChalinRoute(
     thinkingOverrides: mergedSessionThinkingOverrides(loaded.config.agents.thinkingOverrides),
   });
 
-  let route = routeFromPlan(params);
+  const planned = await planChalinRoute(params, {
+    cwd: ctx.cwd,
+    catalog,
+    model: ctx.model,
+    modelRegistry: ctx.modelRegistry,
+    signal: options.signal ?? ctx.signal,
+  });
+  let route = planned.route;
+  if (planned.source === "failed" && !route.plan) {
+    setChalinStatus(ctx, { kind: "failed" });
+    return {
+      route,
+      approval: { action: "block", reason: route.reason },
+      memories: [],
+      diagnostics: planned.diagnostics,
+    };
+  }
   const requiresWorkspaceMutation = route.expectedEffects?.includes("write") === true
     || Boolean(params.requiresWorkspaceMutation)
+    || Boolean(planned.requiresWorkspaceMutation)
     || inferRouteRequiresWorkspaceMutation(route, params.task);
   route = loaded.config.safety.mutationExpectationGuard
     ? normalizeRouteForExecution(route, { requiresWorkspaceMutation, task: params.task, agents: kernel.resolvePlanAgents(route) })
@@ -114,7 +111,7 @@ export async function executeDelegatedChalinRoute(
     setLatestRun(result.run);
     finishChalinRouteInvocation(guard.invocationId, result.run?.status === "complete" ? "complete" : result.run?.status === "paused" ? "paused" : result.run?.status === "failed" ? "failed" : "complete");
     setChalinStatus(ctx, result.run?.status === "complete" ? { kind: "complete" } : result.run?.status === "failed" ? { kind: "failed" } : { kind: "idle" });
-    return result;
+    return { ...result, diagnostics: [...planned.diagnostics, ...result.diagnostics] };
   } catch (error) {
     finishChalinRouteInvocation(guard.invocationId, options.signal?.aborted || ctx.signal?.aborted ? "paused" : "failed");
     setChalinStatus(ctx, options.signal?.aborted || ctx.signal?.aborted ? { kind: "stopped" } : { kind: "failed" });

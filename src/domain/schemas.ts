@@ -557,6 +557,7 @@ export interface RunState {
   endedAt?: string;
   steps: RunStepState[];
   logsPath?: string;
+  sessionId?: string;
   parentRunId?: string;
   parentStepId?: string;
   delegationDepth?: number;

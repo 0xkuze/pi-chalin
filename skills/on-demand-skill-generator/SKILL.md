@@ -1,16 +1,13 @@
 ---
 name: on-demand-skill-generator
-description: Procedure for turning a verified task recipe into an on-demand Skill candidate.
+description: Worker procedure for turning a verified task recipe into an on-demand Skill candidate artifact.
 scope: built-in
 extends:
   - worker
-  - planner
 concerns:
   - implementation
-  - planning
 capabilities:
   - validate
-  - write-new-files
 activation: manual
 triggers:
   - generate skill

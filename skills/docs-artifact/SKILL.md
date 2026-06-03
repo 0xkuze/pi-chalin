@@ -15,8 +15,8 @@ activation: auto
 triggers:
   - docs
   - documentation
+  - README
   - artifact
-  - markdown
 risk: low
 maxActiveWith:
   - review-final-gate

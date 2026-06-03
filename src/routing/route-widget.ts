@@ -31,9 +31,9 @@ export type ChalinRouteWidgetDetails = {
 
 type ChalinRouteToolParams = {
   task: string;
-  topology: "sequential" | "dag";
-  steps?: Array<{ id?: string; agent: string; task: string; budget?: "tight" | "normal" | "deep" | "extended" }>;
-  stages?: Array<{ id?: string; name?: string; tasks?: Array<{ id?: string; agent: string; task: string; budget?: "tight" | "normal" | "deep" | "extended" }> }>;
+  topology?: "auto" | "sequential" | "dag";
+  steps?: Array<{ id?: string; agent: string; task: string; budget?: "small" | "medium" | "large" | "tight" | "normal" | "deep" | "extended" }>;
+  stages?: Array<{ id?: string; name?: string; tasks?: Array<{ id?: string; agent: string; task: string; budget?: "small" | "medium" | "large" | "tight" | "normal" | "deep" | "extended" }> }>;
 };
 
 export function formatChalinRoutePlanWidget(params: ChalinRouteToolParams): string {
@@ -46,6 +46,13 @@ export function formatChalinRoutePlanWidget(params: ChalinRouteToolParams): stri
     ...steps.slice(0, 8).map((step, index) => `${treePrefix(index, steps.length)} ${statusGlyph(step.status ?? "pending")} ${step.agent} — ${taskTitle(step.task)}`),
     steps.length > 8 ? `└ … +${steps.length - 8} more` : undefined,
   ].filter((line): line is string => Boolean(line)).join("\n");
+}
+
+export function formatChalinRouteRequestWidget(_params: ChalinRouteToolParams): string {
+  return [
+    "pi-chalin · route requested",
+    "awaiting policy and normalized run",
+  ].join("\n");
 }
 
 export function formatChalinRunWidget(run: RunState): string {
@@ -180,7 +187,7 @@ function treePrefix(index: number, total: number): string {
 }
 
 function routeTitle(topology: ChalinRouteToolParams["topology"], task: string): string {
-  return `${topology} · ${truncate(task, 52)}`;
+  return `${topology ?? "auto"} · ${truncate(task, 52)}`;
 }
 
 function compactAgentPath(agents: string[]): string {

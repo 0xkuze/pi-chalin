@@ -39,7 +39,7 @@ The product goal is simple: keep the human in command while giving complex engin
 | Area | Capability |
 | --- | --- |
 | Routing | Direct execution for bounded work; routed workflows for broad, risky, or memory-sensitive work. |
-| Subagents | Built-in `scout`, `planner`, `worker`, `reviewer`, `researcher`, `delegate`, `oracle`, `context-builder`, and `conflict-resolver` agents. |
+| Subagents | Built-in `scout`, `planner`, `worker`, `reviewer`, `researcher`, `context-builder`, and `conflict-resolver` agents. |
 | Workflow shapes | `single`, `chain`, `parallel`, `dag`, and `memory-only` plans. |
 | Memory | Built-in SQLite memory with review, or native Engram memory with optional cloud sync. |
 | Safety | Approval thresholds, critical-route blocking, recursion guards, single-writer protection, mutation expectation checks, and destructive-action confirmation. |

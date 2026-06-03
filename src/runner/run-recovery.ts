@@ -11,9 +11,10 @@ export interface FailedRunDiagnostic {
   message: string;
 }
 
-export function loadFailedRunDiagnostic(options: ChalinPathsOptions & { runId?: string }): FailedRunDiagnostic | undefined {
+export function loadFailedRunDiagnostic(options: ChalinPathsOptions & { runId?: string; sessionId?: string }): FailedRunDiagnostic | undefined {
   for (const run of readRunsNewestFirst(options)) {
     if (options.runId && run.id !== options.runId) continue;
+    if (options.sessionId && run.sessionId !== options.sessionId) continue;
     if (run.status !== "failed") continue;
     const failedStep = firstFailedStep(run);
     return {

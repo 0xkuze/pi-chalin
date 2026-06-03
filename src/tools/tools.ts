@@ -10,10 +10,10 @@ import { createMemoryCandidate } from "../memory/memory.ts";
 import { createConfiguredMemoryStore } from "../memory/memory-provider.ts";
 import { formatInterviewResult, runChalinInterview, type InterviewRequestInput, type InterviewResult } from "../interview/interview.ts";
 import { loadFailedRunDiagnostic } from "../runner/run-recovery.ts";
-import { loadResumableRunState } from "../runner/runner-state.ts";
-import { activateSkillForTurn, disableSkillForTurn, setLatestRun } from "../runtime/state.ts";
+import { chalinSessionIdFromContext, loadResumableRunState } from "../runner/runner-state.ts";
+import { activateSkillForTurn, disableSkillForTurn, hasInlineToolStarted, setLatestRun } from "../runtime/state.ts";
 import { setChalinStatus } from "../ui/ui-status.ts";
-import { chalinRouteUpdateDetails, colorizeChalinWidget, footerStateForRun, formatChalinRoutePlanWidget, formatChalinRunWidget, formatChalinRunWidgetFromDetails, isUsableStepStatus, routeIntent, type ChalinRouteWidgetDetails } from "../routing/route-widget.ts";
+import { chalinRouteUpdateDetails, colorizeChalinWidget, footerStateForRun, formatChalinRouteRequestWidget, formatChalinRunWidget, formatChalinRunWidgetFromDetails, isUsableStepStatus, routeIntent, type ChalinRouteWidgetDetails } from "../routing/route-widget.ts";
 import { fetchWebUrls, formatWebBundle, formatWebBundleProgressWidget, formatWebBundleWidget, searchWeb, type WebBundleProgressWidgetInput, type WebContextBundle } from "../webfetch/webfetch.ts";
 import type { MemoryRecord, RunState } from "../domain/schemas.ts";
 import { compactRouteDetails, formatRoute } from "../routing/route-format.ts";
@@ -48,7 +48,15 @@ const ChalinRouteStepParams = Type.Object({
   id: Type.Optional(Type.String({ description: "Stable step id, e.g. scout, plan, implement, review." })),
   agent: Type.String({ description: "pi-chalin agent name such as scout, planner, context-builder, worker, reviewer, researcher, or conflict-resolver." }),
   task: Type.String({ minLength: 12, description: "Concrete responsibility for this subagent. Include relevant constraints and expected evidence." }),
-  budget: Type.Optional(Type.Union([Type.Literal("tight"), Type.Literal("normal"), Type.Literal("deep"), Type.Literal("extended")])),
+  budget: Type.Optional(Type.Union([
+    Type.Literal("small"),
+    Type.Literal("medium"),
+    Type.Literal("large"),
+    Type.Literal("tight"),
+    Type.Literal("normal"),
+    Type.Literal("deep"),
+    Type.Literal("extended"),
+  ], { description: "Optional budget hint. Human aliases are accepted: small=tight, medium=normal, large=deep." })),
   files: Type.Optional(Type.Array(Type.String(), { description: "Optional authoritative mutable file scope for this step when known." })),
 });
 
@@ -60,13 +68,13 @@ const ChalinRouteStageParams = Type.Object({
 
 const ChalinRouteParams = Type.Object({
   task: Type.String({ minLength: 12, description: "Original user request or the exact work to delegate to the pi-chalin orchestrator." }),
-  topology: Type.Union([Type.Literal("sequential"), Type.Literal("dag")], { description: "sequential for dependent phases, dag for independent fan-out before fan-in." }),
-  steps: Type.Optional(Type.Array(ChalinRouteStepParams, { minItems: 1, maxItems: 6, description: "Ordered subagent steps for sequential topology." })),
-  stages: Type.Optional(Type.Array(ChalinRouteStageParams, { minItems: 1, maxItems: 8, description: "DAG stages for independent or staged subagent work." })),
+  topology: Type.Optional(Type.Union([Type.Literal("auto"), Type.Literal("sequential"), Type.Literal("dag")], { description: "Optional advanced override. Omit or use auto so pi-chalin selects topology from task intent." })),
+  steps: Type.Optional(Type.Array(ChalinRouteStepParams, { minItems: 1, maxItems: 6, description: "Advanced override: ordered subagent steps when the workflow is already explicitly known." })),
+  stages: Type.Optional(Type.Array(ChalinRouteStageParams, { minItems: 1, maxItems: 8, description: "Advanced override: DAG stages for already-known independent work." })),
   risk: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"), Type.Literal("critical")])),
   needsMemory: Type.Optional(Type.Boolean({ description: "Allow the workflow to retrieve relevant pi-chalin memory." })),
   needsArtifacts: Type.Optional(Type.Boolean({ description: "Persist run artifacts/checkpoints for resume and inspection." })),
-  expectedEffects: Type.Array(Type.Union([Type.Literal("read"), Type.Literal("write"), Type.Literal("verify")]), { minItems: 1, maxItems: 3, uniqueItems: true, description: "Effects the delegated workflow must cover. Mutation requires write and verify." }),
+  expectedEffects: Type.Optional(Type.Array(Type.Union([Type.Literal("read"), Type.Literal("write"), Type.Literal("verify")]), { minItems: 1, maxItems: 3, uniqueItems: true, description: "Effects the delegated workflow must cover. Omit only when pi-chalin should infer them from task intent." })),
   workUnitStrategy: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("planned"), Type.Literal("discover")], { description: "Use discover when the orchestrator must derive safe work units before execution; planned when user already named independent slices." })),
   fanoutAuthorized: Type.Optional(Type.Boolean({ description: "True only when the user authorized applying the same delegated change across discovered independent targets." })),
   requiresWorkspaceMutation: Type.Optional(Type.Boolean({ description: "Set true when the delegated work is expected to edit/write files." })),
@@ -93,7 +101,7 @@ const ChalinSkillParams = Type.Object({
   name: Type.Optional(Type.String({ description: "Skill reference such as project:run-verify-project, built-in:bugfix-tight-loop, or feature:<id>:<name>." })),
   task: Type.Optional(Type.String({ description: "Task text for search/use matching." })),
   targetScope: Type.Optional(Type.Union([Type.Literal("project"), Type.Literal("user")])),
-  lifecycle: Type.Optional(Type.Union([Type.Literal("stale"), Type.Literal("expired"), Type.Literal("blocked")])),
+  lifecycle: Type.Optional(Type.Union([Type.Literal("all"), Type.Literal("stale"), Type.Literal("expired"), Type.Literal("blocked")], { description: "Optional lifecycle filter. 'all' means no lifecycle filter for observational actions." })),
 });
 
 type ChalinSkillToolParams = {
@@ -101,7 +109,7 @@ type ChalinSkillToolParams = {
   name?: string;
   task?: string;
   targetScope?: "project" | "user";
-  lifecycle?: "stale" | "expired" | "blocked";
+  lifecycle?: "all" | "stale" | "expired" | "blocked";
 };
 
 const WebFreshnessParam = Type.Optional(Type.Union([
@@ -274,6 +282,7 @@ export function registerChalinTools(pi: ExtensionAPI): void {
         });
       }
       if (params.action === "retire") {
+        if (params.lifecycle === "all") return errorResult("chalin_skill retire requires lifecycle stale, expired, or blocked; 'all' is only valid as an observational filter.", { action: params.action });
         const lifecycle = params.lifecycle ?? "stale";
         const result = retireSkill({ cwd: ctx.cwd, reference: params.name, lifecycle, actor: "chalin_skill" });
         return textResult(`skill retired: ${result.skill.qualifiedName} -> ${result.skill.lifecycle}\npath: ${result.path}`, result);
@@ -355,9 +364,11 @@ export function registerChalinTools(pi: ExtensionAPI): void {
     promptGuidelines: [
       "Use this when the work is complex, touches multiple files or ownership boundaries, needs independent verification/review, benefits from decomposition, or would otherwise overload the primary Pi thread.",
       "Do not call chalin_route just to decide whether to delegate. Decide with LLM judgment from the task shape, evidence burden, risk, ambiguity, decomposition value, and verification burden.",
+      "Default to intent-only delegation: pass task, expectedEffects when obvious, risk if obvious, and workUnitStrategy when needed. Omit topology, steps, and stages unless the user or prior evidence already gave explicit independent slices.",
       "If a non-discoverable human decision blocks safe progress, use chalin_interview before delegating. If uncertainty is discoverable from repo/web evidence, pass it into the delegated workflow.",
-      "Use sequential topology for dependent phases. Use DAG only for independent work before fan-in, and give disjoint file scopes for parallel writers when known.",
+      "Use explicit topology/steps/stages only as an advanced override. Chalin should choose subagents and parallelization from the delegated task intent by default.",
       "For mutation, include expectedEffects read/write/verify and let the orchestrator add worker/reviewer coverage when needed.",
+      "Do not call chalin_web_search in the same assistant turn as chalin_route. Let the delegated route gather local evidence first; use web only after the route reports an explicit external gap.",
       "Keep the user experience simple: after chalin_route returns, answer from its final material without exposing internal delegation labels unless the user asks.",
     ],
     parameters: ChalinRouteParams,
@@ -365,7 +376,7 @@ export function registerChalinTools(pi: ExtensionAPI): void {
       const loaded = loadEffectiveConfig({ cwd: ctx.cwd });
       const catalog = AgentCatalog.load({ cwd: ctx.cwd });
       onUpdate?.({
-        content: [{ type: "text", text: formatChalinRoutePlanWidget(params) }],
+        content: [{ type: "text", text: formatChalinRouteRequestWidget(params) }],
         details: { status: "pending", params },
       });
       try {
@@ -382,7 +393,7 @@ export function registerChalinTools(pi: ExtensionAPI): void {
       }
     },
     renderCall(args: ChalinRouteToolParams, theme) {
-      return new Text(colorizeChalinWidget(formatChalinRoutePlanWidget(args), theme), 0, 0);
+      return new Text(colorizeChalinWidget(formatChalinRouteRequestWidget(args), theme), 0, 0);
     },
     renderResult(result, _options, theme) {
       const details = result.details as ChalinRouteWidgetDetails | undefined;
@@ -404,9 +415,13 @@ export function registerChalinTools(pi: ExtensionAPI): void {
     parameters: ChalinResumeParams,
     async execute(_toolCallId, params: ChalinResumeToolParams, signal, onUpdate, ctx) {
       const loaded = loadEffectiveConfig({ cwd: ctx.cwd });
-      const run = loadResumableRunState({ cwd: ctx.cwd, runId: params.runId });
+      const sessionId = chalinSessionIdFromContext(ctx);
+      if (!sessionId && !params.runId) {
+        return textResult("No current Pi session id is available, so chalin_resume will not search project-wide paused runs. Provide an explicit runId to resume a specific run.", { runId: params.runId });
+      }
+      const run = loadResumableRunState({ cwd: ctx.cwd, runId: params.runId, ...(sessionId ? { sessionId } : {}) });
       if (!run) {
-        const failed = loadFailedRunDiagnostic({ cwd: ctx.cwd, runId: params.runId });
+        const failed = loadFailedRunDiagnostic({ cwd: ctx.cwd, runId: params.runId, ...(sessionId ? { sessionId } : {}) });
         if (failed) return textResult(failed.message, { runId: failed.run.id, run: failed.run, recoveryState: failed.run.recoveryState });
         return textResult(params.runId ? `No resumable pi-chalin run found for '${params.runId}'.` : "No paused or stale pi-chalin run found to resume.", { runId: params.runId });
       }
@@ -588,14 +603,21 @@ export function registerChalinTools(pi: ExtensionAPI): void {
     name: "chalin_web_search",
     label: "Chalin Web Search",
     description: "Search or fetch web context through Exa MCP. Use only when current external information, documentation, or a URL is required; returns compact sources, not a raw dump.",
-    promptSnippet: "chalin_web_search: search/fetch current web context through Exa MCP with compact citations.",
+    promptSnippet: "chalin_web_search: search/fetch current external context through Exa MCP; never substitute it for local repo evidence.",
     promptGuidelines: [
-      "Use chalin_web_search for current docs, recent facts, URLs, or external verification; do not use it for local repo facts.",
+      "Use chalin_web_search for current docs, recent facts, URLs, or external verification; do not use it for local repo facts or when the user asked for repository evidence.",
+      "If exact local files are needed and inline read/search tools are unavailable or insufficient, use chalin_route with expectedEffects ['read'] instead of searching the web.",
       "Prefer maxSources 3-5 and snippets unless the user explicitly needs deeper content.",
       "Cite source URLs from the tool result in your answer.",
     ],
     parameters: ChalinWebSearchParams,
     async execute(_toolCallId, params: ChalinWebSearchToolParams, signal, onUpdate, ctx) {
+      if (hasInlineToolStarted("chalin_route")) {
+        return textResult(
+          "Blocked by pi-chalin: chalin_web_search cannot run in the same assistant turn as chalin_route. Use the delegated route result first; search web only after it reports an explicit external gap.",
+          { blocked: true, reason: "route_web_same_turn", params },
+        );
+      }
       const urls = [...(params.urls ?? []), ...(params.url ? [params.url] : [])].filter(Boolean);
       const progressDetails: WebBundleProgressWidgetInput & { status: "running"; provider: "exa-mcp" } = urls.length > 0
         ? { status: "running", provider: "exa-mcp", mode: "fetch", label: urls.length === 1 ? urls[0] ?? "URL" : `${urls.length} URLs`, requested: urls, done: 0, total: urls.length }

@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import { estimateBudgetPreflight } from "../budget/budget.ts";
 import { resolveChalinPaths, type ChalinPathsOptions } from "../config/paths.ts";
 import type { AgentStep, RouteDecision, RoutePlan, RunState, RunStepState } from "../domain/schemas.ts";
@@ -8,7 +9,13 @@ import { buildIntentContract } from "./intent-contract.ts";
 import { updateRecoveryState } from "./run-recovery.ts";
 import { planStepsWithWorkUnits } from "./work-units.ts";
 
-export function createRunState(route: RouteDecision, cwd: string, rootTask?: string, metadata: { parentRunId?: string; parentStepId?: string; delegationDepth?: number } = {}): RunState {
+export type ChalinSessionContextLike = {
+  sessionManager?: {
+    getSessionFile?: () => string | undefined;
+  };
+};
+
+export function createRunState(route: RouteDecision, cwd: string, rootTask?: string, metadata: { parentRunId?: string; parentStepId?: string; delegationDepth?: number; sessionId?: string } = {}): RunState {
   const id = `chalin-${Date.now().toString(36)}`;
   const planned = planStepsWithWorkUnits(route);
   const intentContract = buildIntentContract(rootTask, route);
@@ -22,6 +29,7 @@ export function createRunState(route: RouteDecision, cwd: string, rootTask?: str
     startedAt: new Date().toISOString(),
     steps: planned.steps,
     logsPath: path.join(resolveChalinPaths({ cwd }).projectRoot, ".pi-chalin", "runs", `${id}.json`),
+    ...(metadata.sessionId ? { sessionId: metadata.sessionId } : {}),
     ...(metadata.parentRunId ? { parentRunId: metadata.parentRunId } : {}),
     ...(metadata.parentStepId ? { parentStepId: metadata.parentStepId } : {}),
     ...(metadata.delegationDepth !== undefined ? { delegationDepth: metadata.delegationDepth } : {}),
@@ -98,7 +106,7 @@ export function prepareRunForResume(run: RunState): RunState {
   return run;
 }
 
-export function loadResumableRunState(options: ChalinPathsOptions & { runId?: string; recoverStale?: boolean }): RunState | undefined {
+export function loadResumableRunState(options: ChalinPathsOptions & { runId?: string; recoverStale?: boolean; sessionId?: string }): RunState | undefined {
   const runsDir = path.join(resolveChalinPaths(options).projectRoot, ".pi-chalin", "runs");
   if (!fs.existsSync(runsDir)) return undefined;
   const files = fs.readdirSync(runsDir)
@@ -109,6 +117,7 @@ export function loadResumableRunState(options: ChalinPathsOptions & { runId?: st
     try {
       const parsed = JSON.parse(fs.readFileSync(file, "utf-8")) as RunState;
       if (options.runId && parsed.id !== options.runId) continue;
+      if (options.sessionId && parsed.sessionId !== options.sessionId) continue;
       if (isResumableRun(parsed)) {
         parsed.logsPath ??= file;
         if (parsed.status === "running" && options.recoverStale !== false) {
@@ -124,6 +133,25 @@ export function loadResumableRunState(options: ChalinPathsOptions & { runId?: st
     }
   }
   return undefined;
+}
+
+export function chalinSessionIdFromContext(context: ChalinSessionContextLike | undefined): string | undefined {
+  try {
+    return chalinSessionIdFromFile(context?.sessionManager?.getSessionFile?.());
+  } catch {
+    return undefined;
+  }
+}
+
+export function chalinSessionIdFromFile(file: string | undefined): string | undefined {
+  if (!file?.trim()) return undefined;
+  const resolved = path.resolve(file);
+  const baseName = path.basename(resolved, path.extname(resolved))
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48) || "session";
+  const hash = createHash("sha256").update(resolved).digest("hex").slice(0, 12);
+  return `${baseName}-${hash}`;
 }
 
 export function persistRun(run: RunState): void {

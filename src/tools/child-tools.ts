@@ -105,11 +105,14 @@ const DelegateStepParams = Type.Object({
   agent: Type.String({ description: "Available pi-chalin agent name for the delegated subtask." }),
   task: Type.String({ description: "Concrete delegated outcome, evidence to inspect, files to modify if any, and success criteria." }),
   budget: Type.Optional(Type.Union([
+    Type.Literal("small"),
+    Type.Literal("medium"),
+    Type.Literal("large"),
     Type.Literal("tight"),
     Type.Literal("normal"),
     Type.Literal("deep"),
     Type.Literal("extended"),
-  ])),
+  ], { description: "Optional budget hint. Human aliases are accepted: small=tight, medium=normal, large=deep." })),
 });
 
 const DelegateStageParams = Type.Object({
@@ -157,8 +160,8 @@ type ChalinMemoryReviseParamsShape = {
 export type ChalinDelegateParamsShape = {
   task: string;
   topology: "sequential" | "dag";
-  steps?: Array<{ id?: string; agent: string; task: string; budget?: "tight" | "normal" | "deep" | "extended" }>;
-  stages?: Array<{ id?: string; name?: string; tasks: Array<{ id?: string; agent: string; task: string; budget?: "tight" | "normal" | "deep" | "extended" }> }>;
+  steps?: Array<{ id?: string; agent: string; task: string; budget?: "small" | "medium" | "large" | "tight" | "normal" | "deep" | "extended" }>;
+  stages?: Array<{ id?: string; name?: string; tasks: Array<{ id?: string; agent: string; task: string; budget?: "small" | "medium" | "large" | "tight" | "normal" | "deep" | "extended" }> }>;
   reason: string;
   requiresWorkspaceMutation?: boolean;
 };
@@ -372,6 +375,12 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
       if (mutatingGitViolation) {
         activity(toolName, "blocked", mutatingGitViolation, params);
         return violation(mutatingGitViolation);
+      }
+
+      const destructiveCommand = destructiveShellCommandViolation(toolName, params);
+      if (destructiveCommand) {
+        activity(toolName, "blocked", destructiveCommand, params);
+        return violation(destructiveCommand);
       }
 
       const workUnitScopeViolation = mutationOutsideWorkUnitScopeViolation(toolName, params, options.cwd, workUnitScope);
@@ -602,9 +611,9 @@ export function createChalinWebSearchTool(policy: ChildToolPolicy): ToolDefiniti
     name: "chalin_web_search",
     label: "Chalin Web Search",
     description: "Search or fetch current web context through Exa MCP. Available only to agents with external-context capability.",
-    promptSnippet: "chalin_web_search: fetch compact external evidence through Exa MCP when authorized.",
+    promptSnippet: "chalin_web_search: fetch compact external evidence through Exa MCP when authorized; never substitute it for local repo evidence.",
     promptGuidelines: [
-      "Use chalin_web_search only when current external docs/facts or a URL are needed.",
+      "Use chalin_web_search only when current external docs/facts or a URL are needed; do not use it for local repo facts or when the task asks for repository evidence.",
       "Return source URLs in the handoff; do not paste raw dumps.",
     ],
     parameters: ChalinWebSearchParams,
@@ -1099,6 +1108,52 @@ function mutatingGitCommandViolation(toolName: string, params: Record<string, un
   const mutation = commandSegments(command).map(gitMutationFromSegment).find((value): value is string => Boolean(value));
   return mutation ? `mutating_git_command:${mutation}` : undefined;
 }
+
+function destructiveShellCommandViolation(toolName: string, params: Record<string, unknown>): string | undefined {
+  if (toolName !== "bash") return undefined;
+  const command = getCommandParam(params);
+  if (!command) return undefined;
+  for (const segment of commandSegments(command)) {
+    const words = shellWords(segment);
+    if (words.length === 0) continue;
+    const rmIndex = words.findIndex((word) => word === "rm");
+    if (rmIndex >= 0) {
+      const args = words.slice(rmIndex + 1);
+      if (args.some(isRecursiveOrForceRmFlag) || args.some(isProtectedDestructiveTarget)) return "destructive_command:rm";
+    }
+    const unlinkIndex = words.findIndex((word) => word === "unlink");
+    if (unlinkIndex >= 0 && words.slice(unlinkIndex + 1).some(isProtectedDestructiveTarget)) return "destructive_command:unlink";
+    const truncateIndex = words.findIndex((word) => word === "truncate");
+    if (truncateIndex >= 0 && words.slice(truncateIndex + 1).some(isProtectedDestructiveTarget)) return "destructive_command:truncate";
+    if (words.some((word) => word === "shred" || word === "srm")) return "destructive_command:secure-delete";
+  }
+  return undefined;
+}
+
+function isRecursiveOrForceRmFlag(word: string): boolean {
+  return /^-[A-Za-z]*[rf][A-Za-z]*$/.test(word) || word === "--recursive" || word === "--force";
+}
+
+function isProtectedDestructiveTarget(word: string): boolean {
+  const normalized = word.replace(/^['"]|['"]$/g, "").replaceAll("\\", "/");
+  const base = normalized.split("/").filter(Boolean).at(-1) ?? normalized;
+  return PROTECTED_DESTRUCTIVE_TARGETS.has(base) || normalized === ".git" || normalized.endsWith("/.git") || normalized === ".env" || normalized.endsWith("/.env");
+}
+
+const PROTECTED_DESTRUCTIVE_TARGETS = new Set([
+  ".env",
+  ".git",
+  "Cargo.lock",
+  "uv.lock",
+  "package-lock.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  "bun.lock",
+  "bun.lockb",
+  "Cargo.toml",
+  "package.json",
+  "pyproject.toml",
+]);
 
 function commandSegments(command: string): string[] {
   return command

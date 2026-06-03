@@ -1,6 +1,6 @@
 ---
 name: run-verify-project
-description: Suggested project verification procedure for discovering and reusing the correct run, test, and smoke commands.
+description: Project verification procedure for discovering and reusing the correct run, test, and smoke commands.
 scope: built-in
 extends:
   - worker
@@ -8,20 +8,24 @@ concerns:
   - implementation
 capabilities:
   - validate
-activation: suggested
+activation: auto
 triggers:
   - run verify
+  - verify project
   - verification command
   - smoke check
   - test command
-risk: low
+risk: medium
 maxActiveWith:
   - bugfix-tight-loop
+  - implementation-contract-edges
 allowedTools:
   - read
   - grep
   - find
   - ls
+  - edit
+  - write
   - bash
   - chalin_artifact_write
   - chalin_project_discovery

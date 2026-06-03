@@ -107,14 +107,22 @@ export interface SkillLifecycleReconcileResult {
 }
 
 const SCOPE_RANK: Record<SkillScope, number> = { "on-demand": 0, project: 1, user: 2, "built-in": 3 };
-const DANGEROUS_PHRASES = [
-  /\bignore (?:all )?(?:previous|prior|system|developer|user) instructions\b/i,
-  /\boverride (?:system|developer|user) instructions\b/i,
-  /\bomit (?:the )?reviewer\b/i,
-  /\bdo not mention\b/i,
-  /\bexfiltrat(?:e|ion)\b/i,
-  /\bread (?:secrets?|\.env|private keys?)\b/i,
+const COVERT_ACTION_PATTERNS = [
+  /\b(?:do not|don't|never)\s+(?:tell|mention|disclose|reveal)\b[^\n]{0,120}\b(?:user|reviewer|maintainer|owner|operator)\b/i,
 ];
+const AUTHORITY_BYPASS_PATTERNS = [
+  /\b(?:ignore|override|bypass|disable)\b[^\n]{0,80}\b(?:previous|prior|system|developer|user|repository|AGENTS\.md|instructions?|rules?|polic(?:y|ies)|requirements?|sandbox|approvals?|permissions?)\b/i,
+  /\b(?:skip|omit|bypass|disable)\b[^\n]{0,80}\b(?:reviewer|review gate|review step|approval gate|safety check|sandbox)\b/i,
+];
+const DANGEROUS_ACTION_PATTERNS = [
+  /\b(?:read|cat|print|dump|copy|upload|send|post|export|leak|exfiltrate)\b[^\n]{0,120}\b(?:\.env|secrets?|private keys?|ssh keys?|api keys?|tokens?|credentials?|passwords?)\b/i,
+  /\b(?:curl|wget|httpie|nc|netcat|scp|rsync)\b[^\n]{0,160}\b(?:\.env|secrets?|private keys?|api keys?|tokens?|credentials?|passwords?)\b/i,
+  /\brm\s+-[^\n]*r[^\n]*f\b/i,
+  /\bgit\s+(?:reset\s+--hard|clean\s+-[^\n]*[fdx])\b/i,
+  /\b(?:mkfs(?:\.[a-z0-9]+)?|dd\s+if=.+\s+of=|chmod\s+-R\s+777|chown\s+-R\s+[^\n]+\s+\/)\b/i,
+];
+const DEFENSIVE_SKILL_AUDIT_LINE =
+  /^(?:[-*]\s*)?(?:block|detect|scan|audit|flag|reject|prevent|avoid|check for|watch for|treat|never|must not|should not|do not|don't)\b/i;
 const SECRET_PATTERNS = [
   /\b(?:AWS|GOOGLE|OPENAI|ANTHROPIC|GITHUB|NPM)_[A-Z0-9_]*(?:SECRET|TOKEN|KEY)[A-Z0-9_]*\s*=\s*[A-Za-z0-9_./+=-]{12,}/,
   /\b(?:sk|ghp|gho|github_pat)_[A-Za-z0-9_]{16,}\b/,
@@ -328,7 +336,9 @@ export function auditSkill(skill: SkillDefinition, config: ChalinConfig = DEFAUL
     findings.push(warn("broad-trigger", "Triggers should be specific enough to avoid overmatching."));
   }
   const text = `${serializeSkillMetadata(auditedSkill)}\n${auditedSkill.body}`;
-  if (hasDangerousSkillInstruction(text)) findings.push(error("prompt-injection", "Skill tries to alter instruction hierarchy or reviewer gates."));
+  const unsafeInstruction = unsafeSkillInstructionFinding(text);
+  if (unsafeInstruction === "prompt-injection") findings.push(error("prompt-injection", "Skill tries to alter instruction hierarchy or reviewer gates."));
+  if (unsafeInstruction === "unsafe-action") findings.push(error("unsafe-action", "Skill instructs unsafe secret access, external leakage, or destructive commands."));
   if (hasSecretLikeValue(text)) findings.push(error("secret", "Skill appears to contain a secret or credential-like value."));
   findings.push(...auditSkillResources(auditedSkill));
   if (auditedSkill.scripts !== "disabled" && !config.skills.allowSkillScripts) findings.push(error("scripts-disabled", "Skill scripts are disabled by configuration."));
@@ -989,7 +999,9 @@ function auditSkillResources(skill: SkillDefinition): SkillAuditFinding[] {
       findings.push(warn("large-resource", `Skill resource '${resource}' is large; keep resources compact or split reviewed references.`));
       continue;
     }
-    if (hasDangerousSkillInstruction(content)) findings.push(error("resource-prompt-injection", `Skill resource '${resource}' contains instruction-hierarchy override language.`));
+    const unsafeResourceInstruction = unsafeSkillInstructionFinding(content);
+    if (unsafeResourceInstruction === "prompt-injection") findings.push(error("resource-prompt-injection", `Skill resource '${resource}' contains instruction-hierarchy override language.`));
+    if (unsafeResourceInstruction === "unsafe-action") findings.push(error("resource-unsafe-action", `Skill resource '${resource}' contains unsafe secret access, external leakage, or destructive commands.`));
     if (hasSecretLikeValue(content)) findings.push(error("resource-secret", `Skill resource '${resource}' appears to contain a secret or credential-like value.`));
   }
   return findings;
@@ -999,8 +1011,22 @@ function isAuditableTextResource(filePath: string): boolean {
   return /\.(?:md|mdx|txt|json|ya?ml|toml|csv|tsv|sh|bash|zsh|ts|tsx|js|jsx|mjs|cjs|py|rb|go|rs|java|kt|swift|sql|html|css)$/i.test(filePath);
 }
 
-function hasDangerousSkillInstruction(text: string): boolean {
-  return DANGEROUS_PHRASES.some((pattern) => pattern.test(text));
+function unsafeSkillInstructionFinding(text: string): "prompt-injection" | "unsafe-action" | undefined {
+  for (const line of text.split(/\r?\n/)) {
+    const finding = unsafeSkillLineFinding(line);
+    if (finding) return finding;
+  }
+  return undefined;
+}
+
+function unsafeSkillLineFinding(line: string): "prompt-injection" | "unsafe-action" | undefined {
+  const normalized = line.trim();
+  if (!normalized) return undefined;
+  if (COVERT_ACTION_PATTERNS.some((pattern) => pattern.test(normalized))) return "prompt-injection";
+  if (DEFENSIVE_SKILL_AUDIT_LINE.test(normalized)) return undefined;
+  if (AUTHORITY_BYPASS_PATTERNS.some((pattern) => pattern.test(normalized))) return "prompt-injection";
+  if (DANGEROUS_ACTION_PATTERNS.some((pattern) => pattern.test(normalized))) return "unsafe-action";
+  return undefined;
 }
 
 function hasSecretLikeValue(text: string): boolean {
