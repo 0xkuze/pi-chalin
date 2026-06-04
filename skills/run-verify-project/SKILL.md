@@ -36,7 +36,7 @@ version: 1
 ## Rules
 - Discover commands from package manifests, README, Makefile, CI, or existing tests before inventing them.
 - Prefer the nearest focused verification command over full-suite commands for bounded work.
-- Treat full test/build/typecheck/CI scripts, dev servers, watchers, and commands with slow/sleep/server names as potentially blocking; when `chalin_bash_job` is available, prefer it over `bash`, use `completionAction=resume` when the result should continue later, and report pass/fail only after a terminal status/read/await or completion wakeup.
+- Use normal `bash` by default for focused checks and for commands whose result is needed before the next response. Treat full test/build/typecheck/CI scripts, dev servers, watchers, and commands with slow/sleep/server names as potentially blocking; when they would otherwise need a long timeout or can run while other work continues, use `chalin_bash_job`. Do not start a background job if the next action is simply waiting for it. Set `completionAction=resume` when the result should continue later, and report pass/fail only after a terminal status/read/await or completion wakeup.
 - If a reusable command recipe is verified, record it as a worker skill candidate with evidence.
 - If commands fail because the recipe is stale or incomplete, report the exact blocking dependency without fabricating success.
 - Never treat ad-hoc scripts as permanent tests unless they are committed runner-discoverable tests.

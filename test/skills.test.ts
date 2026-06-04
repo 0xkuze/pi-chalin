@@ -120,8 +120,10 @@ test("buildSdkPrompt teaches workers when to choose background bash jobs", () =>
   });
 
   assert.match(prompt, /Background bash judgment/i);
-  assert.match(prompt, /Prefer `chalin_bash_job` for potentially long\/blocking verification, build, typecheck, test-suite/i);
-  assert.match(prompt, /use `bash` for quick commands/i);
+  assert.match(prompt, /use normal `bash` by default/i);
+  assert.match(prompt, /Use `chalin_bash_job` only when/i);
+  assert.match(prompt, /long timeout/i);
+  assert.match(prompt, /simply wait for it/i);
   assert.ok(childToolNames(agent).includes("chalin_bash_job"));
 });
 

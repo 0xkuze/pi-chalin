@@ -37,5 +37,5 @@ version: 1
 - Add or update the nearest runner-discoverable regression test unless the user explicitly forbids test edits.
 - When tests are touched, cover the broken behavior plus the nearest meaningful boundary of the same contract.
 - Run the nearest verification command from repository evidence.
-- Prefer `chalin_bash_job` over blocking `bash` for likely-long test, typecheck, build, CI, watcher, or dev-server verification; use `completionAction=resume` when the result should continue later, and do not cite it as passing evidence until a terminal status/read/await or completion wakeup reports success.
+- Use normal `bash` by default, especially when the result is needed before the next response. Use `chalin_bash_job` only for likely-long/full-suite test, typecheck, build, CI, watcher, dev-server, commands that would otherwise need a long timeout, or async work that can continue independently. Do not start a background job if the next action is simply waiting for it; use `completionAction=resume` when the result should continue later, and do not cite it as passing evidence until a terminal status/read/await or completion wakeup reports success.
 - Final handoff cites implementation path, test or evidence path, and verification command.

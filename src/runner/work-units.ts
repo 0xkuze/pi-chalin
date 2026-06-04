@@ -54,7 +54,7 @@ export function refreshWorkUnitStatuses(run: RunState): void {
 }
 
 function workUnitStepIds(unit: WorkUnit): Set<string> {
-  return new Set([unit.workerStepId, unit.reviewerStepId, unit.finalReviewerStepId, unit.sourceStepId].filter((id): id is string => Boolean(id)));
+  return new Set([unit.workerStepId, unit.reviewerStepId, unit.finalReviewerStepId].filter((id): id is string => Boolean(id)));
 }
 
 export function expandWorkUnitsFromHandoff(run: RunState, sourceStep: RunStepState): boolean {
@@ -67,6 +67,10 @@ export function expandWorkUnitsFromHandoff(run: RunState, sourceStep: RunStepSta
   if (sourceUnit?.createdFrom === "fanout") return false;
   const sourceRank = workUnitSourceRank(run, sourceStep);
   if (sourceRank <= 0 || hasPendingWorkUnitAuthority(run, sourceRank)) return false;
+  if (hasDownstreamWorkUnitOwner(run, sourceStep)) {
+    run.warnings.push(`Structured WorkUnits from ${sourceStep.agent}/${sourceStep.id} left in the parent handoff because downstream owner step(s) already exist for execution/review.`);
+    return false;
+  }
   const fanoutUnits = extractFanoutWorkUnits(sourceStep);
   if (fanoutUnits.length < 2) {
     run.warnings.push(`Structured WorkUnit discovery from ${sourceStep.agent}/${sourceStep.id} returned ${fanoutUnits.length} unit(s); no WorkUnit execution was materialized.`);
@@ -287,6 +291,18 @@ function hasPendingWorkUnitAuthority(run: RunState, currentRank: number): boolea
   return run.steps.some((step) => {
     if (step.status !== "pending" && step.status !== "running") return false;
     return workUnitSourceRank(run, step) >= currentRank;
+  });
+}
+
+function hasDownstreamWorkUnitOwner(run: RunState, sourceStep: RunStepState): boolean {
+  const sourceIndex = run.steps.indexOf(sourceStep);
+  if (sourceIndex < 0) return false;
+  return run.steps.slice(sourceIndex + 1).some((step) => {
+    if (step.status === "skipped" || step.skipReason) return false;
+    if (step.agent === "planner") return true;
+    const unit = step.workUnitId ? run.workUnits?.find((candidate) => candidate.id === step.workUnitId) : undefined;
+    if (unit?.kind === "implementation" || unit?.kind === "review" || unit?.kind === "planning") return true;
+    return Boolean(unit?.expectedEffects.includes("write") || unit?.expectedEffects.includes("verify"));
   });
 }
 

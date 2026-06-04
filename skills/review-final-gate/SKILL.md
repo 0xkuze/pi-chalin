@@ -36,5 +36,5 @@ version: 1
 - Treat passing tests as evidence for only the behavior they exercise.
 - Flag missing requested criteria, missing permanent tests, skipped scope, unsafe broad edits, and unsupported claims.
 - Return `verdict: "pass"` only after checking changed content and verification evidence.
-- Prefer `chalin_bash_job` over blocking `bash` when review verification may run a long test, typecheck, build, CI, watcher, or dev-server command; use `completionAction=resume` when the result should continue later, and record pass evidence only after a terminal status/read/await or completion wakeup reports success.
+- Use normal `bash` by default for review checks and for commands whose result is needed before the next response. Use `chalin_bash_job` only when review verification may run a long/full-suite test, typecheck, build, CI, watcher, dev-server, a command that would otherwise need a long timeout, or async work that can continue independently. Do not start a background job if the next action is simply waiting for it; use `completionAction=resume` when the result should continue later, and record pass evidence only after a terminal status/read/await or completion wakeup reports success.
 - Use `verdict: "fail"` or `verdict: "gap"` when any blocking issue remains, and fill blockingFindings, missingCoverage, evidence, and requiredRepair.

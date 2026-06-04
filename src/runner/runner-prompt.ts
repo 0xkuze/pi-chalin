@@ -75,7 +75,7 @@ export function buildSdkPrompt(
     "- Discovery/snapshot: inventory/git history only; not run mutations. Read exact evidence before claims.",
     "- Bash is role-scoped full shell; use purposeful commands.",
     agent && hasAnyCapability(agent, ["run-safe-bash", "validate"]) && taskNeedsBash(agent)
-      ? "- Background bash judgment: use `bash` for quick commands whose immediate output decides the next edit or fact. Prefer `chalin_bash_job` for potentially long/blocking verification, build, typecheck, test-suite, dev-server, watcher, or sleep/server commands; set requiredEvidence=true when that result is needed for completion, set completionAction=resume when the owning Pi thread should wake on completion, and avoid immediate await unless the result is needed for the very next step."
+      ? "- Background bash judgment: use normal `bash` by default, especially for quick commands or commands whose output is needed before the next assistant response. Use `chalin_bash_job` only when you would otherwise need a long timeout, a dev-server/watcher/sleep/server command, a likely slow full test/build/typecheck/CI verification, or a command that can run while you continue independent work. Do not start a background job if the next thing you will do is simply wait for it; use normal `bash` with an appropriate timeout instead. Set requiredEvidence=true when that result is needed for completion and set completionAction=resume when the owning Pi thread should wake on completion."
       : undefined,
     "",
     formatActiveSkillsForPrompt(options.activeSkills ?? []),

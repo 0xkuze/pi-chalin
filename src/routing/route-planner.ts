@@ -311,7 +311,7 @@ function fallbackPlannerOutput(input: ChalinRoutePlannerInput, catalog: AgentCat
   const task = [
     input.task.trim(),
     expectedEffects.includes("verify")
-      ? "Use exact repo evidence to discover the verification command. For potentially long test/build/typecheck commands, prefer chalin_bash_job; use completionAction=resume for async continuation and avoid immediate await unless the result is needed for the next step."
+      ? "Use exact repo evidence to discover the verification command. Use normal bash by default, especially when the result is needed before the next response. Choose chalin_bash_job only for commands that would otherwise need a long timeout, likely slow full test/build/typecheck/CI verification, dev servers, watchers, or async work that can continue independently. Do not start a background job if the next thing you will do is simply wait for it; use bash with an appropriate timeout instead. Use completionAction=resume for async continuation."
       : "Use exact repo evidence before making claims.",
     requiresWorkspaceMutation ? "Preserve the requested scope and verify after mutation." : "Do not mutate files unless the user task explicitly requires it.",
   ].join(" ");

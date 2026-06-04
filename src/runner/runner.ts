@@ -241,7 +241,7 @@ async function runMockDag(run: RunState, stages: Extract<RoutePlan, { kind: "dag
     const stage = stages[stageIndex]!;
     if (runBlockedByHumanInput(run)) break;
     throwIfAborted(context.signal);
-    const stageSteps = run.steps.filter((step) => step.id.startsWith(`${stage.id}:`));
+    const stageSteps = stageStepsForRun(run, stage.id);
     const outputs = await runParallel(stageSteps, context, previous, run, `mock-dag:${stage.id}`);
     afterStageHandoffs(run, stageSteps);
     if (runBlockedByHumanInput(run)) break;
@@ -258,7 +258,7 @@ async function resumeMockDag(run: RunState, stages: Extract<RoutePlan, { kind: "
     const stage = stages[stageIndex]!;
     if (runBlockedByHumanInput(run)) break;
     throwIfAborted(context.signal);
-    const stageSteps = run.steps.filter((step) => step.id.startsWith(`${stage.id}:`));
+    const stageSteps = stageStepsForRun(run, stage.id);
     if (stageSteps.every((step) => isUsableStepHandoff(step))) {
       previous = aggregateStageHandoff(stageSteps);
       afterStageHandoffs(run, stageSteps);
@@ -282,6 +282,10 @@ async function resumeMockDag(run: RunState, stages: Extract<RoutePlan, { kind: "
     }
     previous = aggregateStageHandoff(stageSteps) || aggregateHandoff(outputs.map((output) => ({ agent: output.agent, text: output.handoff ?? output.text })));
   }
+}
+
+function stageStepsForRun(run: RunState, stageId: string): RunStepState[] {
+  return run.steps.filter((step) => step.stageId === stageId || step.id.startsWith(`${stageId}:`));
 }
 
 async function mergeIsolatedStage(
@@ -413,7 +417,7 @@ async function runSdkDag(
       markRunAborted(run, context, "pi-chalin run stopped by user.");
       break;
     }
-    const stageSteps = run.steps.filter((step) => step.id.startsWith(`${stage.id}:`));
+    const stageSteps = stageStepsForRun(run, stage.id);
     const stageResult = await runSdkStage(run, stage, stageSteps, context, extensionContext, previous);
     const recoveredPauses = recoverPausedReadOnlyDagStage(stageSteps, context.agents);
     if (recoveredPauses > 0) {

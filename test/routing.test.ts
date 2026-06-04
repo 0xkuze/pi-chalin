@@ -12,9 +12,9 @@ import { formatRoute } from "../src/routing/route-format.ts";
 import { shouldScheduleNonInteractiveShutdown } from "../src/routing/autoroute.ts";
 import { planChalinRoute, validateChalinRoutePlannerOutput } from "../src/routing/route-planner.ts";
 import { formatChalinRouteRequestWidget, formatChalinRunWidgetFromDetails } from "../src/routing/route-widget.ts";
-import { loadFailedRunDiagnostic, markHumanBlockedDependentsSkipped } from "../src/runner/run-recovery.ts";
+import { loadFailedRunDiagnostic, markHumanBlockedDependentsSkipped, updateRecoveryState } from "../src/runner/run-recovery.ts";
 import { chalinSessionIdFromFile, createRunState, loadResumableRunState, markRunHumanInputAnswered, persistRun, prepareRunForResume } from "../src/runner/runner-state.ts";
-import { MockWorkerRunner, planNestedDelegationRoute } from "../src/runner/runner.ts";
+import { MockWorkerRunner, planNestedDelegationRoute, terminalRunStatusForSteps } from "../src/runner/runner.ts";
 import { expandWorkUnitsFromHandoff, planStepsWithWorkUnits, refreshWorkUnitStatuses } from "../src/runner/work-units.ts";
 import { beginChalinTurn, hasInlineToolStarted, recordInlineToolStart } from "../src/runtime/state.ts";
 import { chalinChildSessionDir } from "../src/runtime/child-sessions.ts";
@@ -588,6 +588,134 @@ test("prepareRunForResume retries a failed legacy step without WorkUnit metadata
   assert.equal(run.steps[0]!.status, "pending");
   assert.equal(run.steps[0]!.error, undefined);
   assert.equal(run.steps[1]!.status, "pending");
+});
+
+test("prepareRunForResume attaches pending orphan steps to executable DAG stages", () => {
+  const cwd = tempDir("pi-chalin-resume-orphan-dag-step-");
+  const route = routeFromPlan({
+    topology: "dag",
+    expectedEffects: ["read"],
+    stages: [{
+      id: "completed",
+      tasks: [{ id: "scout", agent: "scout", task: "Map current state.", expectedEffects: ["read"] }],
+    }],
+  });
+  const run = createRunState(route, cwd, "Resume orphan repair step.");
+  run.status = "paused";
+  run.steps[0]!.status = "complete";
+  run.steps.push({
+    id: "review-repair-2-mutation",
+    agent: "worker",
+    task: "Repair missed implementation gap.",
+    status: "pending",
+    workUnitId: "unit-repair",
+    dependencies: [run.steps[0]!.id],
+  });
+
+  prepareRunForResume(run);
+
+  assert.equal(run.steps[1]!.stageId, "resume-review-repair-2-mutation");
+  assert.deepEqual(run.route.plan?.kind === "dag" ? run.route.plan.stages.map((stage) => stage.id) : [], [
+    "completed",
+    "resume-review-repair-2-mutation",
+  ]);
+});
+
+test("DAG resume executes steps matched by stageId instead of requiring id prefixes", async () => {
+  const cwd = tempDir("pi-chalin-resume-stageid-dag-step-");
+  try {
+    const route = routeFromPlan({
+      topology: "dag",
+      expectedEffects: ["read"],
+      stages: [{
+        id: "repair-stage",
+        tasks: [{ id: "repair", agent: "scout", task: "Resume stageId-only repair.", expectedEffects: ["read"] }],
+      }],
+    });
+    const run = createRunState(route, cwd, "Resume stageId-only repair.");
+    run.status = "paused";
+    run.steps[0]!.id = "review-repair-2-mutation";
+    run.steps[0]!.stageId = "repair-stage";
+    run.steps[0]!.status = "pending";
+
+    const resumed = await new MockWorkerRunner().resume(run, {
+      cwd,
+      agents: executableAgents(AgentCatalog.load({ cwd: process.cwd() })),
+    });
+
+    assert.equal(resumed.steps[0]?.status, "complete");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("recovery state resolves DAG route steps by stageId when ids are normalized for resume", () => {
+  const cwd = tempDir("pi-chalin-recovery-stageid-route-step-");
+  try {
+    const route = routeFromPlan({
+      topology: "dag",
+      expectedEffects: ["read", "write", "verify"],
+      stages: [{
+        id: "repair-stage",
+        tasks: [{ id: "repair", agent: "worker", task: "Repair implementation.", expectedEffects: ["read", "write", "verify"] }],
+      }],
+    });
+    const run = createRunState(route, cwd, "Repair implementation.");
+    const step = run.steps[0]!;
+    step.id = "review-repair-2-mutation";
+    step.stageId = "repair-stage";
+    step.status = "failed";
+    step.error = "mutation failed";
+
+    updateRecoveryState(run, step);
+
+    assert.match(run.recoveryState?.repairOptions.join("\n") ?? "", /mutation repair route/i);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("prepareRunForResume refreshes persisted required background job evidence", () => {
+  const cwd = tempDir("pi-chalin-resume-background-evidence-");
+  const route = routeFromPlan({
+    topology: "sequential",
+    expectedEffects: ["read", "verify"],
+    steps: [{ id: "verify", agent: "reviewer", task: "Verify implementation.", expectedEffects: ["read", "verify"] }],
+  });
+  const run = createRunState(route, cwd, "Verify implementation.");
+  const step = run.steps[0]!;
+  step.status = "complete";
+  step.backgroundJobs = [{
+    id: "verify-job",
+    command: "pnpm test",
+    status: "running",
+    cwd,
+    outputLogPath: path.join(cwd, ".pi-chalin", "background-jobs", "verify-job.log"),
+    requiredEvidence: true,
+    completionAction: "resume",
+  }];
+  run.status = "paused";
+  fs.mkdirSync(path.join(cwd, ".pi-chalin", "background-jobs"), { recursive: true });
+  fs.writeFileSync(path.join(cwd, ".pi-chalin", "background-jobs", "verify-job.json"), `${JSON.stringify({
+    id: "verify-job",
+    command: "pnpm test",
+    cwd,
+    status: "succeeded",
+    owner: { runId: run.id, stepId: step.id, agent: step.agent },
+    requiredEvidence: true,
+    notifyOnCompletion: true,
+    completionAction: "resume",
+    outputLogPath: path.join(cwd, ".pi-chalin", "background-jobs", "verify-job.log"),
+    outputBytes: 8,
+    tail: "pass",
+    truncated: false,
+  }, null, 2)}\n`, "utf-8");
+
+  prepareRunForResume(run);
+
+  assert.equal(step.backgroundJobs[0]?.status, "succeeded");
+  assert.equal(step.backgroundJobs[0]?.tail, "pass");
+  assert.equal(terminalRunStatusForSteps(run, executableAgents(AgentCatalog.load({ cwd: process.cwd() }))), "complete");
 });
 
 test("human-input recovery only records actual review steps as reviewers not run", () => {
@@ -1279,6 +1407,68 @@ test("WorkUnit refresh derives status from referenced step ids when workUnitId i
   assert.equal(run.workUnits![1]!.status, "running");
 });
 
+test("WorkUnit refresh treats sourceStepId as lineage instead of execution evidence", () => {
+  const route = routeFromPlan({
+    topology: "sequential",
+    expectedEffects: ["read", "write", "verify"],
+    steps: [{ id: "discover", agent: "scout", task: "Discover implementation slices." }],
+  });
+  const run = createRunState(route, process.cwd(), "Discover implementation slices.");
+  run.steps[0]!.status = "complete";
+  run.workUnits = [{
+    id: "fanout-step-1-1",
+    title: "Implementation slice",
+    kind: "implementation",
+    status: "pending",
+    scope: ["Implement a bounded slice."],
+    dependencies: ["unit-discover"],
+    expectedEffects: ["read", "write", "verify"],
+    acceptanceCriteria: ["Slice is implemented and verified."],
+    sourceStepId: run.steps[0]!.id,
+    createdFrom: "fanout",
+  }];
+
+  refreshWorkUnitStatuses(run);
+
+  assert.equal(run.workUnits[0]?.status, "pending");
+});
+
+test("run widget does not render source-only fanout WorkUnits as fake implementation agents", () => {
+  const text = formatChalinRunWidgetFromDetails({
+    route: routeFromPlan({
+      topology: "sequential",
+      expectedEffects: ["read", "write", "verify"],
+      steps: [{ id: "discover", agent: "scout", task: "Discover implementation slices." }],
+    }),
+    run: {
+      id: "run-source-only-fanout",
+      rootTask: "Discover implementation slices.",
+      status: "paused",
+      steps: [
+        { id: "step-1", agent: "scout", task: "Discover implementation slices.", status: "complete" },
+      ],
+      workUnits: [
+        {
+          id: "fanout-step-1-1",
+          title: "Inline api client wrapper",
+          kind: "implementation",
+          status: "pending",
+          scope: ["Inline api client wrapper."],
+          dependencies: [],
+          expectedEffects: ["read", "write", "verify"],
+          acceptanceCriteria: ["Wrapper is inlined."],
+          sourceStepId: "step-1",
+          createdFrom: "fanout",
+        },
+      ],
+      warnings: [],
+    },
+  });
+
+  assert.match(text, /work-unit - Inline api client wrapper/);
+  assert.doesNotMatch(text, /implementation - Inline api client wrapper/);
+});
+
 test("run widget normalizes duplicate WorkUnit display ids without changing language", () => {
   const text = formatChalinRunWidgetFromDetails({
     route: routeFromPlan({
@@ -1433,7 +1623,9 @@ test("route planner fallback uses explicit effects without blocking isolated rou
   assert.equal(result.route.plan?.kind, "sequential");
   assert.deepEqual(result.route.expectedEffects, ["read", "verify"]);
   assert.equal(result.route.agents[0], "worker");
-  assert.match(result.route.plan?.steps?.[0]?.task ?? "", /prefer chalin_bash_job/i);
+  assert.match(result.route.plan?.steps?.[0]?.task ?? "", /Use normal bash by default/i);
+  assert.match(result.route.plan?.steps?.[0]?.task ?? "", /choose chalin_bash_job only/i);
+  assert.match(result.route.plan?.steps?.[0]?.task ?? "", /simply wait for it/i);
   assert.match(result.diagnostics.join("\n"), /conservative single-agent fallback/i);
 });
 
@@ -2008,8 +2200,8 @@ test("planner handoff WorkUnits do not create sibling planner fanout steps", () 
   }
 });
 
-test("discovered WorkUnit fanout planner is inserted after the source stage instead of appended after downstream work", () => {
-  const cwd = tempDir("pi-chalin-fanout-insert-order-");
+test("discovered WorkUnit fanout stays in handoff when downstream owner stages already exist", () => {
+  const cwd = tempDir("pi-chalin-fanout-downstream-owner-");
   try {
     const route = routeFromPlan({
       topology: "dag",
@@ -2054,18 +2246,17 @@ test("discovered WorkUnit fanout planner is inserted after the source stage inst
     source.output = discoveredWorkUnitsOutput();
     run.steps[1]!.status = "complete";
 
-    assert.equal(expandWorkUnitsFromHandoff(run, source), true);
+    assert.equal(expandWorkUnitsFromHandoff(run, source), false);
     assert.deepEqual(run.steps.map((step) => step.id), [
       "evidence:step-1",
       "evidence:step-2",
-      "fanout-evidence-step-1-route-plan:step-1",
       "validation:step-1",
     ]);
     assert.deepEqual(run.route.plan?.kind === "dag" ? run.route.plan.stages.map((stage) => stage.id) : [], [
       "evidence",
-      "fanout-evidence-step-1-route-plan",
       "validation",
     ]);
+    assert.match(run.warnings.join("\n"), /downstream owner step/i);
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }

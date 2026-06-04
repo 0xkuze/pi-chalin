@@ -180,7 +180,7 @@ function visibleItemsFromUnits(units: WorkUnit[], steps: ChalinRouteWidgetStep[]
     items.push({
       id: displayId(unit.id),
       title: step?.task || unit.title || unit.id,
-      agent: step?.agent ?? unit.kind,
+      agent: step?.agent ?? fallbackUnitAgent(unit),
       status: visibleStatus(unit.status, step),
       step,
       unit,
@@ -192,11 +192,15 @@ function visibleItemsFromUnits(units: WorkUnit[], steps: ChalinRouteWidgetStep[]
 
 function stepsForUnit(unit: WorkUnit, unitStepLookup: Map<string, ChalinRouteWidgetStep[]>, steps: ChalinRouteWidgetStep[]): ChalinRouteWidgetStep[] {
   const direct = unitStepLookup.get(unit.id) ?? [];
-  const ids = new Set([unit.workerStepId, unit.reviewerStepId, unit.finalReviewerStepId, unit.sourceStepId].filter((id): id is string => Boolean(id)));
+  const ids = new Set([unit.workerStepId, unit.reviewerStepId, unit.finalReviewerStepId].filter((id): id is string => Boolean(id)));
   if (ids.size === 0) return direct;
   const byReference = steps.filter((step) => typeof step.id === "string" && ids.has(step.id));
   if (byReference.length === 0) return direct;
   return [...direct, ...byReference.filter((step) => !direct.includes(step))];
+}
+
+function fallbackUnitAgent(unit: WorkUnit): string {
+  return unit.createdFrom === "fanout" ? "work-unit" : unit.kind;
 }
 
 function visibleItemsFromSteps(steps: ChalinRouteWidgetStep[], includeNested: boolean): VisibleWorkItem[] {

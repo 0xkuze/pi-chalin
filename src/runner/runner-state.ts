@@ -96,6 +96,8 @@ export function prepareRunForResume(run: RunState): RunState {
   if (run.status === "failed" && !run.recoveryState?.failedStepId) {
     updateRecoveryState(run, firstFailedStep(run));
   }
+  refreshPersistedBackgroundJobs(run);
+  normalizeRunPlanForContinuation(run);
   const failedStepIdsToRetry = failedStepIdsForContinuation(run);
   run.status = "running";
   run.endedAt = undefined;
@@ -115,6 +117,130 @@ export function prepareRunForResume(run: RunState): RunState {
   refreshWorkUnitStatuses(run);
   persistRun(run);
   return run;
+}
+
+function normalizeRunPlanForContinuation(run: RunState): void {
+  const plan = run.route.plan;
+  if (!plan || plan.kind !== "dag") return;
+  const existingStageIds = new Set(plan.stages.map((stage) => stage.id));
+  const missingStages = new Map<string, RunStepState[]>();
+  for (const step of run.steps) {
+    if (isUsableStepHandoff(step) || step.status === "skipped") continue;
+    const existingStageId = step.stageId ?? stageIdFromStepId(step.id);
+    if (existingStageId && existingStageIds.has(existingStageId)) {
+      step.stageId ??= existingStageId;
+      continue;
+    }
+    const stageId = existingStageId ?? `resume-${safeId(step.id)}`;
+    step.stageId = stageId;
+    const group = missingStages.get(stageId) ?? [];
+    group.push(step);
+    missingStages.set(stageId, group);
+  }
+  if (missingStages.size === 0) return;
+  for (const [stageId, steps] of missingStages) {
+    plan.stages.push({
+      id: stageId,
+      tasks: steps.map((step) => runStepToAgentStep(step, stageId)),
+    });
+  }
+  run.route.kind = "multi-agent-dag";
+  const warning = `Normalized ${missingStages.size} missing DAG stage(s) for pending resume step(s).`;
+  if (!run.warnings.includes(warning)) run.warnings.push(warning);
+}
+
+function runStepToAgentStep(step: RunStepState, stageId: string): AgentStep {
+  return {
+    id: localStepId(step.id, stageId),
+    agent: step.agent,
+    task: step.task,
+    ...(step.budget ? { budget: step.budget } : {}),
+  };
+}
+
+function localStepId(stepId: string, stageId: string): string {
+  const prefix = `${stageId}:`;
+  return stepId.startsWith(prefix) ? stepId.slice(prefix.length) : stepId;
+}
+
+function stageIdFromStepId(stepId: string): string | undefined {
+  const index = stepId.indexOf(":");
+  return index > 0 ? stepId.slice(0, index) : undefined;
+}
+
+function safeId(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "step";
+}
+
+function refreshPersistedBackgroundJobs(run: RunState): void {
+  if (!run.logsPath) return;
+  const jobsDir = path.resolve(path.dirname(run.logsPath), "..", "background-jobs");
+  if (!fs.existsSync(jobsDir)) return;
+  const jobs = fs.readdirSync(jobsDir)
+    .filter((name) => name.endsWith(".json"))
+    .flatMap((name) => readBackgroundJobRecord(path.join(jobsDir, name)));
+  if (jobs.length === 0) return;
+  const byId = new Map(jobs.map((job) => [String(job.id), job]));
+  for (const step of run.steps) {
+    step.backgroundJobs = (step.backgroundJobs ?? []).map((job) => {
+      const persisted = byId.get(job.id);
+      return persisted ? mergeBackgroundJobTrace(job, persisted) : job;
+    });
+  }
+  for (const job of jobs) {
+    const owner = isRecord(job.owner) ? job.owner : undefined;
+    if (owner?.runId !== run.id || typeof owner.stepId !== "string") continue;
+    const step = run.steps.find((candidate) => candidate.id === owner.stepId);
+    if (!step) continue;
+    const current = step.backgroundJobs ?? [];
+    if (current.some((candidate) => candidate.id === job.id)) continue;
+    step.backgroundJobs = [...current, backgroundJobTraceFromRecord(job)];
+  }
+}
+
+function readBackgroundJobRecord(file: string): Record<string, unknown>[] {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
+    return isRecord(parsed) && typeof parsed.id === "string" ? [parsed] : [];
+  } catch {
+    return [];
+  }
+}
+
+function mergeBackgroundJobTrace(current: NonNullable<RunStepState["backgroundJobs"]>[number], job: Record<string, unknown>): NonNullable<RunStepState["backgroundJobs"]>[number] {
+  return {
+    ...current,
+    ...backgroundJobTraceFromRecord(job),
+  };
+}
+
+function backgroundJobTraceFromRecord(job: Record<string, unknown>): NonNullable<RunStepState["backgroundJobs"]>[number] {
+  return {
+    id: String(job.id),
+    command: typeof job.command === "string" ? job.command : "",
+    status: backgroundJobStatus(job.status),
+    cwd: typeof job.cwd === "string" ? job.cwd : "",
+    outputLogPath: typeof job.outputLogPath === "string" ? job.outputLogPath : "",
+    ...(job.requiredEvidence === true ? { requiredEvidence: true } : {}),
+    ...(job.completionAction === "notify" || job.completionAction === "resume" || job.completionAction === "none" ? { completionAction: job.completionAction } : {}),
+    ...(job.notifyOnCompletion === true ? { notifyOnCompletion: true } : {}),
+    ...(typeof job.maxOutputBytes === "number" ? { maxOutputBytes: job.maxOutputBytes } : {}),
+    ...(typeof job.startedAt === "string" ? { startedAt: job.startedAt } : {}),
+    ...(typeof job.finishedAt === "string" ? { finishedAt: job.finishedAt } : {}),
+    ...(typeof job.exitCode === "number" || job.exitCode === null ? { exitCode: job.exitCode } : {}),
+    ...(typeof job.tail === "string" ? { tail: job.tail.slice(-4000) } : {}),
+    ...(typeof job.error === "string" ? { error: job.error } : {}),
+    ...(typeof job.staleReason === "string" ? { staleReason: job.staleReason } : {}),
+  };
+}
+
+function backgroundJobStatus(value: unknown): NonNullable<RunStepState["backgroundJobs"]>[number]["status"] {
+  const allowed = new Set(["queued", "running", "succeeded", "failed", "cancelled", "timed_out", "orphaned", "stale"]);
+  return typeof value === "string" && allowed.has(value) ? value as NonNullable<RunStepState["backgroundJobs"]>[number]["status"] : "stale";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function markRunHumanInputAnswered(run: RunState): boolean {

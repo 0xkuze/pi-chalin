@@ -49,8 +49,10 @@ test("orchestrator requires the same completion gate for inline and delegated wo
 test("orchestrator favors delegation when scope cannot fit one compact loop", () => {
   const prompt = buildChalinOrchestratorSystemPrompt(agents);
 
-  assert.match(prompt, /Use `chalin_bash_job` inline/i);
-  assert.match(prompt, /potentially long\/blocking verification/i);
+  assert.match(prompt, /Use normal `bash` by default/i);
+  assert.match(prompt, /Use `chalin_bash_job` only when/i);
+  assert.match(prompt, /long timeout/i);
+  assert.match(prompt, /simply wait for it/i);
   assert.match(prompt, /requiredEvidence=true/i);
   assert.match(prompt, /Before using repository tools inline/i);
   assert.match(prompt, /single concrete scope/i);

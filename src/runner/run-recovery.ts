@@ -108,8 +108,8 @@ function findRouteStep(run: RunState, step: RunStepState): { id?: string; agent:
     return plan.steps.find((candidate, index) => candidate.agent === step.agent && (candidate.id === step.id || `step-${index + 1}` === step.id));
   }
   for (const stage of plan.stages) {
-    if (!step.id.startsWith(`${stage.id}:`)) continue;
-    const localId = step.id.split(":").at(-1);
+    if (step.stageId !== stage.id && !step.id.startsWith(`${stage.id}:`)) continue;
+    const localId = step.id.startsWith(`${stage.id}:`) ? step.id.split(":").at(-1) : step.id;
     return stage.tasks.find((candidate, index) => candidate.agent === step.agent && (candidate.id === localId || `step-${index + 1}` === localId));
   }
   return undefined;
