@@ -7,7 +7,7 @@ import { buildChalinOrchestratorSystemPrompt } from "../orchestration/orchestrat
 import { chalinSessionIdFromContext, isUsableStepHandoff, loadResumableRunState } from "../runner/runner-state.ts";
 import { buildCompletionGateContextMessage, buildCompletionGateSteer, completionGateDecisionKey, type CompletionGateDecision } from "../runtime/completion-gate.ts";
 import { compactEvidenceObservation } from "../runtime/evidence-ledger.ts";
-import { beginChalinTurn, getInlineChangedPaths, getInlineCompletionGatePayload, getInlineCriticalGuardContextMessage, isSemanticPolicyJudgeRequestFresh, recordCompletionGateBlock, recordInlineToolCompletion, recordInlineToolStart, recordSemanticPolicyJudgeResult } from "../runtime/state.ts";
+import { beginChalinTurn, getInlineChangedPaths, getInlineCompletionGatePayload, getInlineCriticalGuardContextMessage, getInlinePendingRequiredBackgroundJobs, isSemanticPolicyJudgeRequestFresh, recordCompletionGateBlock, recordInlineToolCompletion, recordInlineToolStart, recordSemanticPolicyJudgeResult } from "../runtime/state.ts";
 import { runCompletionGateJudge, shouldApplyCompletionGateDecision, type CompletionGateJudgeInput } from "../skills/completion-gate-judge.ts";
 import { formatSemanticPolicyJudgeSteer, runSemanticPolicyJudge, shouldApplySemanticPolicyJudgeResult } from "../skills/semantic-policy-judge.ts";
 import type { InlineNudgeKind, PolicyJudgeDecision } from "../runtime/state.ts";
@@ -190,13 +190,26 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
     const eventArgs = (event as { args?: { command?: unknown; path?: unknown } }).args;
     const eventResult = (event as { result?: unknown }).result;
     const fallbackArgs = takeToolStart(pi, event.toolName);
+    const backgroundJobStatus = event.toolName === "chalin_bash_job" ? backgroundJobStatusFromResult(eventResult) : undefined;
+    const backgroundJobId = event.toolName === "chalin_bash_job" ? backgroundJobIdFromResult(eventResult) : undefined;
+    const backgroundJobRequiredEvidence = event.toolName === "chalin_bash_job" ? backgroundJobRequiredEvidenceFromResult(eventResult) : undefined;
+    const backgroundJobCompletionAction = event.toolName === "chalin_bash_job" ? backgroundJobCompletionActionFromResult(eventResult) : undefined;
+    const resultCommand = backgroundJobTerminalStatus(backgroundJobStatus) ? backgroundJobCommandFromResult(eventResult) : undefined;
+    const resultIsError = event.isError || backgroundJobFailureStatus(backgroundJobStatus);
+    const inlineCommand = event.toolName === "chalin_bash_job"
+      ? resultCommand
+      : typeof eventArgs?.command === "string" ? eventArgs.command : fallbackArgs?.command;
     const { shouldProgressNudge, shouldReadyToVerifyNudge, shouldFailureNudge, shouldCompletionNudge, shouldTestCoverageNudge, shouldWeakTestCoverageNudge, shouldPackageMetadataNudge, shouldParallelSurfaceNudge, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldTerminalCompletionNudge, shouldPostTerminalDriftNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldLocatorLoopNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, verificationCommand, docsOnlyMutation, policyJudge } = recordInlineToolCompletion({
       toolName: event.toolName,
-      isError: event.isError,
-      command: typeof eventArgs?.command === "string" ? eventArgs.command : fallbackArgs?.command,
+      isError: resultIsError,
+      command: inlineCommand,
       path: typeof eventArgs?.path === "string" ? eventArgs.path : fallbackArgs?.path,
       argsText: eventArgs ? JSON.stringify(eventArgs) : fallbackArgs?.argsText,
       observation: toolResultObservation(eventResult),
+      backgroundJobId,
+      backgroundJobStatus,
+      backgroundJobRequiredEvidence,
+      backgroundJobCompletionAction,
     });
     const semanticReviewScheduled = scheduleSemanticPolicyJudge(pi, ctx, policyJudge);
     const deferToSemantic = (kind: InlineNudgeKind): boolean => shouldDeferInlineNudgeToSemantic(policyJudge, kind, semanticReviewScheduled);
@@ -521,6 +534,8 @@ function runCompletionGateMessageEnd(pi: ExtensionAPI, event: unknown, ctx: unkn
     if (!finalAnswer) return;
     const payload = getInlineCompletionGatePayload({ finalAnswer });
     if (!shouldRunCompletionGate(payload)) return;
+    const pendingBackground = pendingBackgroundJobReplacement(event);
+    if (pendingBackground) return pendingBackground;
     const decision = await runCompletionGateJudgeForTurn({ payload, context: completionGateJudgeContext(pi, ctx) });
     if (!decision) {
       const key = completionGateUnavailableKey(payload);
@@ -612,6 +627,32 @@ function completionGateUnavailableReplacement(event: unknown): { message: any } 
         text: [
           "Completion gate: I cannot call this complete yet because the pre-final evidence check was unavailable.",
           "Use direct repo/spec evidence or report the concrete blocker before finalizing.",
+        ].join("\n"),
+      }],
+    },
+  };
+}
+
+function pendingBackgroundJobReplacement(event: unknown): { message: any } | undefined {
+  const pending = getInlinePendingRequiredBackgroundJobs();
+  if (pending.length === 0) return undefined;
+  const message = (event as { message?: unknown }).message;
+  if (!isRecord(message) || message.role !== "assistant") return undefined;
+  const lines = pending.slice(0, 3).map((job) => {
+    const command = job.command ? ` · ${compactDecisionText(job.command, 120)}` : "";
+    const wake = job.completionAction === "resume" ? " · resume requested on finish" : "";
+    return `- ${job.id}: ${job.status}${wake}${command}`;
+  });
+  return {
+    message: {
+      ...message,
+      content: [{
+        type: "text",
+        text: [
+          "Background verification is still running; I am not claiming completion yet.",
+          "Pending required job(s):",
+          ...lines,
+          "I can use the result once the job reaches a terminal status.",
         ].join("\n"),
       }],
     },
@@ -816,6 +857,44 @@ function toolResultObservation(result: unknown): string | undefined {
     }
   }
   return compactEvidenceObservation(chunks.join("\n"));
+}
+
+function backgroundJobCommandFromResult(result: unknown): string | undefined {
+  if (!isRecord(result) || !isRecord(result.details) || !isRecord(result.details.job)) return undefined;
+  const command = result.details.job.command;
+  return typeof command === "string" && command.trim() ? command : undefined;
+}
+
+function backgroundJobIdFromResult(result: unknown): string | undefined {
+  if (!isRecord(result) || !isRecord(result.details) || !isRecord(result.details.job)) return undefined;
+  const id = result.details.job.id;
+  return typeof id === "string" && id.trim() ? id : undefined;
+}
+
+function backgroundJobStatusFromResult(result: unknown): string | undefined {
+  if (!isRecord(result) || !isRecord(result.details) || !isRecord(result.details.job)) return undefined;
+  const status = result.details.job.status;
+  return typeof status === "string" ? status : undefined;
+}
+
+function backgroundJobRequiredEvidenceFromResult(result: unknown): boolean | undefined {
+  if (!isRecord(result) || !isRecord(result.details) || !isRecord(result.details.job)) return undefined;
+  const requiredEvidence = result.details.job.requiredEvidence;
+  return typeof requiredEvidence === "boolean" ? requiredEvidence : undefined;
+}
+
+function backgroundJobCompletionActionFromResult(result: unknown): string | undefined {
+  if (!isRecord(result) || !isRecord(result.details) || !isRecord(result.details.job)) return undefined;
+  const completionAction = result.details.job.completionAction;
+  return typeof completionAction === "string" ? completionAction : undefined;
+}
+
+function backgroundJobTerminalStatus(status: string | undefined): boolean {
+  return Boolean(status && !["queued", "running"].includes(status));
+}
+
+function backgroundJobFailureStatus(status: string | undefined): boolean {
+  return Boolean(status && ["failed", "timed_out", "cancelled", "orphaned", "stale"].includes(status));
 }
 
 function compactResumeCandidateMessage(run: RunState): string {

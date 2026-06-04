@@ -68,7 +68,8 @@ test("completion gate is a semantic finalization contract, not a domain checklis
   assert.equal(contract.includes("observed fixtures"), true);
   assert.equal(contract.includes("Mutation history"), true);
   assert.equal(contract.includes("direct repo/spec evidence"), true);
-  assert.match(contract, /Do not rely on background follow-up/i);
+  assert.match(contract, /Do not rely on hidden background follow-up/i);
+  assert.match(contract, /queued\/running requiredEvidence job is pending evidence/i);
   assert.equal(contract.includes("Hidden-test posture"), true);
   assert.ok(contract.length <= 3_000);
   assert.equal(contract.includes("varies only the target command/keyword"), false);
@@ -619,6 +620,50 @@ test("autoroute passes compact tool-result observations into the completion gate
   assert.doesNotMatch(replacementText, /Continuing after the completion gate found missing evidence/i);
   const audit = pi.entries.find((entry) => entry.customType === "pi-chalin-completion-gate-decision");
   assert.match(JSON.stringify(audit?.data), /expand_custom_probe/);
+});
+
+test("autoroute treats a running background bash job as pending instead of passing evidence", async () => {
+  const pi = new FakePi();
+  const model = { api: "provider-neutral-api", id: "any-model" };
+  const modelRegistry = { id: "registry" };
+  setCompletionGateJudgeForTests(async () => {
+    throw new Error("pending background jobs should produce a pending-turn replacement before semantic finalization");
+  });
+  registerChalinAutoRouter(pi as unknown as ExtensionAPI);
+  await pi.emit("before_agent_start", { prompt: "fix parser and verify it", systemPrompt: "" }, { cwd: process.cwd(), model, modelRegistry });
+  await pi.emit("tool_execution_end", {
+    toolName: "edit",
+    args: { path: "src/parser.py" },
+    result: { content: [{ type: "text", text: "Edited src/parser.py" }] },
+  }, { cwd: process.cwd() });
+  await pi.emit("tool_execution_end", {
+    toolName: "chalin_bash_job",
+    args: { action: "start", command: "pnpm test" },
+    result: {
+      content: [{ type: "text", text: "background job verify-parser: running" }],
+      details: {
+        job: {
+          id: "verify-parser",
+          command: "pnpm test",
+          status: "running",
+          requiredEvidence: true,
+          completionAction: "resume",
+        },
+      },
+    },
+  }, { cwd: process.cwd() });
+
+  const replacement = await pi.emit("message_end", {
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "Done." }],
+    },
+  }, { cwd: process.cwd() });
+
+  const replacementText = JSON.stringify(replacement);
+  assert.match(replacementText, /Background verification is still running/i);
+  assert.match(replacementText, /verify-parser: running/i);
+  assert.match(replacementText, /resume requested on finish/i);
 });
 
 test("autoroute carries prior completion gate blocks into later finalization attempts", async () => {

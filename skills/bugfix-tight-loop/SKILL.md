@@ -20,6 +20,7 @@ allowedTools:
   - ls
   - edit
   - bash
+  - chalin_bash_job
   - chalin_project_discovery
 deniedTools:
   - chalin_delegate
@@ -36,4 +37,5 @@ version: 1
 - Add or update the nearest runner-discoverable regression test unless the user explicitly forbids test edits.
 - When tests are touched, cover the broken behavior plus the nearest meaningful boundary of the same contract.
 - Run the nearest verification command from repository evidence.
+- Prefer `chalin_bash_job` over blocking `bash` for likely-long test, typecheck, build, CI, watcher, or dev-server verification; use `completionAction=resume` when the result should continue later, and do not cite it as passing evidence until a terminal status/read/await or completion wakeup reports success.
 - Final handoff cites implementation path, test or evidence path, and verification command.

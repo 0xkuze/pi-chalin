@@ -74,6 +74,9 @@ export function buildSdkPrompt(
     "- Use repo-relative tool paths; for cwd omit `path` or use `.`. Do not pass absolute cwd.",
     "- Discovery/snapshot: inventory/git history only; not run mutations. Read exact evidence before claims.",
     "- Bash is role-scoped full shell; use purposeful commands.",
+    agent && hasAnyCapability(agent, ["run-safe-bash", "validate"]) && taskNeedsBash(agent)
+      ? "- Background bash judgment: use `bash` for quick commands whose immediate output decides the next edit or fact. Prefer `chalin_bash_job` for potentially long/blocking verification, build, typecheck, test-suite, dev-server, watcher, or sleep/server commands; set requiredEvidence=true when that result is needed for completion, set completionAction=resume when the owning Pi thread should wake on completion, and avoid immediate await unless the result is needed for the very next step."
+      : undefined,
     "",
     formatActiveSkillsForPrompt(options.activeSkills ?? []),
     options.activeSkills?.length ? "" : undefined,
@@ -264,7 +267,10 @@ export function childToolNames(agent: AgentDefinition | undefined, needsArtifact
     names.add("grep");
     names.add("find");
   }
-  if (hasAnyCapability(agent, ["run-safe-bash", "validate"]) && taskNeedsBash(agent)) names.add("bash");
+  if (hasAnyCapability(agent, ["run-safe-bash", "validate"]) && taskNeedsBash(agent)) {
+    names.add("bash");
+    names.add("chalin_bash_job");
+  }
   if (hasAnyCapability(agent, ["edit-files"])) names.add("edit");
   if (hasAnyCapability(agent, ["write-new-files"])) names.add("write");
   if (hasAnyCapability(agent, ["external-context"]) && taskNeedsExternalContext(agent)) names.add("chalin_web_search");

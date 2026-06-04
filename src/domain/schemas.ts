@@ -489,6 +489,7 @@ export interface RunStepMetrics {
   outputTruncatedCount?: number;
   filesTouched?: string[];
   shellCommands?: string[];
+  backgroundShellJobs?: BackgroundShellJobMetric[];
   postMutationShellCommands?: number;
   successfulPostMutationShellCommands?: number;
   retriesByTool?: Record<string, number>;
@@ -512,6 +513,29 @@ export interface RunStepMetrics {
   trajectoryEvents?: TrajectoryEvent[];
   skills?: string[];
   skillEvents?: SkillTraceEvent[];
+}
+
+export type BackgroundShellJobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "timed_out" | "orphaned" | "stale";
+
+export interface BackgroundShellJobMetric {
+  id: string;
+  command: string;
+  status: BackgroundShellJobStatus;
+  requiredEvidence?: boolean;
+  completionAction?: "notify" | "resume" | "none";
+  maxOutputBytes?: number;
+  startedAt?: string;
+  finishedAt?: string;
+  exitCode?: number | null;
+}
+
+export interface BackgroundShellJobTrace extends BackgroundShellJobMetric {
+  cwd: string;
+  outputLogPath: string;
+  tail?: string;
+  error?: string;
+  staleReason?: string;
+  notifyOnCompletion?: boolean;
 }
 
 export interface RunMetricsCheckpoint {
@@ -569,6 +593,7 @@ export interface RunStepState {
   rejectedSkills?: RejectedSkill[];
   skillTraceEvents?: SkillTraceEvent[];
   nestedRuns?: NestedRunTrace[];
+  backgroundJobs?: BackgroundShellJobTrace[];
 }
 
 export interface NestedRunStepTrace {

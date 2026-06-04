@@ -20,7 +20,19 @@ import { createMemoryCandidate } from "../memory/memory.ts";
 import { createConfiguredMemoryStore } from "../memory/memory-provider.ts";
 import { loadEffectiveConfig } from "../config/config.ts";
 import type { BudgetCapHit, BudgetCapName, BudgetCapSeverity, RouteExpectedEffect, ToolApprovalDecision, ToolApprovalRequest } from "../domain/schemas.ts";
+import type { BackgroundShellJobMetric } from "../domain/schemas.ts";
 import { formatInterviewResult, runChalinInterview } from "../interview/interview.ts";
+import {
+  type BackgroundBashJobCompletionAction,
+  backgroundJobSummary,
+  formatBackgroundJobList,
+  formatBackgroundJobRead,
+  formatBackgroundJobToolResult,
+  getBackgroundJobManager,
+  requireBackgroundJob,
+  type BackgroundBashJobRecord,
+  type BackgroundBashJobSummary,
+} from "../runtime/background-jobs.ts";
 import { SkillCatalog, auditSkill, formatSkillList, formatSkillShow } from "../skills/skills.ts";
 import { isRecord } from "../utils/guards.ts";
 import { compactText } from "../utils/text.ts";
@@ -135,6 +147,17 @@ const ChalinApprovalRequestParams = Type.Object({
   path: Type.Optional(Type.String({ description: "Exact path to approve when targetToolName is a path-based tool." })),
   actionDescription: Type.Optional(Type.String({ description: "Short user-facing description of the intended action." })),
 });
+const ChalinBashJobParams = Type.Object({
+  action: Type.Union([Type.Literal("start"), Type.Literal("status"), Type.Literal("read"), Type.Literal("await"), Type.Literal("cancel"), Type.Literal("list")]),
+  command: Type.Optional(Type.String({ description: "Bash command to start in background. Required for action=start." })),
+  jobId: Type.Optional(Type.String({ description: "Optional stable id for action=start, or background job id for status/read/await/cancel. If omitted on start, pi-chalin generates one." })),
+  timeout: Type.Optional(Type.Number({ description: "Optional timeout in seconds for action=start, or await timeout in seconds for action=await." })),
+  requiredEvidence: Type.Optional(Type.Boolean({ description: "True when this job is verification evidence required before finalizing." })),
+  notifyOnCompletion: Type.Optional(Type.Boolean({ description: "Notify the owning pi-chalin thread when the job completes. Default true." })),
+  completionAction: Type.Optional(Type.Union([Type.Literal("notify"), Type.Literal("resume"), Type.Literal("none")], { description: "What to do when the job completes: notify shows a UI/thread message, resume wakes the owning Pi thread to process results, none stays silent. Use resume only when the result should continue work after this turn." })),
+  maxOutputBytes: Type.Optional(Type.Number({ description: "Maximum bytes to persist before terminating the job. Default 104857600." })),
+  maxChars: Type.Optional(Type.Number({ description: "Maximum output characters to return for action=read. Default 16000." })),
+});
 
 type ChalinMemorySearchParamsShape = {
   query: string;
@@ -169,6 +192,18 @@ type ChalinApprovalRequestParamsShape = {
   actionDescription?: string;
 };
 
+type ChalinBashJobParamsShape = {
+  action: "start" | "status" | "read" | "await" | "cancel" | "list";
+  command?: string;
+  jobId?: string;
+  timeout?: number;
+  requiredEvidence?: boolean;
+  notifyOnCompletion?: boolean;
+  completionAction?: BackgroundBashJobCompletionAction;
+  maxOutputBytes?: number;
+  maxChars?: number;
+};
+
 export type ChalinDelegateParamsShape = {
   task: string;
   reason: string;
@@ -188,6 +223,18 @@ export interface ChildToolPolicyOptions {
     depth: number;
     maxDepth: number;
     execute(params: ChalinDelegateParamsShape): Promise<{ text: string; details?: unknown }>;
+  };
+  backgroundJobs?: {
+    owner: {
+      runId?: string;
+      stepId?: string;
+      agent?: string;
+      sessionId?: string;
+      parentRunId?: string;
+      parentStepId?: string;
+      childSessionFile?: string;
+    };
+    onJobUpdate?: (job: BackgroundBashJobSummary, event: "queued" | "started" | "updated" | "completed") => void;
   };
   onActivity?: (activity: ChildToolActivity) => void;
 }
@@ -222,6 +269,7 @@ export interface ChildToolPolicyMetrics {
   outputTruncatedCount: number;
   filesTouched: string[];
   shellCommands: string[];
+  backgroundShellJobs: BackgroundShellJobMetric[];
   postMutationShellCommands: number;
   successfulPostMutationShellCommands: number;
   retriesByTool: Record<string, number>;
@@ -232,7 +280,10 @@ export interface ChildToolPolicy {
   agentName?: string;
   allowedTools: Set<string>;
   subagentDelegation?: ChildToolPolicyOptions["subagentDelegation"];
+  backgroundJobs?: ChildToolPolicyOptions["backgroundJobs"];
   beforeTool(toolName: string, params: Record<string, unknown>): ChildToolGate;
+  beforeBackgroundBash(params: Record<string, unknown>): ChildToolGate;
+  recordBackgroundBashJob(job: BackgroundBashJobRecord): void;
   afterTool(toolName: string, result: unknown): unknown;
   pendingApproval(): ChildToolApprovalRequest | undefined;
   requestApproval(input: ChalinApprovalRequestParamsShape): ChildToolApprovalRequest | undefined;
@@ -249,6 +300,7 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
   const filesRead: string[] = [];
   const filesTouched: string[] = [];
   const shellCommands: string[] = [];
+  const backgroundShellJobs: BackgroundShellJobMetric[] = [];
   const pendingShellCommands: Array<{ command?: string; afterMutation: boolean }> = [];
   const approvalRequests: ChildToolApprovalRequest[] = [];
   const approvalDecisions: ChildToolApprovalDecision[] = [];
@@ -409,11 +461,67 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
     return { allowed: true };
   }
 
+  function recordBackgroundBashCall(params: Record<string, unknown>): { allowed: true } {
+    toolCalls += 1;
+    toolCallsByName.chalin_bash_job = (toolCallsByName.chalin_bash_job ?? 0) + 1;
+    const command = getCommandParam(params);
+    if (command) shellCommands.push(command);
+    return { allowed: true };
+  }
+
+  function beforeBackgroundBash(params: Record<string, unknown>): ChildToolGate {
+    normalizeSafeToolParams("bash", params, options.cwd);
+    const secretRead = secretReadIntentViolation("bash", params, options.cwd);
+    if (secretRead) {
+      activity("chalin_bash_job", "blocked", secretRead, params);
+      return violation(secretRead);
+    }
+    if (consumeApprovedAction("bash", params)) {
+      activity("chalin_bash_job", "start");
+      return recordBackgroundBashCall(params);
+    }
+    const pendingApproval = latestPendingApproval();
+    if (pendingApproval) {
+      const reason = `approval_required:${pendingApproval.reason}`;
+      activity("chalin_bash_job", "approval", reason, params);
+      return { allowed: false, reason, approvalRequired: pendingApproval };
+    }
+    const declaredApproval = priorDeclaredApprovalForAction("bash", params);
+    if (declaredApproval) {
+      return approvalRequired("bash", declaredApproval.reason, params, declaredApproval.risk);
+    }
+    if (hasExplicitAllowlist && (!allowedTools.has("bash") || !allowedTools.has("chalin_bash_job"))) {
+      const reason = "tool_not_allowed:chalin_bash_job";
+      activity("chalin_bash_job", "blocked", reason, params);
+      return violation(reason);
+    }
+    activity("chalin_bash_job", "start");
+    return recordBackgroundBashCall(params);
+  }
+
+  function recordBackgroundBashJob(job: BackgroundBashJobRecord): void {
+    const metric: BackgroundShellJobMetric = {
+      id: job.id,
+      command: job.command,
+      status: job.status,
+      ...(job.requiredEvidence ? { requiredEvidence: true } : {}),
+      ...(job.completionAction ? { completionAction: job.completionAction } : {}),
+      ...(job.maxOutputBytes !== undefined ? { maxOutputBytes: job.maxOutputBytes } : {}),
+      ...(job.startedAt ? { startedAt: job.startedAt } : {}),
+      ...(job.finishedAt ? { finishedAt: job.finishedAt } : {}),
+      ...(job.exitCode !== undefined ? { exitCode: job.exitCode } : {}),
+    };
+    const index = backgroundShellJobs.findIndex((item) => item.id === job.id);
+    if (index >= 0) backgroundShellJobs[index] = metric;
+    else backgroundShellJobs.push(metric);
+  }
+
   return {
     cwd: options.cwd,
     agentName: options.agentName,
     allowedTools,
     subagentDelegation: options.subagentDelegation,
+    backgroundJobs: options.backgroundJobs,
     pendingApproval() {
       return latestPendingApproval();
     },
@@ -518,6 +626,12 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
       activity(toolName, "start");
       return recorded;
     },
+    beforeBackgroundBash(params) {
+      return beforeBackgroundBash(params);
+    },
+    recordBackgroundBashJob(job) {
+      recordBackgroundBashJob(job);
+    },
     afterTool(toolName, result) {
       let nextResult = result;
       if ((toolName === "edit" || toolName === "write") && !isToolError(result)) mutationSucceeded = true;
@@ -553,6 +667,7 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
         outputTruncatedCount,
         filesTouched: [...new Set(filesTouched)].slice(0, 50),
         shellCommands: shellCommands.slice(0, 30),
+        backgroundShellJobs: backgroundShellJobs.slice(-30),
         postMutationShellCommands,
         successfulPostMutationShellCommands,
         retriesByTool: { ...retriesByTool },
@@ -580,6 +695,7 @@ export function createChildTools(policy: ChildToolPolicy): ToolDefinition[] {
     ...builtinTools.map(([name, tool]) => [name, guardTool(tool, name, policy)] as [string, ToolDefinition<any, any, any>]),
     ["chalin_project_discovery", createProjectDiscoveryTool(policy)],
     ["bash", guardTool(createBashToolDefinition(policy.cwd), "bash", policy)],
+    ["chalin_bash_job", createChalinBashJobTool(policy)],
     ["chalin_web_search", createChalinWebSearchTool(policy)],
     ["chalin_request_approval", createChalinApprovalRequestTool(policy)],
     ["chalin_interview", createChalinInterviewTool(policy)],
@@ -593,6 +709,84 @@ export function createChildTools(policy: ChildToolPolicy): ToolDefinition[] {
   return tools
     .filter(([name]) => policy.allowedTools.has(name))
     .map(([, tool]) => tool);
+}
+
+function createChalinBashJobTool(policy: ChildToolPolicy): ToolDefinition {
+  return defineTool<typeof ChalinBashJobParams, unknown>({
+    name: "chalin_bash_job",
+    label: "Chalin Bash Job",
+    description: "Start and monitor long-running bash commands in the background without blocking the agent session. Intended for verification/build/test/dev-server jobs, not arbitrary mutation.",
+    promptSnippet: "chalin_bash_job: for potentially long/blocking verification, build, typecheck, test-suite, dev-server, watcher, or sleep/server commands; start it, continue independent work, and use completionAction=resume when Pi should wake after the job finishes.",
+    promptGuidelines: [
+      "Use action=start for commands expected to take long enough that continuing independent work or avoiding session blockage is valuable.",
+      "Prefer this over bash for likely-long test/build/typecheck/CI/dev-server/watch commands, even when the user did not explicitly ask for background execution.",
+      "Do not call action=await immediately after start when there is independent work you can do or when a truthful pending-job handoff is acceptable.",
+      "Set completionAction=resume when the job result should wake the owning Pi thread after this child turn ends or after you move on to other work; use notify for passive visibility and none for deliberately silent jobs.",
+      "Do not use this for short commands where immediate output controls the next local edit or fact; use bash instead.",
+      "Set requiredEvidence=true only when the job result must pass before you claim verification or completion.",
+      "After starting a requiredEvidence job, you may finish only with an explicit pending-job handoff; do not claim it passed until a terminal status/read/await or completion wakeup reports succeeded and not stale.",
+      "Use list/status/read to collect completed results; use cancel for obsolete servers, watches, or stale verification.",
+    ],
+    parameters: ChalinBashJobParams,
+    async execute(_toolCallId, params: ChalinBashJobParamsShape) {
+      const input = isRecord(params) ? params : {};
+      const action = params.action;
+      const manager = getBackgroundJobManager(policy.cwd);
+      let result: ReturnType<typeof artifactToolResult>;
+
+      if (action === "start") {
+        const command = typeof params.command === "string" ? params.command.trim() : "";
+        if (!command) return blockedToolResult("background_bash_command_required");
+        const gate = policy.beforeBackgroundBash({ ...input, command, timeout: params.timeout });
+        if (!gate.allowed) return blockedToolResult(gate.reason);
+        const job = manager.startJob({
+          command,
+          jobId: typeof params.jobId === "string" ? params.jobId : undefined,
+          timeoutSeconds: typeof params.timeout === "number" ? params.timeout : undefined,
+          maxOutputBytes: typeof params.maxOutputBytes === "number" ? params.maxOutputBytes : undefined,
+          requiredEvidence: params.requiredEvidence === true,
+          notifyOnCompletion: params.notifyOnCompletion !== false,
+          completionAction: params.completionAction,
+          owner: policy.backgroundJobs?.owner,
+        });
+        policy.recordBackgroundBashJob(job);
+        policy.backgroundJobs?.onJobUpdate?.(backgroundJobSummary(job), job.status === "queued" ? "queued" : "started");
+        manager.watchJob(job.id, (updated, event) => {
+          policy.recordBackgroundBashJob(updated);
+          policy.backgroundJobs?.onJobUpdate?.(backgroundJobSummary(updated), event);
+        });
+        result = artifactToolResult(formatBackgroundJobToolResult(job), { job: backgroundJobSummary(job) });
+        return policy.afterTool("chalin_bash_job", result) as never;
+      }
+
+      const gate = policy.beforeTool("chalin_bash_job", input);
+      if (!gate.allowed) return blockedToolResult(gate.reason);
+      if (action === "list") {
+        const jobs = manager.listJobs({ ownerRunId: policy.backgroundJobs?.owner.runId });
+        result = artifactToolResult(formatBackgroundJobList(jobs), { jobs: jobs.map(backgroundJobSummary) });
+      } else if (action === "status") {
+        const job = requireBackgroundJob(manager, params.jobId);
+        result = artifactToolResult(formatBackgroundJobToolResult(job), { job: backgroundJobSummary(job) });
+      } else if (action === "read") {
+        const job = requireBackgroundJob(manager, params.jobId);
+        const output = manager.readJobOutput(job.id, typeof params.maxChars === "number" ? params.maxChars : 16_000);
+        result = artifactToolResult(formatBackgroundJobRead(job, output), { job: backgroundJobSummary(job), output });
+      } else if (action === "await") {
+        const job = requireBackgroundJob(manager, params.jobId);
+        const updated = await manager.awaitJob(job.id, Math.max(1, Math.floor(params.timeout ?? 30)) * 1000);
+        policy.recordBackgroundBashJob(updated);
+        result = artifactToolResult(formatBackgroundJobToolResult(updated), { job: backgroundJobSummary(updated) });
+      } else if (action === "cancel") {
+        const job = requireBackgroundJob(manager, params.jobId);
+        const cancelled = manager.cancelJob(job.id);
+        policy.recordBackgroundBashJob(cancelled);
+        result = artifactToolResult(formatBackgroundJobToolResult(cancelled), { job: backgroundJobSummary(cancelled) });
+      } else {
+        result = artifactToolResult(`Unsupported chalin_bash_job action '${String(action)}'.`, { error: "unsupported-action" });
+      }
+      return policy.afterTool("chalin_bash_job", result) as never;
+    },
+  });
 }
 
 function createChalinApprovalRequestTool(policy: ChildToolPolicy): ToolDefinition {

@@ -3,6 +3,7 @@ import { Effect } from "effect";
 import { registerChalinAutoRouter } from "./routing/autoroute.ts";
 import { registerChalinCommands } from "./commands/commands.ts";
 import { resetRuntimeState } from "./runtime/state.ts";
+import { registerBackgroundJobCompletionNotifier } from "./runtime/background-jobs.ts";
 import { registerChalinTools } from "./tools/tools.ts";
 import { setChalinStatus } from "./ui/ui-status.ts";
 
@@ -19,6 +20,7 @@ function registerPiChalinUnsafe(pi: ExtensionAPI): void {
   registerChalinCommands(pi);
   registerChalinTools(pi);
   registerChalinAutoRouter(pi);
+  registerBackgroundJobCompletionNotifier(pi);
 
   pi.on("session_start", (_event, ctx) => {
     resetRuntimeState();

@@ -33,6 +33,40 @@ function executableAgents(catalog: AgentCatalog): Map<string, AgentDefinition> {
   return result;
 }
 
+test("primary Pi receives chalin_bash_job for inline background verification", async () => {
+  const cwd = tempDir("pi-chalin-primary-bg-tool-");
+  try {
+    const tools: Array<{ name: string; execute: (...args: any[]) => Promise<any> }> = [];
+    registerChalinTools({ registerTool: (tool: any) => tools.push(tool) } as never);
+    const bashJob = tools.find((tool) => tool.name === "chalin_bash_job");
+    assert.ok(bashJob);
+
+    const ctx = {
+      cwd,
+      sessionManager: { getSessionFile: () => path.join(cwd, "primary-session.jsonl") },
+      hasUI: false,
+    };
+    const start = await bashJob.execute("job", {
+      action: "start",
+      jobId: "primary-smoke",
+      command: `${process.execPath} -e "console.log('primary-ok')"`,
+      requiredEvidence: true,
+    }, undefined, undefined, ctx);
+    const startedJob = start.details?.job;
+    assert.equal(startedJob?.id, "primary-smoke");
+    assert.equal(startedJob?.owner?.agent, "primary");
+    assert.equal(startedJob?.requiredEvidence, true);
+
+    const completed = await bashJob.execute("job", { action: "await", jobId: "primary-smoke", timeout: 5 }, undefined, undefined, ctx);
+    const text = completed.content.find((part: { type: string; text?: string }) => part.type === "text")?.text ?? "";
+    assert.equal(completed.details?.job?.status, "succeeded");
+    assert.equal(completed.details?.job?.owner?.agent, "primary");
+    assert.match(text, /primary-ok/);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 function customAgent(name: string, concern: AgentDefinition["concern"], capabilities: AgentDefinition["capabilities"]): AgentDefinition {
   return {
     name,
@@ -1383,6 +1417,24 @@ test("auto route does not fabricate a hardcoded plan when the structured planner
   assert.equal(result.source, "failed");
   assert.equal(result.route.plan, undefined);
   assert.match(result.route.reason, /route planning blocked/i);
+});
+
+test("route planner fallback uses explicit effects without blocking isolated route execution", async () => {
+  const catalog = AgentCatalog.load({ cwd: process.cwd() });
+  const result = await planChalinRoute({
+    task: "Read package.json and run the discovered Node test command without editing files.",
+    expectedEffects: ["read", "verify"],
+  }, {
+    cwd: process.cwd(),
+    catalog,
+  });
+
+  assert.equal(result.source, "fallback");
+  assert.equal(result.route.plan?.kind, "sequential");
+  assert.deepEqual(result.route.expectedEffects, ["read", "verify"]);
+  assert.equal(result.route.agents[0], "worker");
+  assert.match(result.route.plan?.steps?.[0]?.task ?? "", /prefer chalin_bash_job/i);
+  assert.match(result.diagnostics.join("\n"), /conservative single-agent fallback/i);
 });
 
 test("structured route planner output validates into a route plan without task-type mapping", () => {

@@ -342,11 +342,27 @@ export function effectiveSkillToolNames(baseTools: string[], skills: SkillDefini
   let allowed = new Set(baseTools);
   for (const skill of skills) {
     if (skill.allowedTools.length > 0) {
-      allowed = intersectSets(allowed, new Set(skill.allowedTools));
+      allowed = intersectSets(allowed, expandedAllowedSkillTools(skill.allowedTools, baseTools, skill.deniedTools));
     }
-    for (const denied of skill.deniedTools) allowed.delete(denied);
+    for (const denied of expandedDeniedSkillTools(skill.deniedTools)) allowed.delete(denied);
   }
   return [...allowed].sort();
+}
+
+function expandedAllowedSkillTools(allowedTools: string[], baseTools: string[], deniedTools: string[]): Set<string> {
+  const expanded = new Set(allowedTools);
+  const base = new Set(baseTools);
+  const denied = new Set(expandedDeniedSkillTools(deniedTools));
+  if (expanded.has("bash") && base.has("chalin_bash_job") && !denied.has("chalin_bash_job")) {
+    expanded.add("chalin_bash_job");
+  }
+  return expanded;
+}
+
+function expandedDeniedSkillTools(deniedTools: string[]): Set<string> {
+  const expanded = new Set(deniedTools);
+  if (expanded.has("bash")) expanded.add("chalin_bash_job");
+  return expanded;
 }
 
 export function formatActiveSkillsForPrompt(skills: ResolvedSkill[], maxBodyLines = 12): string | undefined {

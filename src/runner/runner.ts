@@ -20,6 +20,7 @@ import { resolveAgentModel, resolveAgentThinking, resolveInheritedModelFallback,
 import { buildSdkPrompt, childToolNames, isHandoffGapReadMode, resolveStepCompletionStatus, synthesisCrossStepDuplicateReadLimit, synthesisGapReadLimit, type SdkPromptOptions } from "./runner-prompt.ts";
 import { chalinSessionIdFromContext, createRunState, isUsableStepHandoff, persistRun, prepareRunForResume } from "./runner-state.ts";
 import { clearLiveStepSession, setLiveStepSession, type LiveStepSessionRef } from "../runtime/state.ts";
+import { type BackgroundBashJobSummary } from "../runtime/background-jobs.ts";
 import { cleanupWorktrees, mergeWorktreeChanges, needsWorktreeIsolation, prepareWorktreeIsolation, type WorktreeIsolationPlan } from "../worktrees/worktrees.ts";
 import { DEFAULT_CONFIG, type ChalinConfig } from "../config/config.ts";
 import { SkillCatalog, effectiveSkillToolNames, resolveSkillsForStep } from "../skills/skills.ts";
@@ -1760,6 +1761,30 @@ async function runSdkSessionAttempt(input: {
   const activeToolStarts = new Map<string, Array<{ at: number; index: number }>>();
   let toolSpanIndex = 0;
   let lastToolActivityPersistAt = 0;
+  const backgroundJobOwner = {
+    runId: input.run.id,
+    stepId: input.step.id,
+    agent: input.step.agent,
+    ...(input.run.sessionId ? { sessionId: input.run.sessionId } : {}),
+    ...(input.run.parentRunId ? { parentRunId: input.run.parentRunId } : {}),
+    ...(input.run.parentStepId ? { parentStepId: input.run.parentStepId } : {}),
+    ...(input.step.childSessionFile ? { childSessionFile: input.step.childSessionFile } : {}),
+  };
+  const recordBackgroundJobUpdate = (job: BackgroundBashJobSummary, event: "queued" | "started" | "updated" | "completed") => {
+    if (event === "updated") return;
+    upsertStepBackgroundJob(input.step, job);
+    if (event === "completed" && job.requiredEvidence && job.status !== "succeeded") {
+      const warning = `Background evidence job ${job.id} for ${input.step.agent}/${input.step.id} finished ${job.status}; do not count it as passing verification.`;
+      if (!input.run.warnings.includes(warning)) input.run.warnings.push(warning);
+    }
+    if (event === "completed" && input.run.status === "paused") {
+      const nextStatus = terminalRunStatusForSteps(input.run, input.context.agents);
+      input.run.status = nextStatus;
+      if (nextStatus === "complete" || nextStatus === "failed") input.run.endedAt = new Date().toISOString();
+    }
+    persistRun(input.run);
+    input.context.onUpdate?.(input.run);
+  };
   const persistToolActivity = (force = false) => {
     const now = Date.now();
     if (!force && now - lastToolActivityPersistAt < 1000) return;
@@ -1839,6 +1864,10 @@ async function runSdkSessionAttempt(input: {
       maxDepth: maxSubagentDepth(),
       execute: (params) => runNestedDelegation(params, input),
     },
+    backgroundJobs: {
+      owner: backgroundJobOwner,
+      onJobUpdate: recordBackgroundJobUpdate,
+    },
     onActivity: recordToolActivity,
   });
   const attemptMetrics = (messages: unknown[] = []) => {
@@ -1873,6 +1902,7 @@ async function runSdkSessionAttempt(input: {
     });
     if (created.session.sessionFile) {
       input.step.childSessionFile = created.session.sessionFile;
+      backgroundJobOwner.childSessionFile = created.session.sessionFile;
       persistRun(input.run);
     }
     input.step.thinkingLevel = (created.session.thinkingLevel as AgentThinkingLevel | undefined) ?? input.step.thinkingLevel;
@@ -2020,6 +2050,31 @@ function nestedTraceFromRun(run: RunState): NestedRunTrace {
   };
 }
 
+function upsertStepBackgroundJob(step: RunStepState, job: BackgroundBashJobSummary): void {
+  const trace: NonNullable<RunStepState["backgroundJobs"]>[number] = {
+    id: job.id,
+    command: job.command,
+    status: job.status,
+    cwd: job.cwd,
+    outputLogPath: job.outputLogPath,
+    ...(job.requiredEvidence ? { requiredEvidence: true } : {}),
+    ...(job.completionAction ? { completionAction: job.completionAction } : {}),
+    ...(job.notifyOnCompletion ? { notifyOnCompletion: true } : {}),
+    ...(job.maxOutputBytes !== undefined ? { maxOutputBytes: job.maxOutputBytes } : {}),
+    ...(job.startedAt ? { startedAt: job.startedAt } : {}),
+    ...(job.finishedAt ? { finishedAt: job.finishedAt } : {}),
+    ...(job.exitCode !== undefined ? { exitCode: job.exitCode } : {}),
+    ...(job.tail ? { tail: job.tail.slice(-4000) } : {}),
+    ...(job.error ? { error: job.error } : {}),
+    ...(job.staleReason ? { staleReason: job.staleReason } : {}),
+  };
+  const current = step.backgroundJobs ?? [];
+  const index = current.findIndex((item) => item.id === job.id);
+  step.backgroundJobs = index >= 0
+    ? current.map((item, itemIndex) => itemIndex === index ? trace : item)
+    : [...current, trace];
+}
+
 export type NestedDelegationRoutePlanningSource = "llm" | "failed";
 
 export async function planNestedDelegationRoute(input: ChalinDelegateParamsShape, context: {
@@ -2048,7 +2103,7 @@ export async function planNestedDelegationRoute(input: ChalinDelegateParamsShape
     signal: context.signal,
     planner: context.planner,
   });
-  if (planned.source !== "failed" && planned.route.plan) {
+  if (planned.source === "llm" && planned.route.plan) {
     const boundaryViolation = nestedDelegationBoundaryViolation(input, planned.route, context.parentAgent, context.agents);
     if (boundaryViolation) {
       return {
@@ -2059,10 +2114,11 @@ export async function planNestedDelegationRoute(input: ChalinDelegateParamsShape
     }
     return { route: planned.route, source: "llm", diagnostics: planned.diagnostics };
   }
+  const plannerDiagnostics = truncateText(planned.diagnostics.join(" "), 1_200);
   const reason = [
     "Nested route planner unavailable; parent orchestrator must continue from the current compact handoff instead of the harness choosing a fallback route.",
     input.reason.trim(),
-    planned.diagnostics.at(-1),
+    plannerDiagnostics,
   ].filter(Boolean).join(" ");
   return {
     route: nestedRoutePlanningBlockedRoute(reason),
@@ -2658,10 +2714,20 @@ function completeRun(run: RunState, context: WorkerRunnerContext): RunState {
 
 export function terminalRunStatusForSteps(run: Pick<RunState, "steps"> & Partial<Pick<RunState, "intentContract" | "recoveryState">>, agents: Map<string, AgentDefinition>): RunState["status"] {
   if (hasUnrecoverableFailedSteps(run, agents)) return "failed";
+  const backgroundEvidence = backgroundEvidenceRunBlock(run);
+  if (backgroundEvidence === "failed") return "failed";
+  if (backgroundEvidence === "pending") return "paused";
   if (run.intentContract?.requiresInterview || run.recoveryState?.blockedByHumanInput) return "paused";
   if (run.steps.some((step) => step.status === "paused" || step.status === "pending" || step.status === "running")) return "paused";
   if (hasBlockingCheckpointedSteps(run)) return "paused";
   return "complete";
+}
+
+function backgroundEvidenceRunBlock(run: Pick<RunState, "steps">): "pending" | "failed" | undefined {
+  const required = run.steps.flatMap((step) => step.backgroundJobs ?? []).filter((job) => job.requiredEvidence);
+  if (required.some((job) => job.status === "queued" || job.status === "running")) return "pending";
+  if (required.some((job) => job.status !== "succeeded")) return "failed";
+  return undefined;
 }
 
 export function approvalPauseForMetrics(metrics: RunStepMetrics | undefined): { pauseReason: Extract<RunStepPauseReason, "awaiting-approval" | "human-rejected">; message: string } | undefined {
@@ -3079,6 +3145,7 @@ function mergeAttemptMetrics(previous: RunStepMetrics | undefined, next: RunStep
     outputTruncatedCount: (previous.outputTruncatedCount ?? 0) + (next.outputTruncatedCount ?? 0),
     filesTouched: [...new Set([...(previous.filesTouched ?? []), ...(next.filesTouched ?? [])])].slice(0, 50),
     shellCommands: [...(previous.shellCommands ?? []), ...(next.shellCommands ?? [])].slice(0, 50),
+    backgroundShellJobs: mergeBackgroundShellJobs(previous.backgroundShellJobs, next.backgroundShellJobs),
     postMutationShellCommands: (previous.postMutationShellCommands ?? 0) + (next.postMutationShellCommands ?? 0) || undefined,
     successfulPostMutationShellCommands: (previous.successfulPostMutationShellCommands ?? 0) + (next.successfulPostMutationShellCommands ?? 0) || undefined,
     retriesByTool: { ...(previous.retriesByTool ?? {}), ...(next.retriesByTool ?? {}) },
@@ -3099,6 +3166,7 @@ function mergePolicyMetrics(metrics: RunStepMetrics, policy: ChildToolPolicy): R
   const duplicateReadCount = Math.max(metrics.duplicateReadCount ?? 0, policyMetrics.duplicateReadCount);
   const budgetCapHits = mergeBudgetCapHits(metrics.budgetCapHits, policyMetrics.budgetCapHits);
   const shellCommands = [...(metrics.shellCommands ?? []), ...policyMetrics.shellCommands].slice(0, 50);
+  const backgroundShellJobs = mergeBackgroundShellJobs(metrics.backgroundShellJobs, policyMetrics.backgroundShellJobs);
   const postMutationShellCommands = Math.max(metrics.postMutationShellCommands ?? 0, policyMetrics.postMutationShellCommands);
   const successfulPostMutationShellCommands = Math.max(metrics.successfulPostMutationShellCommands ?? 0, policyMetrics.successfulPostMutationShellCommands);
   const outputCharsByToolName = mergeNumberRecordsByMax(metrics.outputCharsByToolName, policyMetrics.outputCharsByToolName);
@@ -3120,6 +3188,7 @@ function mergePolicyMetrics(metrics: RunStepMetrics, policy: ChildToolPolicy): R
     outputTruncatedCount: Math.max(metrics.outputTruncatedCount ?? 0, policyMetrics.outputTruncatedCount),
     filesTouched: [...new Set([...(metrics.filesTouched ?? []), ...policyMetrics.filesTouched])].slice(0, 50),
     ...(shellCommands.length ? { shellCommands } : {}),
+    ...(backgroundShellJobs.length ? { backgroundShellJobs } : {}),
     ...(postMutationShellCommands > 0 ? { postMutationShellCommands } : {}),
     ...(successfulPostMutationShellCommands > 0 ? { successfulPostMutationShellCommands } : {}),
     retriesByTool: { ...(metrics.retriesByTool ?? {}), ...policyMetrics.retriesByTool },
@@ -3137,6 +3206,12 @@ function mergeApprovalDecisions(left: RunStepMetrics["approvalDecisions"], right
   const byId = new Map<string, NonNullable<RunStepMetrics["approvalDecisions"]>[number]>();
   for (const decision of [...(left ?? []), ...(right ?? [])]) byId.set(`${decision.requestId}:${decision.decision}`, decision);
   return [...byId.values()];
+}
+
+function mergeBackgroundShellJobs(left: RunStepMetrics["backgroundShellJobs"], right: RunStepMetrics["backgroundShellJobs"]): NonNullable<RunStepMetrics["backgroundShellJobs"]> {
+  const byId = new Map<string, NonNullable<RunStepMetrics["backgroundShellJobs"]>[number]>();
+  for (const job of [...(left ?? []), ...(right ?? [])]) byId.set(job.id, job);
+  return [...byId.values()].slice(-50);
 }
 
 function tokenomicsForToolOutputs(metrics: RunStepMetrics): TokenomicsSummary | undefined {
@@ -3167,7 +3242,8 @@ function mergeNumberRecordsByMax(left: Record<string, number> | undefined, right
 
 function finalizeStepMetrics(metrics: RunStepMetrics, step: RunStepState, budgetPolicy: ReturnType<typeof policyForStep>, priorFilesRead: string[] = []): RunStepMetrics {
   const mutated = (metrics.toolCallsByName.edit ?? 0) > 0 || (metrics.toolCallsByName.write ?? 0) > 0;
-  const verificationDone = mutated ? (metrics.successfulPostMutationShellCommands ?? metrics.postMutationShellCommands ?? 0) > 0 : false;
+  const successfulBackgroundEvidence = (metrics.backgroundShellJobs ?? []).some((job) => job.requiredEvidence && job.status === "succeeded");
+  const verificationDone = mutated ? (metrics.successfulPostMutationShellCommands ?? metrics.postMutationShellCommands ?? 0) > 0 || successfulBackgroundEvidence : false;
   const progressInput = {
     findings: extractFindingLines(step.output?.text ?? ""),
     toolCalls: metrics.toolCalls,

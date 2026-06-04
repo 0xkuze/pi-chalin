@@ -21,6 +21,15 @@ import { executeDelegatedChalinRoute, type ChalinDelegationRouteParams } from ".
 import { buildProjectDiscoveryIndex, formatProjectDiscoveryIndex } from "../project/discovery.ts";
 import { SkillCatalog, SkillMetricsStore, auditSkill, formatSkillList, formatSkillSearch, formatSkillShow, promoteSkill, reconcileSkillLifecyclesEffect, retireSkill, summarizeSkillMetrics } from "../skills/skills.ts";
 import { runStructuredSkillSelector } from "../skills/skill-selector.ts";
+import {
+  type BackgroundBashJobCompletionAction,
+  backgroundJobSummary,
+  formatBackgroundJobList,
+  formatBackgroundJobRead,
+  formatBackgroundJobToolResult,
+  getBackgroundJobManager,
+  requireBackgroundJob,
+} from "../runtime/background-jobs.ts";
 import { Effect } from "effect";
 import { clampInteger, clampNumber, errorResult, finalToolResult, formatMemoryInventory, isMemoryInventoryQuery, textResult, truncateForTool } from "./tool-output.ts";
 
@@ -77,6 +86,17 @@ const ChalinRouteParams = Type.Object({
 const ChalinProjectDiscoveryParams = Type.Object({
   maxDepth: Type.Optional(Type.Number({ description: "Maximum directory depth to index. Default 4." })),
   maxEntries: Type.Optional(Type.Number({ description: "Maximum entries to return. Default 450." })),
+});
+const ChalinBashJobParams = Type.Object({
+  action: Type.Union([Type.Literal("start"), Type.Literal("status"), Type.Literal("read"), Type.Literal("await"), Type.Literal("cancel"), Type.Literal("list")]),
+  command: Type.Optional(Type.String({ description: "Bash command to start in background. Required for action=start." })),
+  jobId: Type.Optional(Type.String({ description: "Optional stable id for action=start, or background job id for status/read/await/cancel. If omitted on start, pi-chalin generates one." })),
+  timeout: Type.Optional(Type.Number({ description: "Optional timeout in seconds for action=start, or await timeout in seconds for action=await." })),
+  requiredEvidence: Type.Optional(Type.Boolean({ description: "True when this job result is required before claiming verification or completion." })),
+  notifyOnCompletion: Type.Optional(Type.Boolean({ description: "Notify the owning Pi thread when the job completes. Default true." })),
+  completionAction: Type.Optional(Type.Union([Type.Literal("notify"), Type.Literal("resume"), Type.Literal("none")], { description: "What to do when the job completes: notify shows a UI/thread message, resume wakes the owning Pi thread to process results, none stays silent. Use resume only when the result should continue work after this turn." })),
+  maxOutputBytes: Type.Optional(Type.Number({ description: "Maximum bytes to persist before terminating the job. Default 104857600." })),
+  maxChars: Type.Optional(Type.Number({ description: "Maximum output characters to return for action=read. Default 16000." })),
 });
 const ChalinSkillParams = Type.Object({
   action: Type.Union([
@@ -175,6 +195,18 @@ type ChalinResumeToolParams = {
 };
 
 type ChalinRouteToolParams = ChalinDelegationRouteParams;
+
+type ChalinBashJobToolParams = {
+  action: "start" | "status" | "read" | "await" | "cancel" | "list";
+  command?: string;
+  jobId?: string;
+  timeout?: number;
+  requiredEvidence?: boolean;
+  notifyOnCompletion?: boolean;
+  completionAction?: BackgroundBashJobCompletionAction;
+  maxOutputBytes?: number;
+  maxChars?: number;
+};
 
 type ChalinWebSearchToolParams = {
   query?: string;
@@ -307,6 +339,7 @@ export function registerChalinTools(pi: ExtensionAPI): void {
     promptGuidelines: [
       "Use when broad repository orientation is needed before selecting files.",
       "For bounded bugfix/refactor/test/scaffold work, prefer native find/grep/read against likely files and nearby tests instead of inventorying the project.",
+      "If native read/bash tools are unavailable and the task needs exact file contents or command execution, do one inventory at most, then call chalin_route with read/verify or read/write/verify effects.",
       "Treat it as filesystem facts only; choose follow-up reads/searches with LLM judgment.",
       "Verify final claims from exact file evidence, not from the inventory alone.",
     ],
@@ -317,6 +350,77 @@ export function registerChalinTools(pi: ExtensionAPI): void {
         maxEntries: typeof params.maxEntries === "number" ? params.maxEntries : undefined,
       });
       return textResult(formatProjectDiscoveryIndex(discovery), { discovery });
+    },
+  });
+
+  pi.registerTool({
+    name: "chalin_bash_job",
+    label: "Chalin Bash Job",
+    description: "Start and monitor long-running bash commands in the background from the primary Pi thread without blocking the agent session. Intended for verification/build/test/dev-server jobs, not arbitrary mutation.",
+    promptSnippet: "chalin_bash_job: for potentially long/blocking verification, build, typecheck, test-suite, dev-server, watcher, or sleep/server commands; start it, continue independent work, and use completionAction=resume when Pi should wake after the job finishes.",
+    promptGuidelines: [
+      "Use action=start for commands expected to take long enough that avoiding session blockage or continuing independent work is valuable.",
+      "Prefer this over inline bash for likely-long test/build/typecheck/CI/dev-server/watch commands, even when the user did not explicitly ask for background execution.",
+      "Do not call action=await immediately after start when there is independent work you can do or when a truthful pending-job final answer is acceptable.",
+      "Set completionAction=resume when the job result should wake this Pi thread after the turn ends or after you move on to other work; use notify for passive visibility and none for deliberately silent jobs.",
+      "Do not use this to bypass a user request not to run shell commands, mutate files, access secrets, or perform risky side effects.",
+      "Do not use this for short commands where immediate output controls the next local edit or fact; use normal bash when available.",
+      "Set requiredEvidence=true only when the job result must pass before you claim verification or completion.",
+      "After starting a requiredEvidence job, you may finish the current turn only with an explicit pending-job status; do not claim it passed until a terminal status/read/await or completion wakeup reports succeeded and not stale.",
+      "Use list/status/read to collect completed results; use cancel for obsolete servers, watches, or stale verification.",
+      "For complex, multi-file, risky, or review-needed work, prefer chalin_route instead of keeping the whole workflow inline.",
+    ],
+    parameters: ChalinBashJobParams,
+    async execute(_toolCallId, params: ChalinBashJobToolParams, _signal, _onUpdate, ctx) {
+      const manager = getBackgroundJobManager(ctx.cwd);
+      try {
+        if (params.action === "start") {
+          const command = params.command?.trim() ?? "";
+          if (!command) return errorResult("chalin_bash_job start requires command.", { action: params.action });
+          const job = manager.startJob({
+            command,
+            jobId: typeof params.jobId === "string" ? params.jobId : undefined,
+            timeoutSeconds: typeof params.timeout === "number" ? params.timeout : undefined,
+            maxOutputBytes: typeof params.maxOutputBytes === "number" ? params.maxOutputBytes : undefined,
+            requiredEvidence: params.requiredEvidence === true,
+            notifyOnCompletion: params.notifyOnCompletion !== false,
+            completionAction: params.completionAction,
+            owner: {
+              agent: "primary",
+              sessionId: chalinSessionIdFromContext(ctx),
+            },
+          });
+          return textResult(formatBackgroundJobToolResult(job), { job: backgroundJobSummary(job) });
+        }
+
+        if (params.action === "list") {
+          const jobs = manager.listJobs();
+          return textResult(formatBackgroundJobList(jobs), { jobs: jobs.map(backgroundJobSummary) });
+        }
+        if (params.action === "status") {
+          const job = requireBackgroundJob(manager, params.jobId);
+          return textResult(formatBackgroundJobToolResult(job), { job: backgroundJobSummary(job) });
+        }
+        if (params.action === "read") {
+          const job = requireBackgroundJob(manager, params.jobId);
+          const output = manager.readJobOutput(job.id, typeof params.maxChars === "number" ? params.maxChars : 16_000);
+          return textResult(formatBackgroundJobRead(job, output), { job: backgroundJobSummary(job), output });
+        }
+        if (params.action === "await") {
+          const job = requireBackgroundJob(manager, params.jobId);
+          const updated = await manager.awaitJob(job.id, Math.max(1, Math.floor(params.timeout ?? 30)) * 1000);
+          return textResult(formatBackgroundJobToolResult(updated), { job: backgroundJobSummary(updated) });
+        }
+        if (params.action === "cancel") {
+          const job = requireBackgroundJob(manager, params.jobId);
+          const cancelled = manager.cancelJob(job.id);
+          return textResult(formatBackgroundJobToolResult(cancelled), { job: backgroundJobSummary(cancelled) });
+        }
+        return errorResult(`Unsupported chalin_bash_job action '${String(params.action)}'.`, { action: params.action });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return errorResult(`chalin_bash_job failed: ${message}`, { action: params.action, error: message });
+      }
     },
   });
 

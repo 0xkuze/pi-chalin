@@ -28,6 +28,7 @@ deniedTools:
   - edit
   - write
   - bash
+  - chalin_bash_job
 requiresReview: false
 scripts: disabled
 trust: trusted

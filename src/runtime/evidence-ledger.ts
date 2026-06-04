@@ -1,6 +1,6 @@
 import type { InlineToolEvent } from "./inline-policy.ts";
 
-export type EvidenceStatus = "pass" | "fail";
+export type EvidenceStatus = "pass" | "fail" | "pending";
 
 export interface EvidenceCommandRecord {
   command: string;
@@ -58,9 +58,10 @@ export function buildEvidenceLedger(events: readonly InlineToolEvent[]): Evidenc
     const afterLatestMutation = latestMutationIndex !== undefined && index > latestMutationIndex;
     const observation = compactEvidenceObservation(event.observation);
     if (observation) {
+      const status = evidenceStatusForEvent(event);
       observations.push({
         toolName: event.toolName,
-        status: event.isError ? "fail" : "pass",
+        status,
         afterLatestMutation,
         text: observation,
         ...(event.command ? { command: event.command.trim() } : {}),
@@ -87,7 +88,7 @@ export function buildEvidenceLedger(events: readonly InlineToolEvent[]): Evidenc
       readPaths.add(normalizeWorkflowPath(event.path));
       return;
     }
-    if (event.toolName === "bash" && event.command) {
+    if ((event.toolName === "bash" || event.toolName === "chalin_bash_job") && event.command && !isPendingBackgroundJobEvent(event)) {
       const commandRecord = {
         command: event.command.trim(),
         status: event.isError ? "fail" : "pass",
@@ -114,10 +115,21 @@ export function buildEvidenceLedger(events: readonly InlineToolEvent[]): Evidenc
     observations,
     evidenceAfterLatestMutation: commandRecords.some((record) => record.afterLatestMutation) || completed.some((event, index) => {
       if (latestMutationIndex === undefined || index <= latestMutationIndex || event.isError) return false;
+      if (isPendingBackgroundJobEvent(event)) return false;
       return event.toolName !== "edit" && event.toolName !== "write";
     }),
     ...(latestMutationIndex !== undefined ? { latestMutationIndex } : {}),
   };
+}
+
+function evidenceStatusForEvent(event: InlineToolEvent): EvidenceStatus {
+  if (isPendingBackgroundJobEvent(event)) return "pending";
+  return event.isError ? "fail" : "pass";
+}
+
+function isPendingBackgroundJobEvent(event: InlineToolEvent): boolean {
+  return event.toolName === "chalin_bash_job"
+    && (event.backgroundJobStatus === "queued" || event.backgroundJobStatus === "running");
 }
 
 export function compactEvidenceObservation(value: unknown, maxLength = MAX_OBSERVATION_CHARS): string | undefined {

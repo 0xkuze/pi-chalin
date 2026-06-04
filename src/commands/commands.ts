@@ -17,6 +17,7 @@ import {
   openMemoryReviewWithLoading,
   openArtifactPanel,
   openActivityMonitor,
+  openBackgroundJobsMonitor,
   formatRunInspection,
   formatRunSummary,
   openWebFetchAuditPanel,
@@ -29,7 +30,7 @@ export function registerChalinCommands(pi: ExtensionAPI): void {
   pi.registerCommand("chalin", {
     description: "Open Smart Panel or toggle autonomous routing with: /chalin on|off",
     getArgumentCompletions: (prefix) => {
-      const values = ["on", "off", "agents", "skills", "memory", "artifacts", "activity", "runs", "web", "settings", "status"];
+      const values = ["on", "off", "agents", "skills", "memory", "artifacts", "activity", "jobs", "runs", "web", "settings", "status"];
       const filtered = values.filter((value) => value.startsWith(prefix.trim()));
       return filtered.length > 0 ? filtered.map((value) => ({ value, label: value })) : null;
     },
@@ -118,6 +119,11 @@ export function registerChalinCommands(pi: ExtensionAPI): void {
         return;
       }
 
+      if (command === "jobs") {
+        await openBackgroundJobsMonitor(ctx);
+        return;
+      }
+
       if (command === "web" || command === "webfetch") {
         await openWebFetchAuditPanel(ctx, await listWebFetchAudit({ cwd: ctx.cwd }));
         return;
@@ -147,7 +153,7 @@ export function registerChalinCommands(pi: ExtensionAPI): void {
       }
 
       if (command && command !== "panel") {
-        ctx.ui.notify(`Unknown /chalin argument '${command}'. Use /chalin, /chalin activity, /chalin artifacts, /chalin web, /chalin on, or /chalin off. Normal prompts are routed automatically when enabled.`, "warning");
+        ctx.ui.notify(`Unknown /chalin argument '${command}'. Use /chalin, /chalin activity, /chalin jobs, /chalin artifacts, /chalin web, /chalin on, or /chalin off. Normal prompts are routed automatically when enabled.`, "warning");
         return;
       }
 

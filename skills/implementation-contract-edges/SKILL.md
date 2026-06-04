@@ -25,6 +25,7 @@ allowedTools:
   - edit
   - write
   - bash
+  - chalin_bash_job
   - chalin_project_discovery
 deniedTools:
   - chalin_delegate

@@ -20,6 +20,7 @@ allowedTools:
   - chalin_project_discovery
 deniedTools:
   - bash
+  - chalin_bash_job
   - chalin_delegate
 requiresReview: false
 scripts: disabled

@@ -171,6 +171,60 @@ test("post-mutation command evidence does not depend on a harness toolchain allo
   assert.equal(getInlineCompletionGatePayload().state.verificationCommand, "repo-acceptance-check --changed-surface");
 });
 
+test("background bash job completion counts as post-mutation command evidence", () => {
+  recordInlineToolCompletion({
+    toolName: "edit",
+    path: "src/parser.py",
+    argsText: JSON.stringify({ path: "src/parser.py", newText: "def parse(value):\n    return value.strip()\n" }),
+  });
+  recordInlineToolCompletion({
+    toolName: "edit",
+    path: "tests/test_parser.py",
+    argsText: JSON.stringify({ path: "tests/test_parser.py", newText: "def test_parse():\n    assert parse(' x ') == 'x'\n" }),
+  });
+
+  const evidence = recordInlineToolCompletion({
+    toolName: "chalin_bash_job",
+    command: "repo-acceptance-check --changed-surface",
+    observation: "background job succeeded with project acceptance marker",
+  });
+
+  assert.equal(evidence.shouldCompletionNudge, true);
+  assert.equal(getInlineCompletionGatePayload().state.verificationObserved, true);
+  assert.equal(getInlineCompletionGatePayload().state.verificationCommand, "repo-acceptance-check --changed-surface");
+});
+
+test("background bash job start remains pending evidence until terminal status", () => {
+  beginChalinTurn({ prompt: "change parser and run tests", cwd: process.cwd() });
+  recordInlineToolCompletion({
+    toolName: "edit",
+    path: "src/parser.py",
+    argsText: JSON.stringify({ path: "src/parser.py", newText: "def parse(value):\n    return value.strip()\n" }),
+  });
+
+  const pending = recordInlineToolCompletion({
+    toolName: "chalin_bash_job",
+    observation: "background job verify-parser: running",
+    backgroundJobId: "verify-parser",
+    backgroundJobStatus: "running",
+    backgroundJobRequiredEvidence: true,
+    backgroundJobCompletionAction: "resume",
+  });
+  const payload = getInlineCompletionGatePayload();
+
+  assert.equal(pending.shouldCompletionNudge, false);
+  assert.equal(payload.state.verificationObserved, false);
+  assert.equal(payload.state.verificationCommand, undefined);
+  assert.deepEqual(payload.state.backgroundJobs, [{
+    id: "verify-parser",
+    status: "running",
+    requiredEvidence: true,
+    completionAction: "resume",
+  }]);
+  assert.equal(payload.ledger.evidenceAfterLatestMutation, false);
+  assert.equal(payload.ledger.observations.at(-1)?.status, "pending");
+});
+
 test("pre-mutation commands are not classified as verification by toolchain names", () => {
   beginChalinTurn({ prompt: "change src/parser.py", cwd: process.cwd() });
 

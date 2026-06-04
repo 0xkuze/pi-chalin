@@ -32,7 +32,7 @@ export type ChalinRoutePlannerInput = {
   reason?: string;
 };
 
-export type ChalinRoutePlanningSource = "llm" | "failed";
+export type ChalinRoutePlanningSource = "llm" | "fallback" | "failed";
 
 export type ChalinRoutePlanningResult = {
   route: RouteDecision;
@@ -126,6 +126,18 @@ export async function planChalinRoute(
     : await runStructuredRoutePlanner(normalizedInput, context);
 
   if (!attempt.output) {
+    const fallback = fallbackPlannerOutput(normalizedInput, context.catalog);
+    if (fallback) {
+      const route = routeFromPlan(fallback.plan);
+      if (route.plan) {
+        return {
+          route,
+          source: "fallback",
+          diagnostics: [...attempt.diagnostics, "Structured route planner unavailable; used conservative single-agent fallback from explicit route effects."],
+          requiresWorkspaceMutation: fallback.requiresWorkspaceMutation,
+        };
+      }
+    }
     return {
       route: routePlannerBlockedRoute(attempt.diagnostics.at(-1) ?? "Internal route planner did not return a valid structured plan."),
       source: "failed",
@@ -177,10 +189,46 @@ export async function runStructuredRoutePlanner(
   }
 
   try {
-    return await runAgentSessionRoutePlanner(input, context);
+    return await runAgentSessionRoutePlannerWithTimeout(input, context);
   } catch (error) {
     return { diagnostics: [`Internal route planner failed: ${errorMessage(error)}`] };
   }
+}
+
+async function runAgentSessionRoutePlannerWithTimeout(
+  input: ChalinRoutePlannerInput,
+  context: ChalinRoutePlanningContext,
+): Promise<ChalinRoutePlannerRunResult> {
+  const timeoutMs = routePlannerTimeoutMs();
+  const controller = new AbortController();
+  const abortFromUpstream = () => controller.abort();
+  if (context.signal?.aborted) controller.abort();
+  else context.signal?.addEventListener("abort", abortFromUpstream, { once: true });
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timeout = new Promise<ChalinRoutePlannerRunResult>((resolve) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+        resolve({ diagnostics: [`AgentSession route planner timed out after ${timeoutMs}ms.`] });
+      }, timeoutMs);
+      timer.unref?.();
+    });
+    return await Promise.race([
+      runAgentSessionRoutePlanner(input, { ...context, signal: controller.signal }),
+      timeout,
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    context.signal?.removeEventListener("abort", abortFromUpstream);
+    if (timedOut) controller.abort();
+  }
+}
+
+function routePlannerTimeoutMs(): number {
+  const parsed = Number(process.env.PI_CHALIN_ROUTE_PLANNER_TIMEOUT_MS);
+  return Number.isFinite(parsed) && parsed >= 5_000 ? Math.floor(parsed) : 45_000;
 }
 
 export function parseChalinRoutePlannerMessage(message: AssistantMessage, catalog?: AgentCatalog): ChalinRoutePlannerOutput | undefined {
@@ -250,6 +298,59 @@ export function validateChalinRoutePlannerOutput(parsed: Record<string, unknown>
   const route = routeFromPlan(plan);
   if (!route.plan) return undefined;
   return { plan, requiresWorkspaceMutation: parsed.requiresWorkspaceMutation };
+}
+
+function fallbackPlannerOutput(input: ChalinRoutePlannerInput, catalog: AgentCatalog): ChalinRoutePlannerOutput | undefined {
+  const expectedEffects = validateExpectedEffects(input.expectedEffects);
+  if (!expectedEffects) return undefined;
+  const requiresWorkspaceMutation = input.requiresWorkspaceMutation === true || expectedEffects.includes("write");
+  if (requiresWorkspaceMutation && (!expectedEffects.includes("read") || !expectedEffects.includes("verify"))) return undefined;
+  const agent = fallbackAgentForEffects(catalog, expectedEffects);
+  if (!agent) return undefined;
+  const risk = input.risk ?? (requiresWorkspaceMutation ? "medium" : "low");
+  const task = [
+    input.task.trim(),
+    expectedEffects.includes("verify")
+      ? "Use exact repo evidence to discover the verification command. For potentially long test/build/typecheck commands, prefer chalin_bash_job; use completionAction=resume for async continuation and avoid immediate await unless the result is needed for the next step."
+      : "Use exact repo evidence before making claims.",
+    requiresWorkspaceMutation ? "Preserve the requested scope and verify after mutation." : "Do not mutate files unless the user task explicitly requires it.",
+  ].join(" ");
+  return {
+    requiresWorkspaceMutation,
+    plan: {
+      topology: "sequential",
+      steps: [{
+        id: fallbackStepId(expectedEffects),
+        agent,
+        task: truncate(task, 1_200),
+        expectedEffects,
+      }],
+      risk,
+      needsMemory: input.needsMemory ?? false,
+      needsArtifacts: input.needsArtifacts ?? (expectedEffects.includes("verify") || expectedEffects.includes("write")),
+      expectedEffects,
+      workUnitStrategy: input.workUnitStrategy ?? "none",
+      ...(typeof input.fanoutAuthorized === "boolean" ? { fanoutAuthorized: input.fanoutAuthorized } : {}),
+      reason: input.reason?.trim() || "Conservative fallback route from explicit requested effects because the structured planner was unavailable.",
+    },
+  };
+}
+
+function fallbackAgentForEffects(catalog: AgentCatalog, expectedEffects: RouteExpectedEffect[]): string | undefined {
+  const preferred = expectedEffects.includes("write") || expectedEffects.includes("verify")
+    ? ["worker", "built-in/worker", "reviewer", "built-in/reviewer", "scout", "built-in/scout"]
+    : ["scout", "built-in/scout", "context-builder", "built-in/context-builder", "worker", "built-in/worker"];
+  for (const ref of preferred) {
+    const resolved = catalog.resolve(ref);
+    if (resolved.agent && resolved.agent.diagnostics.every((item) => !item.startsWith("invalid:"))) return ref;
+  }
+  return catalog.listExecutable()[0]?.name;
+}
+
+function fallbackStepId(expectedEffects: RouteExpectedEffect[]): string {
+  if (expectedEffects.includes("write")) return "fallback-implement-verify";
+  if (expectedEffects.includes("verify")) return "fallback-verify";
+  return "fallback-read";
 }
 
 async function runAgentSessionRoutePlanner(

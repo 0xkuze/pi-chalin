@@ -29,6 +29,10 @@ export interface InlineToolEvent {
   path?: string;
   argsText?: string;
   observation?: string;
+  backgroundJobId?: string;
+  backgroundJobStatus?: string;
+  backgroundJobRequiredEvidence?: boolean;
+  backgroundJobCompletionAction?: string;
 }
 
 export interface InlineNudgePlan {
@@ -137,6 +141,13 @@ export interface InlinePolicySnapshot {
   changedPaths: string[];
   readPaths: string[];
   promptCodePaths: string[];
+  backgroundJobs: Array<{
+    id: string;
+    command?: string;
+    status: string;
+    requiredEvidence: boolean;
+    completionAction?: string;
+  }>;
   toolEvents: InlineToolEvent[];
   counters: {
     mutationToolCount: number;

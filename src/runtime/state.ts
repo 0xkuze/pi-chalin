@@ -52,6 +52,7 @@ interface InlineWorkState {
   changedPaths: Set<string>;
   readPaths: Set<string>;
   promptCodePaths: Set<string>;
+  backgroundJobs: Map<string, InlineBackgroundJobState>;
   deletedPaths: Set<string>;
   semanticJudgeRequestKeys: Set<string>;
   semanticJudgeResults: SemanticPolicyJudgeResult[];
@@ -92,6 +93,14 @@ interface InlineWorkState {
   postMutationCustomEvidenceObserved: boolean;
   completionGateBlocks: CompletionGateDecision[];
   nudgeSent: boolean;
+}
+
+export interface InlineBackgroundJobState {
+  id: string;
+  command?: string;
+  status: string;
+  requiredEvidence: boolean;
+  completionAction?: string;
 }
 
 export interface LiveStepSessionRef {
@@ -205,8 +214,13 @@ export function getInlineCompletionGatePayload(options: { finalAnswer?: string }
       changedPaths: [...inlineWork.changedPaths].sort(),
       readPaths: [...inlineWork.readPaths].sort(),
       promptCodePaths: [...inlineWork.promptCodePaths].sort(),
+      backgroundJobs: inlineBackgroundJobSnapshots(),
     },
   };
+}
+
+export function getInlinePendingRequiredBackgroundJobs(): InlineBackgroundJobState[] {
+  return inlineBackgroundJobSnapshots().filter((job) => job.requiredEvidence && isPendingBackgroundJobStatus(job.status));
 }
 
 export function recordCompletionGateBlock(decision: CompletionGateDecision): void {
@@ -244,7 +258,18 @@ export function getInlineDerivedGapDiagnosticsForTests(): { weakTestCoverage: bo
   };
 }
 
-export function recordInlineToolCompletion(options: { toolName: string; isError?: boolean; command?: string; path?: string; argsText?: string; observation?: string }): InlineToolCompletionAdapter {
+export function recordInlineToolCompletion(options: {
+  toolName: string;
+  isError?: boolean;
+  command?: string;
+  path?: string;
+  argsText?: string;
+  observation?: string;
+  backgroundJobId?: string;
+  backgroundJobStatus?: string;
+  backgroundJobRequiredEvidence?: boolean;
+  backgroundJobCompletionAction?: string;
+}): InlineToolCompletionAdapter {
   appendInlineToolEvent({ ...options, phase: "completed" });
   let shouldProgressNudge = false;
   let shouldWorkspaceBoundaryNudge = false;
@@ -259,7 +284,8 @@ export function recordInlineToolCompletion(options: { toolName: string; isError?
   let shouldPostFailureEvidenceNudge = false;
   let justMutated = false;
   let staleVerificationReset = false;
-  if (options.toolName === "bash" && options.command) {
+  recordInlineBackgroundJobFromCompletion(options);
+  if (isShellExecutionTool(options.toolName) && options.command) {
     recordDeletedPathsFromCommand(options.command);
   }
   let shouldTerminalCompletionNudge = false;
@@ -363,7 +389,7 @@ export function recordInlineToolCompletion(options: { toolName: string; isError?
   }
   let shouldFailureNudge = false;
   const docsOnlyMutation = inlineDocsOnlyMutation();
-  const verificationLeftWorkspace = options.toolName === "bash"
+  const verificationLeftWorkspace = isShellExecutionTool(options.toolName)
     && inlineWork.mutationObserved
     && bashCommandLeavesWorkspace(options.command);
   if (verificationLeftWorkspace && !inlineWork.outOfWorkspaceMutationNudgeSent) {
@@ -373,12 +399,12 @@ export function recordInlineToolCompletion(options: { toolName: string; isError?
   if (options.toolName === "read" && options.path && inlineWork.testCoverageNudgeSent && isCoverageReviewPath(options.path) && !options.isError) {
     inlineWork.testCoverageReviewObserved = true;
   }
-  if (options.toolName === "bash" && docsOnlyMutation) {
+  if (isShellExecutionTool(options.toolName) && docsOnlyMutation) {
       shouldDocsShellNudge = !inlineWork.docsPostWriteShellNudgeSent;
       inlineWork.docsPostWriteShellNudgeSent = true;
   }
   if (
-    options.toolName === "bash"
+    isShellExecutionTool(options.toolName)
     && inlineWork.mutationObserved
     && inlineWork.verificationObserved
     && !inlineDocsOnlyMutation()
@@ -390,10 +416,10 @@ export function recordInlineToolCompletion(options: { toolName: string; isError?
   if (options.toolName === "read" && docsOnlyMutation && options.path && [...inlineWork.changedPaths].some((changedPath) => sameWorkflowPath(changedPath, options.path ?? "")) && !options.isError) {
     inlineWork.verificationObserved = true;
     inlineWork.verificationCommand = `read ${options.path}`;
-  } else if (options.toolName === "bash" && docsOnlyMutation) {
+  } else if (isShellExecutionTool(options.toolName) && docsOnlyMutation) {
     inlineWork.verificationObserved = false;
     inlineWork.verificationCommand = undefined;
-  } else if (options.toolName === "bash" && inlineWork.mutationObserved && hasPostMutationCommandEvidence(options.command)) {
+  } else if (isShellExecutionTool(options.toolName) && inlineWork.mutationObserved && hasPostMutationCommandEvidence(options.command)) {
     inlineWork.verificationCommand = options.command?.trim();
     inlineWork.verificationAttemptCount += 1;
     if (verificationLeftWorkspace) {
@@ -416,13 +442,13 @@ export function recordInlineToolCompletion(options: { toolName: string; isError?
         inlineWork.verificationLoopNudgeSent = true;
       }
     }
-  } else if (options.toolName === "bash" && inlineWork.mutationObserved && options.isError) {
+  } else if (isShellExecutionTool(options.toolName) && inlineWork.mutationObserved && options.isError) {
     shouldFailureNudge = !inlineWork.failedVerificationNudgeSent;
     if (shouldFailureNudge) inlineWork.failedVerificationNudgeSent = true;
   } else if (options.isError) {
     return inlineWorkAdapter({ shouldProgressNudge, shouldReadyToVerifyNudge: false, shouldFailureNudge: false, shouldCompletionNudge: false, shouldTestCoverageNudge: false, shouldWeakTestCoverageNudge: false, shouldPackageMetadataNudge: false, shouldParallelSurfaceNudge: false, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldTerminalCompletionNudge, shouldPostTerminalDriftNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldLocatorLoopNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, verificationCommand: inlineWork.verificationCommand, docsOnlyMutation });
   }
-  if (options.toolName === "bash" && !options.isError && isTerminalExternalActionCommand(options.command)) {
+  if (isShellExecutionTool(options.toolName) && !options.isError && isTerminalExternalActionCommand(options.command)) {
     inlineWork.terminalActionObserved = true;
     inlineWork.terminalActionCommand = options.command?.trim();
     if (!inlineWork.terminalCompletionNudgeSent) {
@@ -511,6 +537,27 @@ export function recordInlineToolCompletion(options: { toolName: string; isError?
   }
   if (shouldCompletionNudge) inlineWork.nudgeSent = true;
   return inlineWorkAdapter({ shouldProgressNudge, shouldReadyToVerifyNudge, shouldFailureNudge, shouldCompletionNudge, shouldTestCoverageNudge, shouldWeakTestCoverageNudge, shouldPackageMetadataNudge, shouldParallelSurfaceNudge, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldTerminalCompletionNudge, shouldPostTerminalDriftNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldLocatorLoopNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, verificationCommand: inlineWork.verificationCommand, docsOnlyMutation });
+}
+
+export function recordBackgroundJobCompletionForTurn(input: {
+  id: string;
+  command: string;
+  status: string;
+  requiredEvidence: boolean;
+  completionAction?: string;
+  observation?: string;
+}): void {
+  const terminal = !isPendingBackgroundJobStatus(input.status);
+  recordInlineToolCompletion({
+    toolName: "chalin_bash_job",
+    isError: backgroundJobFailureStatus(input.status),
+    command: terminal ? input.command : undefined,
+    observation: input.observation,
+    backgroundJobId: input.id,
+    backgroundJobStatus: input.status,
+    backgroundJobRequiredEvidence: input.requiredEvidence,
+    backgroundJobCompletionAction: input.completionAction,
+  });
 }
 
 function inlineWorkAdapter(raw: InlineNudgeSelectorInput): InlineToolCompletionAdapter {
@@ -733,6 +780,7 @@ function freshInlineWorkState(turnId = 0): InlineWorkState {
     changedPaths: new Set(),
     readPaths: new Set(),
     promptCodePaths: new Set(),
+    backgroundJobs: new Map(),
     deletedPaths: new Set(),
     semanticJudgeRequestKeys: new Set(),
     semanticJudgeResults: [],
@@ -813,6 +861,7 @@ function inlinePolicySnapshot(): InlinePolicySnapshot {
     changedPaths: [...inlineWork.changedPaths].sort(),
     readPaths: [...inlineWork.readPaths].sort(),
     promptCodePaths: [...inlineWork.promptCodePaths].sort(),
+    backgroundJobs: inlineBackgroundJobSnapshots(),
     toolEvents: inlineWork.toolEvents.slice(-16).map((event) => ({ ...event })),
     counters: {
       mutationToolCount: inlineWork.mutationToolCount,
@@ -830,6 +879,38 @@ function appendInlineToolEvent(event: InlineToolEvent): void {
   if (inlineWork.toolEvents.length > 200) {
     inlineWork.toolEvents.splice(0, inlineWork.toolEvents.length - 200);
   }
+}
+
+function recordInlineBackgroundJobFromCompletion(options: {
+  toolName: string;
+  command?: string;
+  backgroundJobId?: string;
+  backgroundJobStatus?: string;
+  backgroundJobRequiredEvidence?: boolean;
+  backgroundJobCompletionAction?: string;
+}): void {
+  if (options.toolName !== "chalin_bash_job") return;
+  if (!options.backgroundJobId || !options.backgroundJobStatus) return;
+  const existing = inlineWork.backgroundJobs.get(options.backgroundJobId);
+  inlineWork.backgroundJobs.set(options.backgroundJobId, {
+    id: options.backgroundJobId,
+    command: options.command ?? existing?.command,
+    status: options.backgroundJobStatus,
+    requiredEvidence: options.backgroundJobRequiredEvidence ?? existing?.requiredEvidence ?? false,
+    completionAction: options.backgroundJobCompletionAction ?? existing?.completionAction,
+  });
+}
+
+function inlineBackgroundJobSnapshots(): InlineBackgroundJobState[] {
+  return [...inlineWork.backgroundJobs.values()]
+    .map((job) => ({
+      id: job.id,
+      ...(job.command ? { command: job.command } : {}),
+      status: job.status,
+      requiredEvidence: job.requiredEvidence,
+      ...(job.completionAction ? { completionAction: job.completionAction } : {}),
+    }))
+    .sort((a, b) => a.id.localeCompare(b.id));
 }
 
 function inlineWeakTestCoverageGap(): boolean {
@@ -872,7 +953,7 @@ function isPostVerificationExplorationTool(toolName: string): boolean {
 }
 
 function isPostTerminalDriftTool(toolName: string): boolean {
-  return ["bash", "read", "grep", "find", "ls", "edit", "write", "chalin_project_discovery"].includes(toolName);
+  return ["bash", "chalin_bash_job", "read", "grep", "find", "ls", "edit", "write", "chalin_project_discovery"].includes(toolName);
 }
 
 function isAllowedTerminalFollowupCommand(command: string | undefined): boolean {
@@ -903,7 +984,19 @@ function isGhExecutableToken(token: string): boolean {
 
 function isPostFailureEvidenceTool(toolName: string, command: string | undefined): boolean {
   if (["read", "grep", "find", "ls", "chalin_project_discovery"].includes(toolName)) return true;
-  return toolName === "bash" && hasPostMutationCommandEvidence(command);
+  return isShellExecutionTool(toolName) && hasPostMutationCommandEvidence(command);
+}
+
+function isShellExecutionTool(toolName: string): boolean {
+  return toolName === "bash" || toolName === "chalin_bash_job";
+}
+
+function isPendingBackgroundJobStatus(status: string | undefined): boolean {
+  return status === "queued" || status === "running";
+}
+
+function backgroundJobFailureStatus(status: string | undefined): boolean {
+  return Boolean(status && ["failed", "timed_out", "cancelled", "orphaned", "stale"].includes(status));
 }
 
 function recordPreMutationEvidenceTool(toolName: string): void {

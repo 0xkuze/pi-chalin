@@ -22,6 +22,13 @@ export interface CompletionGatePayload {
     changedPaths: string[];
     readPaths: string[];
     promptCodePaths: string[];
+    backgroundJobs?: Array<{
+      id: string;
+      command?: string;
+      status: string;
+      requiredEvidence: boolean;
+      completionAction?: string;
+    }>;
   };
 }
 
@@ -48,8 +55,9 @@ export function buildCompletionGateContract(): string {
     "Expansion: derive the smallest adjacent checks from the actual change: normal behavior, a boundary/counterexample, and a preservation/invariant path when applicable.",
     "Prior blocks: treat earlier missingEvidence/requiredEvidence as binding acceptance debt until new evidence satisfies it or direct repo/spec evidence proves it unnecessary.",
     "Delegation: if a handoff names gaps, contradictions, skipped verification, or partial scope, treat that as missing evidence unless you repair it or state it as incomplete.",
+    "Background jobs: a queued/running requiredEvidence job is pending evidence, not passing evidence. A final answer may honestly say the job is still running only if it does not claim the requested work is complete.",
     "Decision: if `can_finalize` is false, continue with the smallest repair/verification step or ask the user through the interview flow when a human decision blocks progress. Do not present an incomplete implementation as done.",
-    "Do not rely on background follow-up; self-audit before final, then finish with evidence, continue current work, or ask.",
+    "Do not rely on hidden background follow-up to prove a completion claim; self-audit before final, then finish with evidence, continue current work, or make the pending background job explicit.",
     "Do not expose the gate, JSON, or internal labels in the final answer unless the user asks how the harness made the decision.",
   ].join("\n");
 }

@@ -10,6 +10,12 @@ import { Container, Spacer, Text, type Component, type Focusable, type TUI } fro
 import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ArtifactStore, FeatureArtifactState } from "../artifacts/artifacts.ts";
 import { getLatestRun, getLiveStepSession, type LiveStepSessionRef } from "../runtime/state.ts";
+import {
+  backgroundJobIsTerminal,
+  getBackgroundJobManager,
+  listBackgroundJobs,
+  type BackgroundBashJobSummary,
+} from "../runtime/background-jobs.ts";
 import type { AgentDefinition, ApprovalDecision, BudgetCapHit, ChalinRuntimeState, MemoryRecord, NestedRunStepTrace, RouteDecision, RunState, RunStepState, RunStepStatus } from "../domain/schemas.ts";
 import { isUsableStepStatus } from "../runtime/status.ts";
 import { setChalinStatus } from "./ui-status.ts";
@@ -672,6 +678,26 @@ export async function openActivityMonitor(ctx: ExtensionContext, run: RunState |
     const step = run.steps.find((candidate) => selected === `${candidate.agent} · ${candidate.status}`);
     ctx.ui.notify(formatActivityStep(step), step?.status === "failed" ? "error" : "info");
   }
+}
+
+export async function openBackgroundJobsMonitor(ctx: ExtensionContext): Promise<void> {
+  const jobs = listBackgroundJobs(ctx.cwd);
+  if (!ctx.hasUI || typeof ctx.ui.custom !== "function") {
+    ctx.ui.notify(formatBackgroundJobsSummary(jobs), jobs.some((job) => backgroundJobAttention(job)) ? "warning" : "info");
+    return;
+  }
+  await ctx.ui.custom<void>(
+    (tui, theme, _keybindings, done) => new ChalinJobsOverlay(tui, theme, ctx.cwd, () => done(undefined)),
+    {
+      overlay: true,
+      overlayOptions: {
+        anchor: "center",
+        width: "92%",
+        maxHeight: "82%",
+        margin: 1,
+      },
+    },
+  );
 }
 
 type MemoryReviewActions = { approve(id: string): void; reject(id: string): void; delete(id: string): void };
@@ -1856,6 +1882,178 @@ class ChalinLiveStatusOverlay implements Component, Focusable {
   }
 }
 
+class ChalinJobsOverlay implements Component, Focusable {
+  focused = false;
+  private selected = 0;
+  private scroll = 0;
+  private detail = false;
+  private lastAction = "";
+  private timer: ReturnType<typeof setInterval>;
+
+  constructor(
+    private readonly tui: TUI,
+    private readonly theme: Theme,
+    private readonly cwd: string,
+    private readonly done: () => void,
+  ) {
+    this.timer = setInterval(() => this.tui.requestRender(), 1000);
+    this.timer.unref?.();
+  }
+
+  handleInput(data: string): void {
+    if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+      this.done();
+      return;
+    }
+    if (matchesKey(data, "up")) {
+      this.move(-1);
+      return;
+    }
+    if (matchesKey(data, "down")) {
+      this.move(1);
+      return;
+    }
+    if (matchesKey(data, "pageUp")) {
+      this.move(-8);
+      return;
+    }
+    if (matchesKey(data, "pageDown")) {
+      this.move(8);
+      return;
+    }
+    if (matchesKey(data, "home")) {
+      this.selected = 0;
+      this.scroll = 0;
+      this.tui.requestRender();
+      return;
+    }
+    if (matchesKey(data, "end")) {
+      const jobs = this.jobs();
+      this.selected = Math.max(0, jobs.length - 1);
+      this.scroll = Math.max(0, this.selected - 8);
+      this.tui.requestRender();
+      return;
+    }
+    if (matchesKey(data, "enter")) {
+      this.detail = !this.detail;
+      this.tui.requestRender();
+      return;
+    }
+    if (data === "r") {
+      this.lastAction = "refreshed";
+      this.tui.requestRender();
+      return;
+    }
+    if (data === "a") {
+      const job = this.jobs()[this.selected];
+      if (job && !backgroundJobIsTerminal(job.status)) {
+        this.lastAction = `awaiting ${job.id}`;
+        this.tui.requestRender();
+        void getBackgroundJobManager(this.cwd).awaitJob(job.id, 30_000)
+          .then((updated) => {
+            this.lastAction = `${updated.id} ${updated.status}`;
+            this.tui.requestRender();
+          })
+          .catch((error: unknown) => {
+            this.lastAction = error instanceof Error ? error.message : String(error);
+            this.tui.requestRender();
+          });
+      }
+      return;
+    }
+    if (data === "c") {
+      const job = this.jobs()[this.selected];
+      if (job && !backgroundJobIsTerminal(job.status)) {
+        getBackgroundJobManager(this.cwd).cancelJob(job.id);
+        this.lastAction = `cancelled ${job.id}`;
+      }
+      this.tui.requestRender();
+    }
+  }
+
+  render(width: number): string[] {
+    const jobs = this.jobs();
+    this.selected = Math.min(this.selected, Math.max(0, jobs.length - 1));
+    const overlayWidth = Math.max(1, width);
+    const innerWidth = Math.max(1, overlayWidth - 2);
+    const bodyHeight = 20;
+    const body = this.detail ? this.detailLines(jobs[this.selected], innerWidth - 2) : this.listLines(jobs, innerWidth - 2);
+    const maxScroll = Math.max(0, body.length - bodyHeight);
+    this.scroll = Math.min(this.scroll, maxScroll);
+    const visibleBody = body.slice(this.scroll, this.scroll + bodyHeight);
+    const border = (text: string) => this.theme.fg("border", text);
+    const row = (content = "") => `${border("│")}${padAnsi(content, innerWidth)}${border("│")}`;
+    const counts = backgroundJobOverlayCounts(jobs);
+    const scrollInfo = maxScroll > 0 ? ` · ${this.scroll + 1}-${Math.min(body.length, this.scroll + bodyHeight)}/${body.length}` : "";
+    const lines = [
+      border(`╭${"─".repeat(innerWidth)}╮`),
+      row(` ${this.theme.fg("accent", this.theme.bold("Jobs"))} ${this.theme.fg("dim", `${counts}${scrollInfo}`)}`),
+      row(this.theme.fg("dim", " up/down select · enter details · a await · c cancel · r refresh · esc close")),
+      this.lastAction ? row(this.theme.fg("dim", ` ${this.lastAction}`)) : row(""),
+      ...visibleBody.map((line) => row(line)),
+      row(""),
+      border(`╰${"─".repeat(innerWidth)}╯`),
+    ];
+    return clampRenderedLines(lines, overlayWidth);
+  }
+
+  invalidate(): void {}
+
+  dispose(): void {
+    clearInterval(this.timer);
+  }
+
+  private jobs(): BackgroundBashJobSummary[] {
+    return listBackgroundJobs(this.cwd);
+  }
+
+  private move(delta: number): void {
+    const jobs = this.jobs();
+    if (jobs.length === 0) return;
+    this.selected = Math.max(0, Math.min(jobs.length - 1, this.selected + delta));
+    if (this.selected < this.scroll) this.scroll = this.selected;
+    if (this.selected >= this.scroll + 20) this.scroll = this.selected - 19;
+    this.tui.requestRender();
+  }
+
+  private listLines(jobs: BackgroundBashJobSummary[], width: number): string[] {
+    if (jobs.length === 0) return [this.theme.fg("dim", "No background bash jobs.")];
+    return jobs.map((job, index) => {
+      const active = index === this.selected;
+      const marker = active ? ">" : " ";
+      const status = backgroundJobStatusLabel(job);
+      const owner = job.owner.agent ? ` ${job.owner.agent}` : "";
+      const exit = job.exitCode !== undefined ? ` exit ${job.exitCode}` : "";
+      const evidence = job.requiredEvidence ? " evidence" : "";
+      const text = `${marker} ${status}${exit}${evidence}${owner} · ${job.id} · ${job.command}`;
+      return active
+        ? this.theme.bg("selectedBg", this.theme.fg("text", truncateToWidth(text, width, "...", true)))
+        : truncateToWidth(this.theme.fg(backgroundJobAttention(job) ? "warning" : "dim", text), width, "...", true);
+    });
+  }
+
+  private detailLines(job: BackgroundBashJobSummary | undefined, width: number): string[] {
+    if (!job) return [this.theme.fg("dim", "No background bash job selected.")];
+    const output = safeReadJobOutput(this.cwd, job.id, 10_000);
+    const lines = [
+      `${backgroundJobStatusLabel(job)} · ${job.id}`,
+      `command: ${job.command}`,
+      `cwd: ${job.cwd}`,
+      job.owner.agent ? `owner: ${job.owner.agent}${job.owner.runId ? ` · run ${job.owner.runId}` : ""}${job.owner.stepId ? ` · step ${job.owner.stepId}` : ""}` : undefined,
+      job.pid ? `pid: ${job.pid}` : undefined,
+      job.requiredEvidence ? "requiredEvidence: true" : "requiredEvidence: false",
+      job.startedAt ? `started: ${formatElapsed(job.startedAt, job.finishedAt)}` : undefined,
+      job.exitCode !== undefined ? `exitCode: ${job.exitCode}` : undefined,
+      job.error ? `error: ${job.error}` : undefined,
+      job.staleReason ? `stale: ${job.staleReason}` : undefined,
+      `log: ${job.outputLogPath}`,
+      "",
+      output.trim() ? output.trim() : "(no output)",
+    ].filter((line): line is string => Boolean(line));
+    return clampRenderedLines(lines.flatMap((line) => line.split("\n")).map((line) => truncateToWidth(line, width, "...", true)), width);
+  }
+}
+
 export function liveStatusTabs(run: RunState): LiveStatusTab[] {
   const completedSteps = run.steps.filter((item) => isUsableActivityStatus(item.status)).length;
   return run.steps.flatMap((step, index) => {
@@ -2329,6 +2527,45 @@ function statusIcon(status: RunState["status"] | RunStepStatus): string {
 
 function displayActivityStatus(status: RunState["status"]): string {
   return status;
+}
+
+function formatBackgroundJobsSummary(jobs: BackgroundBashJobSummary[]): string {
+  if (jobs.length === 0) return "No pi-chalin background bash jobs.";
+  return [
+    `jobs: ${backgroundJobOverlayCounts(jobs)}`,
+    ...jobs.slice(0, 20).map((job) => `${job.id} · ${job.status}${job.exitCode !== undefined ? ` · exit ${job.exitCode}` : ""}${job.requiredEvidence ? " · evidence" : ""} · ${truncateUi(job.command, 140)}`),
+  ].join("\n");
+}
+
+function backgroundJobOverlayCounts(jobs: BackgroundBashJobSummary[]): string {
+  const queued = jobs.filter((job) => job.status === "queued").length;
+  const running = jobs.filter((job) => job.status === "running").length;
+  const succeeded = jobs.filter((job) => job.status === "succeeded").length;
+  const attention = jobs.filter(backgroundJobAttention).length;
+  return `${running} running · ${queued} queued · ${succeeded} done · ${attention} attention`;
+}
+
+function backgroundJobAttention(job: BackgroundBashJobSummary): boolean {
+  return ["failed", "timed_out", "cancelled", "orphaned", "stale"].includes(job.status);
+}
+
+function backgroundJobStatusLabel(job: BackgroundBashJobSummary): string {
+  if (job.status === "succeeded") return "✓ succeeded";
+  if (job.status === "running") return "◆ running";
+  if (job.status === "queued") return "· queued";
+  if (job.status === "cancelled") return "■ cancelled";
+  if (job.status === "timed_out") return "× timed_out";
+  if (job.status === "stale") return "× stale";
+  if (job.status === "orphaned") return "◇ orphaned";
+  return "× failed";
+}
+
+function safeReadJobOutput(cwd: string, id: string, maxChars: number): string {
+  try {
+    return getBackgroundJobManager(cwd).readJobOutput(id, maxChars);
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
 }
 
 function formatElapsed(startedAt: string | undefined, endedAt: string | undefined): string {

@@ -112,6 +112,34 @@ test("buildSdkPrompt treats docs and package metadata as discoverable evidence, 
   assert.match(prompt, /source URL, package name\/version, API surface/i);
 });
 
+test("buildSdkPrompt teaches workers when to choose background bash jobs", () => {
+  const agent = worker();
+  const task = "Make the requested fix and verify the project test suite passes.";
+  const prompt = buildSdkPrompt(agent, task, tempDir("pi-chalin-background-bash-prompt-"), undefined, policyForStep(agent, { agent: agent.name, task, budget: "normal" }), "normal", {
+    expectedEffects: ["read", "write", "verify"],
+  });
+
+  assert.match(prompt, /Background bash judgment/i);
+  assert.match(prompt, /Prefer `chalin_bash_job` for potentially long\/blocking verification, build, typecheck, test-suite/i);
+  assert.match(prompt, /use `bash` for quick commands/i);
+  assert.ok(childToolNames(agent).includes("chalin_bash_job"));
+});
+
+test("skill tool policy treats background bash as part of the bash capability family", () => {
+  const baseTools = ["read", "bash", "chalin_bash_job", "chalin_project_discovery"];
+  const allowsBash = {
+    allowedTools: ["read", "bash"],
+    deniedTools: [],
+  } as unknown as Parameters<typeof effectiveSkillToolNames>[1][number];
+  const deniesBash = {
+    allowedTools: [],
+    deniedTools: ["bash"],
+  } as unknown as Parameters<typeof effectiveSkillToolNames>[1][number];
+
+  assert.deepEqual(effectiveSkillToolNames(baseTools, [allowsBash]).sort(), ["bash", "chalin_bash_job", "read"].sort());
+  assert.deepEqual(effectiveSkillToolNames(baseTools, [deniesBash]).sort(), ["chalin_project_discovery", "read"].sort());
+});
+
 test("buildSdkPrompt treats nested delegation as available decomposition with prior handoff", () => {
   const agent = worker();
   const task = "Implement the evidenced workspace alignment and verify it.";
@@ -745,7 +773,7 @@ trust: trusted
   assert.ok(baseTools.includes("grep"));
   assert.ok(baseTools.includes("find"));
   assert.ok(baseTools.includes("chalin_project_discovery"));
-  assert.deepEqual(guided.effectiveTools.sort(), ["bash", "read"].sort());
+  assert.deepEqual(guided.effectiveTools.sort(), ["bash", "chalin_bash_job", "read"].sort());
 });
 
 test("child worker uses reviewed user skill when no project skill shadows it and project skill wins when both match", () => {
@@ -781,7 +809,7 @@ trust: reviewed
   });
   assert.deepEqual(userGuided.resolution.active.map((item) => item.skill.qualifiedName), ["user:team-runbook"]);
   assert.match(userGuided.prompt, /npm run verify:team/);
-  assert.deepEqual(userGuided.effectiveTools.sort(), ["bash", "read"].sort());
+  assert.deepEqual(userGuided.effectiveTools.sort(), ["bash", "chalin_bash_job", "read"].sort());
 
   writeSkill(path.join(cwd, ".pi-chalin", "skills", "team-runbook", "SKILL.md"), userSkill.replace("scope: user", "scope: project").replace("User global", "Project local"), "## Rules\n- Use the project command `pnpm run verify:project`.\n");
   catalog = SkillCatalog.load({ cwd, userRoot, packageRoot });
@@ -796,6 +824,7 @@ trust: reviewed
   assert.deepEqual(projectGuided.resolution.active.map((item) => item.skill.qualifiedName), ["project:team-runbook"]);
   assert.match(projectGuided.prompt, /pnpm run verify:project/);
   assert.doesNotMatch(projectGuided.prompt, /npm run verify:team/);
+  assert.deepEqual(projectGuided.effectiveTools.sort(), ["bash", "chalin_bash_job", "read"].sort());
 });
 
 test("child tools expose read-only skill inspection by capability and let the LLM decide usage", () => {
