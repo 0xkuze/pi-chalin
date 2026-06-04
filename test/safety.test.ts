@@ -9,6 +9,7 @@ import { approvalDecision, DEFAULT_CONFIG } from "../src/config/config.ts";
 import { createChildToolPolicy, createChildTools } from "../src/tools/child-tools.ts";
 import { routeFromPlan } from "../src/kernel/kernel.ts";
 import { normalizeRouteForExecution } from "../src/routing/route-guards.ts";
+import { cleanTransientGeneratedWorkspaceOutputs } from "../src/runner/runner.ts";
 import type { RouteDecision } from "../src/domain/schemas.ts";
 
 function route(risk: RouteDecision["risk"]): RouteDecision {
@@ -204,8 +205,12 @@ test("child tools always expose chalin_interview for approvals", () => {
 
   assert.equal(policy.allowedTools.has("chalin_interview"), true);
   assert.equal(policy.allowedTools.has("chalin_request_approval"), true);
-  assert.ok(createChildTools(policy).some((tool) => tool.name === "chalin_interview"));
-  assert.ok(createChildTools(policy).some((tool) => tool.name === "chalin_request_approval"));
+  const tools = createChildTools(policy);
+  assert.ok(tools.some((tool) => tool.name === "chalin_interview"));
+  const approval = tools.find((tool) => tool.name === "chalin_request_approval");
+  assert.ok(approval);
+  assert.match(approval.promptGuidelines?.join("\n") ?? "", /external services with side effects/i);
+  assert.match(approval.promptGuidelines?.join("\n") ?? "", /Do not request approval for read-only public docs/i);
 });
 
 test("chalin_interview persists action approval artifacts and unlocks one retry", async () => {
@@ -356,7 +361,7 @@ test("child policy allows bounded ranged reads of different same-file regions", 
   assert.equal(policy.metrics().toolCalls, 5);
 });
 
-test("child policy asks approval for internal or outside workspace paths while keeping relative workspace access clean", () => {
+test("child policy allows workspace metadata and outside paths without path-based approvals", () => {
   const cwd = process.cwd();
   const outside = path.dirname(cwd);
   const beforeTool = (toolName: "read" | "bash", params: Record<string, unknown>) =>
@@ -364,12 +369,12 @@ test("child policy asks approval for internal or outside workspace paths while k
 
   const absoluteReadParams = { path: path.join(cwd, "src/index.ts") };
   const allowedAbsoluteRead = beforeTool("read", absoluteReadParams);
-  const blockedRead = beforeTool("read", { path: path.join(outside, "outside.ts") });
-  const blockedBash = beforeTool("bash", { command: `cd ${outside} && ls` });
+  const outsideRead = beforeTool("read", { path: path.join(outside, "outside.ts") });
+  const outsideBash = beforeTool("bash", { command: `cd ${outside} && ls` });
   const allowedWorkspaceCdBash = beforeTool("bash", { command: `cd ${cwd} && ls` });
   const allowedWorkspaceAbsoluteBash = beforeTool("bash", { command: `ls ${path.join(cwd, "src")}` });
-  const blockedInternalRead = beforeTool("read", { path: ".pi-chalin/runs/run.json" });
-  const blockedInternalBash = beforeTool("bash", { command: "grep -R chalin_memory_write .pi-chalin/child-sessions" });
+  const internalRead = beforeTool("read", { path: ".pi-chalin/runs/run.json" });
+  const internalBash = beforeTool("bash", { command: "grep -R chalin_memory_write .pi-chalin/child-sessions" });
   const allowedInternalExclusionFind = beforeTool("bash", { command: "find . -type f -not -path './.git/*' -not -path './.pi-chalin/*' | sort" });
   const allowedRelativeSlash = beforeTool("bash", { command: "cat src/auth/keycloak.ts" });
   const allowedRedirect = beforeTool("bash", { command: "git status --short 2>/dev/null" });
@@ -393,21 +398,17 @@ test("child policy asks approval for internal or outside workspace paths while k
   const allowedInlineHttpPath = beforeTool("bash", {
     command: "python3 -c \"content = 'req = httptest.NewRequest(method, \\\"/healthz\\\", nil)'; print(content)\"",
   });
-  const blockedTmpWrite = beforeTool("bash", { command: "echo test > /tmp/pi-chalin-outside.txt" });
-  const blockedShellHeredoc = beforeTool("bash", { command: "bash << 'EOF'\ncat /tmp/pi-chalin-outside.txt\nEOF" });
+  const tmpWrite = beforeTool("bash", { command: "echo test > /tmp/pi-chalin-outside.txt" });
+  const shellHeredoc = beforeTool("bash", { command: "bash << 'EOF'\ncat /tmp/pi-chalin-outside.txt\nEOF" });
 
   assert.equal(allowedAbsoluteRead.allowed, true);
   assert.equal(absoluteReadParams.path, "src/index.ts");
-  assert.equal(blockedRead.allowed, false);
-  assert.match(blockedRead.reason, /^approval_required:/);
-  assert.equal(blockedBash.allowed, false);
-  assert.match(blockedBash.reason, /^approval_required:/);
+  assert.equal(outsideRead.allowed, true);
+  assert.equal(outsideBash.allowed, true);
   assert.equal(allowedWorkspaceCdBash.allowed, true);
   assert.equal(allowedWorkspaceAbsoluteBash.allowed, true);
-  assert.equal(blockedInternalRead.allowed, false);
-  assert.match(blockedInternalRead.reason, /^approval_required:/);
-  assert.equal(blockedInternalBash.allowed, false);
-  assert.match(blockedInternalBash.reason, /^approval_required:/);
+  assert.equal(internalRead.allowed, true);
+  assert.equal(internalBash.allowed, true);
   assert.equal(allowedInternalExclusionFind.allowed, true);
   assert.equal(allowedRelativeSlash.allowed, true);
   assert.equal(allowedRedirect.allowed, true);
@@ -423,10 +424,8 @@ test("child policy asks approval for internal or outside workspace paths while k
   assert.equal(allowedJsDocHeredoc.allowed, true);
   assert.equal(allowedHttpPathHeredoc.allowed, true);
   assert.equal(allowedInlineHttpPath.allowed, true);
-  assert.equal(blockedTmpWrite.allowed, false);
-  assert.match(blockedTmpWrite.reason, /^approval_required:/);
-  assert.equal(blockedShellHeredoc.allowed, false);
-  assert.match(blockedShellHeredoc.reason, /^approval_required:/);
+  assert.equal(tmpWrite.allowed, true);
+  assert.equal(shellHeredoc.allowed, true);
 });
 
 test("child policy normalizes redundant absolute cwd before bash execution", () => {
@@ -446,7 +445,7 @@ test("child policy normalizes redundant absolute cwd before bash execution", () 
   }
 });
 
-test("child policy reports blocked tool reason and safe params summary", () => {
+test("child policy records allowed outside path bash activity without path approval", () => {
   const activity: Array<{ toolName: string; phase: string; reason?: string; paramsSummary?: string }> = [];
   const cwd = process.cwd();
   const outside = path.dirname(cwd);
@@ -456,49 +455,45 @@ test("child policy reports blocked tool reason and safe params summary", () => {
     onActivity: (event) => activity.push(event),
   });
 
-  const blocked = policy.beforeTool("bash", { command: `cd ${outside} && ls` });
+  const allowed = policy.beforeTool("bash", { command: `cd ${outside} && ls` });
 
-  assert.equal(blocked.allowed, false);
+  assert.equal(allowed.allowed, true);
   assert.equal(activity.length, 1);
   assert.equal(activity[0]!.toolName, "bash");
-  assert.equal(activity[0]!.phase, "approval");
-  assert.match(activity[0]!.reason ?? "", /outside_workspace_path/);
-  assert.match(activity[0]!.paramsSummary ?? "", /cd /);
+  assert.equal(activity[0]!.phase, "start");
+  assert.equal(activity[0]!.reason, undefined);
+  assert.equal(activity[0]!.paramsSummary, undefined);
 });
 
-test("child policy enforces WorkUnit mutation scope for edit/write", () => {
+test("child policy does not enforce WorkUnit mutation scope for edit/write", () => {
   const policy = createChildToolPolicy({
     cwd: process.cwd(),
     allowedTools: ["edit", "write"],
-    workUnitScope: { files: ["src/allowed.ts"], mode: "strict", bash: "allow-with-postcheck" },
   });
 
   assert.equal(policy.beforeTool("edit", { path: "src/allowed.ts", edits: [] }).allowed, true);
-  const blockedEdit = policy.beforeTool("edit", { path: "src/other.ts", edits: [] });
-  const stoppedWrite = policy.beforeTool("write", { path: "src/generated.ts", content: "" });
+  const outsideEdit = policy.beforeTool("edit", { path: "src/other.ts", edits: [] });
+  const outsideWrite = policy.beforeTool("write", { path: "src/generated.ts", content: "" });
   const writePolicy = createChildToolPolicy({
     cwd: process.cwd(),
     allowedTools: ["write"],
-    workUnitScope: { files: ["src/allowed.ts"], mode: "strict", bash: "allow-with-postcheck" },
   });
-  const blockedWrite = writePolicy.beforeTool("write", { path: "src/generated.ts", content: "" });
+  const outsideWriteOnly = writePolicy.beforeTool("write", { path: "src/generated.ts", content: "" });
 
-  assert.equal(blockedEdit.allowed, false);
-  assert.equal(stoppedWrite.allowed, false);
-  assert.equal(blockedWrite.allowed, false);
-  assert.match(blockedEdit.reason, /^approval_required:/);
-  assert.match(stoppedWrite.reason, /^approval_required:/);
-  assert.match(blockedWrite.reason, /^approval_required:/);
+  assert.equal(outsideEdit.allowed, true);
+  assert.equal(outsideWrite.allowed, true);
+  assert.equal(outsideWriteOnly.allowed, true);
+  assert.deepEqual(policy.metrics().policyViolations, []);
+  assert.deepEqual(writePolicy.metrics().policyViolations, []);
 });
 
-test("child policy records bash-created files outside WorkUnit scope", () => {
+test("child policy allows bash-created files beyond declared file hints", () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-chalin-scope-"));
   try {
     assert.equal(spawnSync("git", ["init"], { cwd }).status, 0);
     const policy = createChildToolPolicy({
       cwd,
       allowedTools: ["bash"],
-      workUnitScope: { files: ["allowed.ts"], mode: "strict", bash: "allow-with-postcheck" },
     });
 
     const allowedBash = policy.beforeTool("bash", { command: "printf 'ok' > allowed.ts" });
@@ -507,18 +502,16 @@ test("child policy records bash-created files outside WorkUnit scope", () => {
     policy.afterTool("bash", { content: [{ type: "text", text: "" }], details: {} });
     assert.deepEqual(policy.metrics().policyViolations, []);
 
-    const blockedBash = policy.beforeTool("bash", { command: "printf 'no' > extra.ts" });
-    assert.equal(blockedBash.allowed, true);
+    const outsideBash = policy.beforeTool("bash", { command: "printf 'no' > extra.ts" });
+    assert.equal(outsideBash.allowed, true);
     assert.equal(spawnSync("sh", ["-c", "printf 'no' > extra.ts"], { cwd }).status, 0);
     const result = policy.afterTool("bash", { content: [{ type: "text", text: "" }], details: {} });
-    const stopped = policy.beforeTool("bash", { command: "printf 'ok' > allowed.ts" });
+    const nextBash = policy.beforeTool("bash", { command: "printf 'ok' > allowed.ts" });
 
-    assert.deepEqual(policy.metrics().policyViolations, ["approval_required:outside_work_unit_scope:extra.ts"]);
+    assert.deepEqual(policy.metrics().policyViolations, []);
     assert.equal((result as { isError?: boolean }).isError, undefined);
-    assert.match(JSON.stringify(result), /outside_work_unit_scope:extra\.ts/);
-    assert.match(JSON.stringify(result), /Call chalin_interview now/);
-    assert.equal(stopped.allowed, false);
-    assert.match(stopped.reason, /^approval_required:/);
+    assert.doesNotMatch(JSON.stringify(result), /Call chalin_interview now/);
+    assert.equal(nextBash.allowed, true);
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }
@@ -531,7 +524,6 @@ test("child policy ignores untracked binary outputs for WorkUnit bash postcheck"
     const policy = createChildToolPolicy({
       cwd,
       allowedTools: ["bash"],
-      workUnitScope: { files: ["allowed.ts"], mode: "strict", bash: "allow-with-postcheck" },
     });
 
     const gate = policy.beforeTool("bash", { command: "printf binary > generated" });
@@ -540,6 +532,29 @@ test("child policy ignores untracked binary outputs for WorkUnit bash postcheck"
     policy.afterTool("bash", { content: [{ type: "text", text: "" }], details: {} });
 
     assert.deepEqual(policy.metrics().policyViolations, []);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("workspace hygiene cleanup removes untracked TypeScript build info when untouched by the worker", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-chalin-hygiene-tsbuildinfo-"));
+  try {
+    assert.equal(spawnSync("git", ["init"], { cwd }).status, 0);
+    fs.mkdirSync(path.join(cwd, "apps/api"), { recursive: true });
+    fs.writeFileSync(
+      path.join(cwd, "apps/api/tsconfig.build.tsbuildinfo"),
+      JSON.stringify({ program: { fileNames: ["src/main.ts"] }, version: "6.0.3" }),
+    );
+
+    const cleaned = cleanTransientGeneratedWorkspaceOutputs(
+      cwd,
+      [{ status: "??", path: "apps/api/tsconfig.build.tsbuildinfo" }],
+      [],
+    );
+
+    assert.deepEqual(cleaned, ["apps/api/tsconfig.build.tsbuildinfo"]);
+    assert.equal(fs.existsSync(path.join(cwd, "apps/api/tsconfig.build.tsbuildinfo")), false);
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }

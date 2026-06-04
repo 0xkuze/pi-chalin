@@ -7,7 +7,7 @@ import type { AgentStep, RouteDecision, RoutePlan, RunState, RunStepState } from
 import { isUsableStepStatus } from "../runtime/status.ts";
 import { buildIntentContract } from "./intent-contract.ts";
 import { updateRecoveryState } from "./run-recovery.ts";
-import { planStepsWithWorkUnits } from "./work-units.ts";
+import { planStepsWithWorkUnits, refreshWorkUnitStatuses } from "./work-units.ts";
 
 export type ChalinSessionContextLike = {
   sessionManager?: {
@@ -90,23 +90,79 @@ function resolveGitDir(cwd: string): string | undefined {
   }
 }
 
+export type RunContinuationKind = "none" | "resume" | "repair" | "synthesize-final";
+
 export function prepareRunForResume(run: RunState): RunState {
+  if (run.status === "failed" && !run.recoveryState?.failedStepId) {
+    updateRecoveryState(run, firstFailedStep(run));
+  }
+  const failedStepIdsToRetry = failedStepIdsForContinuation(run);
   run.status = "running";
   run.endedAt = undefined;
-  run.warnings = [...run.warnings, `Resumed paused pi-chalin run ${run.id}.`];
+  const resumeWarning = `Resumed pi-chalin run ${run.id}.`;
+  if (!run.warnings.includes(resumeWarning)) run.warnings = [...run.warnings, resumeWarning];
   for (const step of run.steps) {
-    if (isUsableStepHandoff(step) || step.status === "failed") continue;
+    if (isUsableStepHandoff(step)) continue;
+    if (step.status === "failed" && !failedStepIdsToRetry.has(step.id)) continue;
     step.status = "pending";
     step.error = undefined;
+    step.skipReason = undefined;
     step.pauseReason = undefined;
     step.currentTool = undefined;
     step.endedAt = undefined;
   }
+  clearStaleWorkUnitSkipMetadata(run);
+  refreshWorkUnitStatuses(run);
   persistRun(run);
   return run;
 }
 
-export function loadResumableRunState(options: ChalinPathsOptions & { runId?: string; recoverStale?: boolean; sessionId?: string }): RunState | undefined {
+export function markRunHumanInputAnswered(run: RunState): boolean {
+  const wasBlocked = run.intentContract?.requiresInterview === true || run.recoveryState?.blockedByHumanInput === true;
+  if (!wasBlocked) return false;
+
+  if (run.intentContract?.requiresInterview === true) {
+    delete run.intentContract.requiresInterview;
+  }
+  if (run.recoveryState?.blockedByHumanInput === true) {
+    delete run.recoveryState.blockedByHumanInput;
+    run.recoveryState.repairOptions = [];
+  }
+  clearAnsweredHumanInputHandoffs(run);
+  updateRecoveryState(run);
+  persistRun(run);
+  return true;
+}
+
+function clearAnsweredHumanInputHandoffs(run: RunState): void {
+  for (const step of run.steps) {
+    const handoff = step.output?.structuredHandoff;
+    if (!handoff?.requiresHumanInput) continue;
+    handoff.requiresHumanInput = false;
+    handoff.humanInputQuestions = [];
+    step.output!.handoff = appendResolutionNote(step.output?.handoff);
+    step.output!.text = appendResolutionNote(step.output?.text);
+  }
+}
+
+function appendResolutionNote(value: string | undefined): string {
+  const note = "Human input was answered; continue pending WorkUnits from this handoff.";
+  if (!value?.trim()) return note;
+  if (value.includes(note)) return value;
+  return `${value}\n\n${note}`;
+}
+
+function clearStaleWorkUnitSkipMetadata(run: RunState): void {
+  for (const unit of run.workUnits ?? []) {
+    const unitSteps = run.steps.filter((step) => step.workUnitId === unit.id);
+    if (unitSteps.length === 0) continue;
+    if (unitSteps.some((step) => step.status === "skipped" || step.skipReason)) continue;
+    if (unit.status === "skipped") unit.status = "pending";
+    delete unit.skippedReason;
+  }
+}
+
+export function loadResumableRunState(options: ChalinPathsOptions & { runId?: string; recoverStale?: boolean; sessionId?: string; includeCompleted?: boolean }): RunState | undefined {
   const runsDir = path.join(resolveChalinPaths(options).projectRoot, ".pi-chalin", "runs");
   if (!fs.existsSync(runsDir)) return undefined;
   const files = fs.readdirSync(runsDir)
@@ -118,12 +174,15 @@ export function loadResumableRunState(options: ChalinPathsOptions & { runId?: st
       const parsed = JSON.parse(fs.readFileSync(file, "utf-8")) as RunState;
       if (options.runId && parsed.id !== options.runId) continue;
       if (options.sessionId && parsed.sessionId !== options.sessionId) continue;
-      if (isResumableRun(parsed)) {
+      if (isResumableRun(parsed, { includeCompleted: options.includeCompleted === true })) {
         parsed.logsPath ??= file;
         if (parsed.status === "running" && options.recoverStale !== false) {
           parsed.status = "paused";
           parsed.warnings = [...(parsed.warnings ?? []), "Recovered stale running run from disk after process shutdown."];
           updateRecoveryState(parsed);
+          persistRun(parsed);
+        } else if (parsed.status === "failed" || parsed.status === "paused") {
+          updateRecoveryState(parsed, firstFailedStep(parsed));
           persistRun(parsed);
         }
         return parsed;
@@ -164,11 +223,48 @@ export function isUsableStepHandoff(step: Pick<RunStepState, "status">): boolean
   return isUsableStepStatus(step.status);
 }
 
-function isResumableRun(run: RunState): boolean {
-  if (!run.route?.plan) return false;
-  if (run.status !== "paused" && run.status !== "running") return false;
-  if (run.steps.some((step) => !isUsableStepHandoff(step) && step.status !== "failed")) return true;
-  return run.status === "running" && run.steps.length > 0 && run.steps.every((step) => isUsableStepHandoff(step));
+export function continuationKindForRun(run: RunState, options: { includeCompleted?: boolean } = {}): RunContinuationKind {
+  if (!run.route?.plan) return "none";
+  if (run.status === "complete") return options.includeCompleted === true ? "synthesize-final" : "none";
+  if (run.status === "failed") return hasUnfinishedWorkflowObligation(run) ? "repair" : "none";
+  if (run.status === "paused" || run.status === "running") {
+    if (hasUnfinishedWorkflowObligation(run)) return "resume";
+    return run.status === "running" && run.steps.length > 0 && run.steps.every((step) => isUsableStepHandoff(step)) ? "resume" : "none";
+  }
+  return "none";
+}
+
+function isResumableRun(run: RunState, options: { includeCompleted?: boolean } = {}): boolean {
+  return continuationKindForRun(run, options) !== "none";
+}
+
+function hasUnfinishedWorkflowObligation(run: RunState): boolean {
+  if (run.intentContract?.requiresInterview || run.recoveryState?.blockedByHumanInput) return true;
+  if (run.steps.some((step) => !isUsableStepHandoff(step))) return true;
+  if ((run.workUnits ?? []).some((unit) => unit.status !== "complete" && unit.status !== "checkpointed")) return true;
+  return run.steps.some((step) => (step.nestedRuns ?? []).some((nested) => nested.status !== "complete" && nested.status !== "stale-repaired"));
+}
+
+function failedStepIdsForContinuation(run: RunState): Set<string> {
+  const ids = new Set<string>();
+  if (run.recoveryState?.failedStepId) ids.add(run.recoveryState.failedStepId);
+  for (const step of run.steps) {
+    if (step.status !== "failed") continue;
+    if (ids.size === 0) ids.add(step.id);
+    const hasLaterRecoveryAttempt = run.steps.some((candidate) =>
+      candidate !== step
+      && step.workUnitId !== undefined
+      && candidate.workUnitId === step.workUnitId
+      && candidate.status !== "failed"
+      && !isUsableStepHandoff(candidate)
+    );
+    if (hasLaterRecoveryAttempt) ids.delete(step.id);
+  }
+  return ids;
+}
+
+function firstFailedStep(run: RunState): RunStepState | undefined {
+  return run.steps.find((step) => step.status === "failed");
 }
 
 function planAgentSteps(plan: RoutePlan): AgentStep[] {

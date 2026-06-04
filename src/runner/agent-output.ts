@@ -1,7 +1,7 @@
 import { candidateMatchesTransientClaim, isTransientVerificationStateClaim, parseClaimLedger } from "../observability/evidence-claims.ts";
 import { createMemoryCandidate } from "../memory/memory.ts";
 import type { AgentHandoff, AgentHandoffWorkUnit, AgentOutput, EvidenceClaim, MemoryCandidate, ReviewerEvidenceKind, ReviewerEvidenceRecord, ReviewerEvidenceStatus, ReviewerVerdict, RouteExpectedEffect } from "../domain/schemas.ts";
-import { handoffBudgetChars, isRecord, memoryCandidateBudget, rawOutputBudgetChars, truncateText } from "./runner-utils.ts";
+import { compactHandoffItems, compactHandoffText, handoffBudgetChars, isRecord, memoryCandidateBudget, rawOutputBudgetChars, truncateText } from "./runner-utils.ts";
 
 export interface ParseAgentOutputOptions {
   expectsReviewerVerdict?: boolean;
@@ -49,7 +49,7 @@ function parseStructuredAgentHandoff(raw: string, claims: EvidenceClaim[], warni
   }
   return {
     summary,
-    changedFiles: stringArrayField(value, "changedFiles"),
+    changedFiles: fileReferenceArrayField(value, "changedFiles"),
     verification: stringArrayField(value, "verification", { structuredObjects: true }),
     evidenceClaims: evidenceClaimsField(value, claims),
     risks: stringArrayField(value, "risks"),
@@ -268,19 +268,19 @@ function reviewerRepairFiles(record: Record<string, unknown>, evidenceRecords: R
 }
 
 function structuredFileReferences(value: unknown, options: { allowStringItems?: boolean } = {}): string[] {
-  if (typeof value === "string") return options.allowStringItems ? [value] : [];
+  if (typeof value === "string") return options.allowStringItems ? fileReferenceArray(value) : [];
   const values = Array.isArray(value) ? value : isRecord(value) ? [value] : [];
   return values.flatMap((item) => {
-    if (typeof item === "string") return options.allowStringItems ? [item] : [];
+    if (typeof item === "string") return options.allowStringItems ? fileReferenceArray(item) : [];
     if (!isRecord(item)) return [];
-    return [
+    return fileReferenceArray([
       stringField(item, "file"),
       stringField(item, "path"),
       stringField(item, "filename"),
       ...stringArrayField(item, "files"),
       ...stringArrayField(item, "paths"),
       ...stringArrayField(item, "changedFiles"),
-    ];
+    ]);
   });
 }
 
@@ -329,7 +329,7 @@ function normalizeHandoffWorkUnit(value: unknown): AgentHandoffWorkUnit[] {
   if (!isRecord(value)) return [];
   const title = stringField(value, "title");
   if (!title) return [];
-  const { scope, files } = workUnitScopeField(value);
+  const { scope, files } = handoffScopeField(value);
   const acceptanceCriteria = stringArrayField(value, "acceptanceCriteria");
   const id = stringField(value, "id");
   const expectedEffects = workUnitExpectedEffectsField(value);
@@ -352,7 +352,7 @@ function workUnitExpectedEffectsField(record: Record<string, unknown>): RouteExp
   return [...new Set(effects)];
 }
 
-function workUnitScopeField(record: Record<string, unknown>): { scope: string[]; files: string[] } {
+function handoffScopeField(record: Record<string, unknown>): { scope: string[]; files: string[] } {
   const value = record.scope;
   if (isRecord(value)) {
     const scope = [
@@ -371,16 +371,71 @@ function workUnitScopeField(record: Record<string, unknown>): { scope: string[];
 
 function structuredFilesField(record: Record<string, unknown>, key: string): string[] {
   const value = record[key];
-  if (!Array.isArray(value)) return stringArrayField(record, key);
+  if (!Array.isArray(value)) return fileReferenceArrayField(record, key);
   return [...new Set(value.flatMap((item) => {
-    if (typeof item === "string" && item.trim()) return [item.trim()];
+    if (typeof item === "string" && item.trim()) return fileReferenceArray(item);
     if (!isRecord(item)) return [];
-    return [
+    return fileReferenceArray([
       stringField(item, "path"),
       stringField(item, "file"),
       stringField(item, "filename"),
-    ].filter((candidate): candidate is string => Boolean(candidate));
+    ]);
   }))].slice(0, 20);
+}
+
+function fileReferenceArrayField(record: Record<string, unknown>, key: string): string[] {
+  const value = record[key];
+  if (typeof value === "string") return fileReferenceArray(value);
+  if (isRecord(value)) return structuredFileReferences(value, { allowStringItems: true });
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.flatMap((item) => {
+    if (typeof item === "string") return fileReferenceArray(item);
+    if (!isRecord(item)) return [];
+    return structuredFileReferences(item, { allowStringItems: true });
+  }))].slice(0, 20);
+}
+
+function fileReferenceArray(value: string | string[]): string[] {
+  const values = Array.isArray(value) ? value : [value];
+  return values
+    .map(cleanFileReference)
+    .filter((item): item is string => Boolean(item));
+}
+
+function cleanFileReference(value: string): string | undefined {
+  let trimmed = value.trim();
+  if (!trimmed) return undefined;
+  trimmed = stripMatchingWrapper(trimmed, "`", "`");
+  trimmed = stripMatchingWrapper(trimmed, "\"", "\"");
+  trimmed = stripMatchingWrapper(trimmed, "'", "'");
+  const annotationStart = fileAnnotationStart(trimmed);
+  if (annotationStart > 0) trimmed = trimmed.slice(0, annotationStart).trim();
+  while (trimmed.length > 0 && isTrailingPathPunctuation(trimmed[trimmed.length - 1]!)) {
+    trimmed = trimmed.slice(0, -1).trim();
+  }
+  return trimmed || undefined;
+}
+
+function stripMatchingWrapper(value: string, open: string, close: string): string {
+  return value.length >= 2 && value.startsWith(open) && value.endsWith(close)
+    ? value.slice(1, -1).trim()
+    : value;
+}
+
+function fileAnnotationStart(value: string): number {
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index]!;
+    if (char !== " " && char !== "\t") continue;
+    let next = index + 1;
+    while (next < value.length && (value[next] === " " || value[next] === "\t")) next += 1;
+    const marker = value[next];
+    if (marker === "(" || marker === "[" || marker === "{" || marker === ":" || marker === "-" || marker === "—") return index;
+  }
+  return -1;
+}
+
+function isTrailingPathPunctuation(char: string): boolean {
+  return char === "," || char === ";" || char === "." || char === ")";
 }
 
 function uniqueWorkUnits(values: AgentHandoffWorkUnit[]): AgentHandoffWorkUnit[] {
@@ -414,12 +469,12 @@ function normalizeEvidenceClaim(value: unknown): EvidenceClaim[] {
 
 function formatAgentHandoffSummary(handoff: AgentHandoff, agent?: string): string {
   const lines = [
-    `Summary: ${handoff.summary}`,
-    handoff.changedFiles.length ? `Changed: ${handoff.changedFiles.join(", ")}` : undefined,
-    handoff.verification.length ? `Verification: ${handoff.verification.join("; ")}` : undefined,
-    handoff.risks.length ? `Risks: ${handoff.risks.join("; ")}` : undefined,
-    handoff.nextActions.length ? `Next: ${handoff.nextActions.join("; ")}` : undefined,
-    handoff.requiresHumanInput ? `Human input required: ${(handoff.humanInputQuestions?.length ? handoff.humanInputQuestions : handoff.nextActions).join("; ")}` : undefined,
+    `Summary: ${compactHandoffText(handoff.summary, 320)}`,
+    handoff.changedFiles.length ? `Changed: ${compactHandoffItems(handoff.changedFiles, { itemLimit: 16, itemMax: 180 })}` : undefined,
+    handoff.verification.length ? `Verification: ${compactHandoffItems(handoff.verification, { itemLimit: 8, itemMax: 260 })}` : undefined,
+    handoff.risks.length ? `Risks: ${compactHandoffItems(handoff.risks, { itemLimit: 6, itemMax: 220 })}` : undefined,
+    handoff.nextActions.length ? `Next: ${compactHandoffItems(handoff.nextActions, { itemLimit: 6, itemMax: 220 })}` : undefined,
+    handoff.requiresHumanInput ? `Human input required: ${compactHandoffItems(handoff.humanInputQuestions?.length ? handoff.humanInputQuestions : handoff.nextActions, { itemLimit: 5, itemMax: 220 })}` : undefined,
   ].filter((line): line is string => Boolean(line));
   return truncateText(lines.join("\n"), handoffBudgetChars(agent));
 }

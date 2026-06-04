@@ -3,10 +3,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, test } from "vitest";
+import { beginChalinTurn, recordInlineToolStart, resetRuntimeState } from "../src/runtime/state.ts";
+import { registerChalinTools } from "../src/tools/tools.ts";
 import { formatWebBundle, formatWebBundleProgressWidget, formatWebBundleWidget, formatWebFetchAudit, listWebFetchAudit, parseExaTextResults, searchWeb } from "../src/webfetch/webfetch.ts";
 
 const tempDirs: string[] = [];
 afterEach(() => {
+  resetRuntimeState();
   while (tempDirs.length > 0) fs.rmSync(tempDirs.pop()!, { recursive: true, force: true });
 });
 function tempDir(prefix: string): string { const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); tempDirs.push(dir); return dir; }
@@ -35,6 +38,29 @@ test("searchWeb uses Exa MCP and caches compact source bundles", async () => {
     assert.equal(second.cache.hit, true);
     assert.match(formatWebBundle(first), /Sources:/);
     assert.match(formatWebBundle(first), /https:\/\/exa.ai/);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("chalin_web_search can run after chalin_route started when external evidence is useful", async () => {
+  const cwd = tempDir("pi-chalin-webfetch-after-route-");
+  const tools: Array<{ name: string; execute: (...args: any[]) => Promise<any> }> = [];
+  registerChalinTools({ registerTool: (tool: any) => tools.push(tool) } as never);
+  const webSearch = tools.find((tool) => tool.name === "chalin_web_search");
+  assert.ok(webSearch);
+
+  beginChalinTurn({ prompt: "Implement with current external docs.", cwd });
+  recordInlineToolStart({ toolName: "chalin_route" });
+
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(`data: ${JSON.stringify({ result: { content: [{ type: "text", text: "Title: Current Docs\nURL: https://example.com/docs\nText: Current API evidence." }] } })}\n`)) as unknown as typeof fetch;
+  try {
+    const result = await webSearch.execute("web", { query: "current docs", maxSources: 1 }, undefined, undefined, { cwd });
+    const text = result.content.find((part: { type: string; text?: string }) => part.type === "text")?.text ?? "";
+    assert.match(text, /Current Docs/);
+    assert.doesNotMatch(text, /Blocked by pi-chalin/);
+    assert.notEqual(result.details?.reason, "route_web_same_turn");
   } finally {
     globalThis.fetch = previousFetch;
   }

@@ -1,6 +1,5 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { spawnSync } from "node:child_process";
 import {
   createBashToolDefinition,
   createEditToolDefinition,
@@ -24,7 +23,6 @@ import type { BudgetCapHit, BudgetCapName, BudgetCapSeverity, RouteExpectedEffec
 import { formatInterviewResult, runChalinInterview } from "../interview/interview.ts";
 import { SkillCatalog, auditSkill, formatSkillList, formatSkillShow } from "../skills/skills.ts";
 import { isRecord } from "../utils/guards.ts";
-import { normalizeMetricFilePath } from "../utils/paths.ts";
 import { compactText } from "../utils/text.ts";
 import { fetchWebUrls, formatWebBundle, searchWeb } from "../webfetch/webfetch.ts";
 
@@ -106,7 +104,7 @@ const ChalinMemoryReviseParams = Type.Object({
 
 const ChalinDelegateParams = Type.Object({
   task: Type.String({ description: "Bounded objective for the nested subagent chain. Include current evidence and exact success criteria." }),
-  reason: Type.String({ description: "Why this rare nested delegation is necessary instead of finishing in the current agent." }),
+  reason: Type.String({ description: "Why bounded delegation improves reliability for this scope compared with finishing inside the current agent." }),
   expectedEffects: Type.Optional(Type.Array(Type.Union([Type.Literal("read"), Type.Literal("write"), Type.Literal("verify")]), { minItems: 1, maxItems: 3, uniqueItems: true, description: "Optional effect contract for the nested objective. Omit when the planner should infer it from task intent." })),
   requiresWorkspaceMutation: Type.Optional(Type.Boolean({ description: "True when the nested objective is expected to edit/write workspace files." })),
 });
@@ -191,11 +189,6 @@ export interface ChildToolPolicyOptions {
     maxDepth: number;
     execute(params: ChalinDelegateParamsShape): Promise<{ text: string; details?: unknown }>;
   };
-  workUnitScope?: {
-    files: string[];
-    mode: "strict";
-    bash: "deny" | "allow-with-postcheck";
-  };
   onActivity?: (activity: ChildToolActivity) => void;
 }
 
@@ -256,7 +249,7 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
   const filesRead: string[] = [];
   const filesTouched: string[] = [];
   const shellCommands: string[] = [];
-  const pendingShellCommands: Array<{ command?: string; afterMutation: boolean; dirtyBaseline?: string[] }> = [];
+  const pendingShellCommands: Array<{ command?: string; afterMutation: boolean }> = [];
   const approvalRequests: ChildToolApprovalRequest[] = [];
   const approvalDecisions: ChildToolApprovalDecision[] = [];
   const retriesByTool: Record<string, number> = {};
@@ -265,7 +258,6 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
   allowedTools.add("chalin_interview");
   allowedTools.add("chalin_request_approval");
   const priorFilesRead = new Set((options.priorFilesRead ?? []).map((item) => normalizeMetricPath(item, options.cwd)));
-  const workUnitScope = normalizeWorkUnitScope(options.workUnitScope, options.cwd);
   const maxCrossStepDuplicateReads = options.maxCrossStepDuplicateReads ?? Number.POSITIVE_INFINITY;
   const hasExplicitAllowlist = options.allowedTools !== undefined;
   let toolCalls = 0;
@@ -277,7 +269,6 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
   let mutationSucceeded = false;
   let postMutationShellCommands = 0;
   let successfulPostMutationShellCommands = 0;
-  let terminalPolicyViolation: string | undefined;
   const caps = options.budgetPolicy?.caps ?? {
     maxSeconds: Number.POSITIVE_INFINITY,
     maxUsd: Number.POSITIVE_INFINITY,
@@ -290,7 +281,6 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
 
   function violation(reason: string): ChildToolGate {
     policyViolations.push(reason);
-    if (isTerminalToolPolicyViolation(reason)) terminalPolicyViolation ??= reason;
     return { allowed: false, reason };
   }
 
@@ -414,11 +404,7 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
     if (toolName === "bash") {
       const command = getCommandParam(params);
       if (command) shellCommands.push(command);
-      pendingShellCommands.push({
-        command,
-        afterMutation: mutationSucceeded,
-        ...(workUnitScope ? { dirtyBaseline: workspaceDirtyPaths(options.cwd) } : {}),
-      });
+      pendingShellCommands.push({ command, afterMutation: mutationSucceeded });
     }
     return { allowed: true };
   }
@@ -458,11 +444,6 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
       if (declaredApproval) {
         return approvalRequired(toolName, declaredApproval.reason, params, declaredApproval.risk);
       }
-      if (terminalPolicyViolation) {
-        const reason = `policy_stopped_after_scope_violation:${terminalPolicyViolation}`;
-        activity(toolName, "blocked", reason, params);
-        return violation(reason);
-      }
       if (hasExplicitAllowlist && !allowedTools.has(toolName)) {
         const reason = `tool_not_allowed:${toolName}`;
         activity(toolName, "blocked", reason, params);
@@ -473,18 +454,6 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
       }
       if (filesTouched.length >= caps.maxFilesTouched && (toolName === "edit" || toolName === "write")) {
         budgetWarn(toolName, "max_files_touched", filesTouched.length, caps.maxFilesTouched, "pre-tool", "soft touched-files budget reached; continuing");
-      }
-
-      const workspacePathViolation = childWorkspacePathViolation(toolName, params, options.cwd);
-      if (workspacePathViolation) {
-        if (isApprovalEligibleViolation(workspacePathViolation)) return approvalRequired(toolName, workspacePathViolation, params, riskForApprovalReason(workspacePathViolation));
-        activity(toolName, "blocked", workspacePathViolation, params);
-        return violation(workspacePathViolation);
-      }
-
-      const workUnitScopeViolation = mutationOutsideWorkUnitScopeViolation(toolName, params, options.cwd, workUnitScope);
-      if (workUnitScopeViolation) {
-        return approvalRequired(toolName, workUnitScopeViolation, params, "medium");
       }
 
       if (toolName === "write") {
@@ -554,18 +523,6 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
       if ((toolName === "edit" || toolName === "write") && !isToolError(result)) mutationSucceeded = true;
       if (toolName === "bash") {
         const pending = pendingShellCommands.shift();
-        if (pending?.dirtyBaseline && !isToolError(result)) {
-          const scopeViolations = dirtyEntriesOutsideWorkUnitScope(workspaceDirtyEntries(options.cwd), pending.dirtyBaseline, workUnitScope, options.cwd);
-          if (scopeViolations.length > 0) {
-            const reason = `outside_work_unit_scope:${scopeViolations.slice(0, 8).join(",")}${scopeViolations.length > 8 ? `,+${scopeViolations.length - 8}` : ""}`;
-            const request = makeApprovalRequest(toolName, reason, pending.command ? { command: pending.command } : {}, "medium", options.cwd);
-            approvalRequests.push(request);
-            const approvalReason = `approval_required:${reason}`;
-            policyViolations.push(approvalReason);
-            activity(toolName, "approval", approvalReason, pending.command ? { command: pending.command } : {});
-            nextResult = appendToolResultApprovalRequired(nextResult, request);
-          }
-        }
         if (pending?.afterMutation) {
           postMutationShellCommands += 1;
           if (!isToolError(nextResult)) successfulPostMutationShellCommands += 1;
@@ -643,9 +600,10 @@ function createChalinApprovalRequestTool(policy: ChildToolPolicy): ToolDefinitio
     name: "chalin_request_approval",
     label: "Chalin Approval Request",
     description: "Declare that the current subagent judges a concrete next tool action unsafe to run without a one-shot human approval.",
-    promptSnippet: "chalin_request_approval: before empirical or externally risky actions, declare the exact next action and then ask via chalin_interview.",
+    promptSnippet: "chalin_request_approval: before empirical or externally risky side-effect actions, declare the exact next action and then ask via chalin_interview.",
     promptGuidelines: [
-      "Use when your semantic judgment says the next action may affect external services, irreversible state, credentials, history, data, or broad project files.",
+      "Use when your semantic judgment says the next action may affect external services with side effects, irreversible state, credentials, history, data, protected files, or broad project files.",
+      "Do not request approval for read-only public docs, package metadata, or public API reference checks.",
       "Do not wait for the harness to classify command names. You own the judgment; the harness only records and gates the one-shot approval.",
       "After this returns approval_required, immediately call chalin_interview with approve/reject choices in the user's language.",
       "If approved, retry only the exact declared target action once. If rejected, stop the WorkUnit as blocked by human decision.",
@@ -848,11 +806,12 @@ export function createChalinDelegateTool(policy: ChildToolPolicy): ToolDefinitio
   return defineTool<typeof ChalinDelegateParams, unknown>({
     name: "chalin_delegate",
     label: "Chalin Delegate",
-    description: "Rare nested pi-chalin delegation for a coordinating subagent that discovers the assigned scope exceeds one reliable ownership boundary. Only one visible nested level is allowed; deeper needs return to the parent orchestrator as compact handoff.",
-    promptSnippet: "chalin_delegate: delegate an overlarge nested objective by intent when current evidence proves one agent would reduce quality.",
+    description: "Nested pi-chalin delegation for a coordinating subagent that discovers the assigned scope exceeds one reliable ownership boundary. Only one visible nested level is allowed; deeper needs return to the parent orchestrator as compact handoff.",
+    promptSnippet: "chalin_delegate: delegate a bounded nested objective by intent when current evidence shows split ownership would improve reliability.",
     promptGuidelines: [
-      "This is exceptional, not a normal path. Prefer finishing the current task yourself when the scope is bounded.",
-      "Use only after current evidence shows the scope is independently splittable, under-specified for safe continuation, or review/isolation-heavy enough that one worker would lower quality.",
+      "Use when current evidence shows the assigned scope crosses reliable ownership boundaries, is independently splittable, or needs isolated verification before consolidation.",
+      "Finish the current task yourself when the scope remains a single bounded ownership loop.",
+      "Respect parent-role boundaries: planner children are planning-only; worker children are implementation-only; reviewer children are review-only. The runtime rejects cross-role nested routes.",
       "Pass current evidence, exact files/surfaces, ownership boundaries, effects, and success criteria in the task. Do not choose topology, agents, steps, stages, or budgets.",
       "Do not use it to avoid ordinary implementation work, repeat broad discovery, or create another planning layer without a clear output contract.",
       "Nested delegation stops after one child level under the current parent; if blocked by depth, return a compact handoff and ask the parent orchestrator to continue.",
@@ -1065,13 +1024,8 @@ function blockedToolResult(reason: string) {
       details: { approvalRequired: true, reason },
     };
   }
-  const guidance = reason.startsWith("work_unit_scope_gap:")
-    ? "Report the missing WorkUnit scope/dependency in ## Agent Handoff and stop instead of editing outside the unit."
-    : reason.startsWith("policy_stopped_after_scope_violation:")
-      ? "A prior scope violation made this step terminal. Return ## Agent Handoff with the exact missing scope/dependency; do not call more tools."
-    : "Stop if you have enough evidence; otherwise use fewer, more targeted Pi-native tools.";
   return {
-    content: [{ type: "text" as const, text: `Blocked by pi-chalin child policy: ${reason}\n${guidance}` }],
+    content: [{ type: "text" as const, text: `Blocked by pi-chalin child policy: ${reason}\nStop if you have enough evidence; otherwise use fewer, more targeted Pi-native tools.` }],
     details: { blocked: true, reason },
     isError: true,
   };
@@ -1182,19 +1136,6 @@ function sortJson(value: unknown): unknown {
   return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortJson(value[key])]));
 }
 
-function isApprovalEligibleViolation(reason: string): boolean {
-  return reason.startsWith("outside_workspace_path:")
-    || reason.startsWith("internal_harness_path:")
-    || reason.startsWith("work_unit_scope_gap:")
-    || reason.startsWith("outside_work_unit_scope:")
-    || reason === "bash_denied_for_work_unit_scope";
-}
-
-function riskForApprovalReason(reason: string): ChildToolApprovalRequest["risk"] {
-  if (reason.startsWith("outside_workspace_path:") || reason.startsWith("internal_harness_path:")) return "high";
-  return "medium";
-}
-
 function secretReadIntentViolation(toolName: string, params: Record<string, unknown>, cwd: string): string | undefined {
   if (toolName === "read") {
     const target = getPathParam(params);
@@ -1217,32 +1158,6 @@ function isSecretPath(target: string, cwd: string): boolean {
     || base.endsWith(".pem")
     || base.endsWith(".key")
     || normalized.toLowerCase().includes("/.ssh/");
-}
-
-function isTerminalToolPolicyViolation(reason: string): boolean {
-  return reason.startsWith("work_unit_scope_gap:")
-    || reason.startsWith("outside_work_unit_scope:")
-    || reason === "bash_denied_for_work_unit_scope";
-}
-
-function appendToolResultApprovalRequired(result: unknown, request: ChildToolApprovalRequest): unknown {
-  const text = [
-    `pi-chalin approval required: ${request.reason}`,
-    `Action: ${request.actionDescription}`,
-    "Call chalin_interview now. If approved, retry this action once; if rejected, stop this WorkUnit as blocked by human decision.",
-  ].join("\n");
-  if (!isRecord(result) || !Array.isArray(result.content)) {
-    return {
-      content: [{ type: "text" as const, text }],
-      details: { approvalRequired: request },
-    };
-  }
-  const details = isRecord(result.details) ? result.details : {};
-  return {
-    ...result,
-    content: [...result.content, { type: "text" as const, text }],
-    details: { ...details, approvalRequired: request },
-  };
 }
 
 function getPathParam(params: Record<string, unknown>): string | undefined {
@@ -1290,344 +1205,8 @@ function sameStepReadSignature(normalizedPath: string, params: Record<string, un
   return `${normalizedPath}@${offset}:${limit}`;
 }
 
-type NormalizedWorkUnitScope = {
-  files: Set<string>;
-  directories: string[];
-  bash: "deny" | "allow-with-postcheck";
-};
-
-function normalizeWorkUnitScope(scope: ChildToolPolicyOptions["workUnitScope"], cwd: string): NormalizedWorkUnitScope | undefined {
-  if (!scope || scope.mode !== "strict" || scope.files.length === 0) return undefined;
-  const files = new Set<string>();
-  const directories: string[] = [];
-  for (const file of scope.files) {
-    const normalized = normalizeMetricPath(file, cwd).replace(/\/+$/, "");
-    if (!normalized) continue;
-    if (file.trim().endsWith("/") || isExistingDirectoryPath(file, cwd)) directories.push(`${normalized}/`);
-    else files.add(normalized);
-  }
-  if (files.size === 0 && directories.length === 0) return undefined;
-  return { files, directories, bash: scope.bash };
-}
-
-function isExistingDirectoryPath(target: string, cwd: string): boolean {
-  try {
-    return fs.statSync(resolveProjectPath(target, cwd)).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-function mutationOutsideWorkUnitScopeViolation(toolName: string, params: Record<string, unknown>, cwd: string, scope: NormalizedWorkUnitScope | undefined): string | undefined {
-  if (!scope) return undefined;
-  if (toolName === "bash" && scope.bash === "deny") return "bash_denied_for_work_unit_scope";
-  if (toolName !== "edit" && toolName !== "write") return undefined;
-  const target = getPathParam(params);
-  const normalized = target ? normalizeMetricPath(target, cwd) : undefined;
-  if (!normalized) return "work_unit_scope_gap:unknown";
-  return isPathInsideWorkUnitScope(normalized, scope) ? undefined : `work_unit_scope_gap:${normalized}`;
-}
-
-function dirtyEntriesOutsideWorkUnitScope(currentDirtyEntries: WorkspaceDirtyEntry[], baselineDirtyPaths: string[], scope: NormalizedWorkUnitScope | undefined, cwd: string): string[] {
-  if (!scope) return [];
-  const baseline = new Set(baselineDirtyPaths.map(normalizeMetricFilePath));
-  return currentDirtyEntries
-    .map((entry) => ({ status: entry.status, path: normalizeMetricFilePath(entry.path) }))
-    .filter((entry) => entry.path.length > 0)
-    .filter((entry) => !entry.path.startsWith(".pi-chalin/"))
-    .filter((entry) => !baseline.has(entry.path))
-    .filter((entry) => !isUntrackedBinaryOutput(cwd, entry))
-    .filter((entry) => !isPathInsideWorkUnitScope(entry.path, scope))
-    .map((entry) => entry.path);
-}
-
-function isPathInsideWorkUnitScope(filePath: string, scope: NormalizedWorkUnitScope): boolean {
-  const normalized = normalizeMetricFilePath(filePath);
-  return scope.files.has(normalized) || scope.directories.some((directory) => normalized.startsWith(directory));
-}
-
-function workspaceDirtyPaths(cwd: string): string[] {
-  return workspaceDirtyEntries(cwd).map((entry) => entry.path);
-}
-
-type WorkspaceDirtyEntry = {
-  status: string;
-  path: string;
-};
-
-function workspaceDirtyEntries(cwd: string): WorkspaceDirtyEntry[] {
-  const result = spawnSync("git", ["status", "--short", "--untracked-files=all"], { cwd, encoding: "utf-8" });
-  if (result.status !== 0) return [];
-  return result.stdout
-    .split(/\r?\n/)
-    .map(statusLineEntry)
-    .filter((entry): entry is WorkspaceDirtyEntry => Boolean(entry));
-}
-
-function statusLineEntry(line: string): WorkspaceDirtyEntry | undefined {
-  if (line.length < 4) return undefined;
-  const status = line.slice(0, 2);
-  const rawPath = line.slice(3).trim();
-  if (!rawPath) return undefined;
-  const arrowIndex = rawPath.lastIndexOf(" -> ");
-  const filePath = arrowIndex >= 0 ? rawPath.slice(arrowIndex + 4) : rawPath;
-  return { status, path: unquoteGitStatusPath(filePath) };
-}
-
-function unquoteGitStatusPath(filePath: string): string {
-  const trimmed = filePath.trim();
-  if (trimmed.length >= 2 && trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
-    return trimmed.slice(1, -1).replace(/\\"/g, "\"").replace(/\\\\/g, "\\");
-  }
-  return trimmed;
-}
-
-function isUntrackedBinaryOutput(cwd: string, entry: { status: string; path: string }): boolean {
-  if (entry.status !== "??") return false;
-  const fullPath = resolveProjectPath(entry.path, cwd);
-  let stat: fs.Stats;
-  try {
-    stat = fs.lstatSync(fullPath);
-  } catch {
-    return false;
-  }
-  if (!stat.isFile() || stat.isSymbolicLink()) return false;
-  return isLikelyBinaryFile(fullPath);
-}
-
-function isLikelyBinaryFile(filePath: string): boolean {
-  let buffer: Buffer;
-  try {
-    const fd = fs.openSync(filePath, "r");
-    try {
-      buffer = Buffer.alloc(4096);
-      const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
-      buffer = buffer.subarray(0, bytesRead);
-    } finally {
-      fs.closeSync(fd);
-    }
-  } catch {
-    return false;
-  }
-  return buffer.includes(0);
-}
-
-function childWorkspacePathViolation(toolName: string, params: Record<string, unknown>, cwd: string): string | undefined {
-  if (toolName === "bash") {
-    const command = getCommandParam(params);
-    return command ? firstShellWorkspacePathViolation(command, cwd) : undefined;
-  }
-  const target = getPathParam(params);
-  if (!target) return undefined;
-  const normalized = normalizeMetricPath(target, cwd);
-  if (isInternalHarnessPath(normalized)) return `internal_harness_path:${normalized}`;
-  if (isOutsideWorkspacePath(target, cwd)) return `outside_workspace_path:${normalized}`;
-  return undefined;
-}
-
 function shellWords(segment: string): string[] {
   return segment.match(/(?:[^\s"'`\\]+|"(?:\\.|[^"])*"|'[^']*')+/g)?.map((word) => word.replace(/^['"]|['"]$/g, "")) ?? [];
-}
-
-function firstShellWorkspacePathViolation(command: string, cwd: string): string | undefined {
-  const internalPath = firstInternalHarnessPathInCommand(command, cwd);
-  if (internalPath) return `internal_harness_path:${internalPath}`;
-  for (const token of dangerousAbsolutePathTokens(command)) {
-    if (isAllowedExternalShellPath(token)) continue;
-    if (isOutsideWorkspacePath(token, cwd)) return `outside_workspace_path:${token}`;
-  }
-  return undefined;
-}
-
-function firstInternalHarnessPathInCommand(command: string, cwd: string): string | undefined {
-  for (const line of stripNonShellHeredocBodies(command).split(/\r?\n/)) {
-    const words = shellWords(line);
-    for (let index = 0; index < words.length; index += 1) {
-      const word = words[index]!;
-      if (isNegatedFindPathPattern(words, index)) continue;
-      for (const candidate of shellInternalPathCandidatesFromWord(word)) {
-        const normalized = normalizeMetricPath(candidate, cwd);
-        if (isInternalHarnessPath(normalized)) return normalized;
-      }
-    }
-  }
-  return undefined;
-}
-
-function isNegatedFindPathPattern(words: string[], index: number): boolean {
-  if (index < 2) return false;
-  const command = words[0];
-  if (command !== "find" && !command.endsWith("/find")) return false;
-  return words[index - 1] === "-path" && (words[index - 2] === "-not" || words[index - 2] === "!");
-}
-
-function shellInternalPathCandidatesFromWord(word: string): string[] {
-  const candidates = new Set<string>();
-  const stripped = stripShellRedirectionPrefix(word.trim());
-  if (stripped) candidates.add(trimCommandPathToken(stripped));
-  const assignmentValue = shellAssignmentValue(word);
-  if (assignmentValue) candidates.add(trimCommandPathToken(assignmentValue));
-  return [...candidates].filter(Boolean);
-}
-
-function isInternalHarnessPath(normalizedPath: string): boolean {
-  return normalizedPath === ".pi-chalin" || normalizedPath.startsWith(".pi-chalin/");
-}
-
-function dangerousAbsolutePathTokens(command: string): string[] {
-  const tokens: string[] = [];
-  const pending: Array<{ delimiter: string; scanBody: boolean }> = [];
-  for (const line of command.split(/\r?\n/)) {
-    const active = pending[0];
-    if (active) {
-      if (line.trim() === active.delimiter) {
-        pending.shift();
-        continue;
-      }
-      if (active.scanBody) tokens.push(...absolutePathTokensFromLine(line));
-      continue;
-    }
-    tokens.push(...dangerousTopLevelPathTokensFromLine(line));
-    pending.push(...heredocSpecsForLine(line));
-  }
-  return tokens;
-}
-
-function absolutePathTokensFromLine(line: string): string[] {
-  const tokens: string[] = [];
-  for (const word of shellWords(line)) {
-    for (const candidate of shellPathCandidatesFromWord(word)) {
-      const token = trimCommandPathToken(candidate);
-      if (path.isAbsolute(token)) tokens.push(token);
-    }
-  }
-  return tokens;
-}
-
-function dangerousTopLevelPathTokensFromLine(line: string): string[] {
-  const tokens: string[] = [];
-  const words = shellWords(line);
-  for (let index = 0; index < words.length; index += 1) {
-    const word = words[index]!;
-    if (["cd", "pushd", "popd"].includes(path.basename(word))) {
-      const target = words[index + 1];
-      if (target) {
-        const token = trimCommandPathToken(target);
-        if (path.isAbsolute(token)) tokens.push(token);
-      }
-      continue;
-    }
-    if (isShellRedirectionWord(word)) {
-      const inline = shellPathCandidateFromWord(word);
-      const candidate = inline && path.isAbsolute(trimCommandPathToken(inline)) ? inline : words[index + 1];
-      if (candidate) {
-        const token = trimCommandPathToken(candidate);
-        if (path.isAbsolute(token)) tokens.push(token);
-      }
-    }
-  }
-  return tokens;
-}
-
-function stripNonShellHeredocBodies(command: string): string {
-  const output: string[] = [];
-  const pending: Array<{ delimiter: string; scanBody: boolean }> = [];
-  for (const line of command.split(/\r?\n/)) {
-    const active = pending[0];
-    if (active) {
-      if (line.trim() === active.delimiter) {
-        pending.shift();
-        continue;
-      }
-      if (active.scanBody) output.push(line);
-      continue;
-    }
-    output.push(line);
-    pending.push(...heredocSpecsForLine(line));
-  }
-  return output.join("\n");
-}
-
-function heredocSpecsForLine(line: string): Array<{ delimiter: string; scanBody: boolean }> {
-  const commandName = firstShellCommandWord(line);
-  const scanBody = commandName !== undefined && SHELL_INTERPRETER_COMMANDS.has(path.basename(commandName));
-  const specs: Array<{ delimiter: string; scanBody: boolean }> = [];
-  const heredocPattern = /<<-?\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_.-]+))/g;
-  for (const match of line.matchAll(heredocPattern)) {
-    const delimiter = match[1] ?? match[2] ?? match[3];
-    if (delimiter) specs.push({ delimiter, scanBody });
-  }
-  return specs;
-}
-
-function firstShellCommandWord(line: string): string | undefined {
-  for (const word of shellWords(line)) {
-    if (!word || isShellAssignmentWord(word) || isShellRedirectionWord(word)) continue;
-    return word;
-  }
-  return undefined;
-}
-
-function shellPathCandidatesFromWord(word: string): string[] {
-  const candidates: string[] = [];
-  const direct = shellPathCandidateFromWord(word);
-  if (direct) candidates.push(direct);
-  const assignmentValue = shellAssignmentValue(word);
-  if (assignmentValue) {
-    const assigned = shellPathCandidateFromWord(assignmentValue);
-    if (assigned) candidates.push(assigned);
-  }
-  return candidates;
-}
-
-function shellPathCandidateFromWord(word: string): string | undefined {
-  const trimmed = word.trim();
-  if (isMarkupLikeShellWord(trimmed)) return undefined;
-  const value = stripShellRedirectionPrefix(trimmed);
-  return value.startsWith("/") ? value : undefined;
-}
-
-function shellAssignmentValue(word: string): string | undefined {
-  if (!isShellAssignmentWord(word)) return undefined;
-  const index = word.indexOf("=");
-  return index >= 0 ? word.slice(index + 1) : undefined;
-}
-
-function isShellAssignmentWord(word: string): boolean {
-  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(word);
-}
-
-function isShellRedirectionWord(word: string): boolean {
-  return /^\d*(?:>>?|<)(?!<)/.test(word);
-}
-
-function stripShellRedirectionPrefix(word: string): string {
-  return word.replace(/^\d*(?:>>?|<)(?!<)/, "");
-}
-
-function isMarkupLikeShellWord(word: string): boolean {
-  return /^<\/[A-Za-z][^/\s<>]*>$/.test(word);
-}
-
-const SHELL_INTERPRETER_COMMANDS = new Set(["bash", "sh", "zsh"]);
-
-function isAllowedExternalShellPath(token: string): boolean {
-  return token === "/dev/null"
-    || token === "/dev/stdin"
-    || token === "/dev/stdout"
-    || token === "/dev/stderr"
-    || isDoubleSlashCommentToken(token)
-    || isSlashOnlyToken(token);
-}
-
-function isDoubleSlashCommentToken(token: string): boolean {
-  if (!token.startsWith("//") || token.startsWith("///")) return false;
-  const marker = token.slice(2);
-  return marker.length > 0 && (!marker.includes("/") || marker.includes(" ") || marker.includes("\n") || marker.includes("\t"));
-}
-
-function isSlashOnlyToken(token: string): boolean {
-  return token.length > 1 && [...token].every((char) => char === "/");
 }
 
 function isOutsideWorkspacePath(target: string, cwd: string): boolean {
@@ -1684,12 +1263,6 @@ function isToolError(result: unknown): boolean {
   return isRecord(result) && result.isError === true;
 }
 
-function trimCommandPathToken(token: string): string {
-  let end = token.length;
-  while (end > 0 && isCommandPathSuffix(token[end - 1]!)) end -= 1;
-  return token.slice(0, end);
-}
-
 function summarizeBlockedToolParams(toolName: string, params: Record<string, unknown>): string {
   const primary = toolName === "bash" ? getCommandParam(params) : getPathParam(params);
   if (primary) return compactText(primary, 300);
@@ -1698,10 +1271,6 @@ function summarizeBlockedToolParams(toolName: string, params: Record<string, unk
   } catch {
     return "[unserializable params]";
   }
-}
-
-function isCommandPathSuffix(char: string): boolean {
-  return char === "." || char === "," || char === ";" || char === ")" || char === "]" || char === "}";
 }
 
 function roundMetric(value: number): number {

@@ -21,6 +21,9 @@ Rules:
 - Mark inference explicitly when sources do not state the conclusion directly.
 - Preserve URLs needed for final citation.
 - Call out freshness, source quality, and discarded weak sources.
+- Do not substitute web research for repository evidence. If a claim depends on local code, name the required repo evidence instead of filling it from external docs.
+- Do not produce implementation plans or audit verdicts unless the task explicitly asks for external-research recommendations; hand off source facts and uncertainty.
+- If the research question is already answerable from authoritative local docs supplied in the handoff, summarize those docs and report that external research was unnecessary.
 
 
 Tool discipline:

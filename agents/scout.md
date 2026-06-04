@@ -18,8 +18,10 @@ Rules:
 - Do not browse the web by default. Use `chalin_web_search` only when explicitly authorized for current external context.
 - Return concise findings, relevant paths, uncertainties, and the next best agent if obvious.
 - Do not own final strategy, option recommendation, risk review, or mutation deliverables. Hand those to planner, reviewer, or worker.
+- Suggest only the next responsibility, not a full route. Do not choose topology, stage order, or final recommendations unless the task explicitly asks for a reconnaissance-only answer.
 - For implementation handoffs, map requested behavior to source and test evidence. Do not say tests are sufficient/as-is unless every requested criterion has a direct runner-discoverable assertion; otherwise name the missing regression tests.
 - For deep project analysis, build a coverage map instead of a small path list: top-level directories, entrypoints, commands/tools/routes, storage/sync, integrations, UI/cloud surfaces, tests/evals/tooling, and explicit unknowns. Coverage is representative and evidence-backed; it is not a crawl of every adjacent file.
+- For broad analysis, coverage comes before critique: mark surfaces covered, not present, or unknown before naming risks. Leave severity ranking and recommendations to reviewers/planners.
 
 
 Tool discipline:

@@ -1,12 +1,13 @@
-import { complete, completeSimple, StringEnum, Type, type Api, type AssistantMessage, type Context, type Model, type ProviderStreamOptions, type Tool } from "@earendil-works/pi-ai";
-import { createAgentSession, defineTool, SessionManager, type ModelRegistry } from "@earendil-works/pi-coding-agent";
+import { StringEnum, Type, type Api, type AssistantMessage, type Model } from "@earendil-works/pi-ai";
+import { createAgentSession, DefaultResourceLoader, defineTool, getAgentDir, SessionManager, type ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { AgentCatalog } from "../agents/agents.ts";
 import type { AgentDefinition, RouteDecision, RouteExpectedEffect, RouteRisk, RouteWorkUnitStrategy } from "../domain/schemas.ts";
 import { routeFromPlan, type StrictRoutePlanInput } from "../kernel/kernel.ts";
 import { errorMessage, isRecord } from "../utils/guards.ts";
 import { compactString, parseJsonObject } from "../utils/json.ts";
 
-export type ChalinRouteTopologyInput = "auto" | "sequential" | "dag";
+export type ChalinRouteTopologyInput = "auto" | "sequential" | "dag" | "chain" | "parallel";
+type NormalizedChalinRouteTopologyInput = "auto" | "sequential" | "dag";
 
 export type ChalinDelegationStep = {
   id?: string;
@@ -67,7 +68,6 @@ export interface ChalinRoutePlanningContext {
 type PlannerStepInput = NonNullable<StrictRoutePlanInput["steps"]>[number];
 type PlannerStageInput = NonNullable<StrictRoutePlanInput["stages"]>[number];
 
-const ROUTE_PLANNER_TIMEOUT_MS = 25_000;
 const ROUTE_PLANNER_TOOL_NAME = "chalin_route_plan";
 const ROUTE_TOPOLOGIES = ["sequential", "dag"] as const;
 const ROUTE_RISKS = ["low", "medium", "high", "critical"] as const;
@@ -116,19 +116,14 @@ export const CHALIN_ROUTE_PLANNER_RESULT_SCHEMA = Type.Object({
   reason: Type.String({ minLength: 12, maxLength: 1_200, description: "Compact semantic reason for the chosen topology and agents." }),
 }, { additionalProperties: false });
 
-const CHALIN_ROUTE_PLANNER_TOOL = {
-  name: ROUTE_PLANNER_TOOL_NAME,
-  description: "Emit pi-chalin's internal route plan for a delegated task.",
-  parameters: CHALIN_ROUTE_PLANNER_RESULT_SCHEMA,
-} as const satisfies Tool;
-
 export async function planChalinRoute(
   input: ChalinRoutePlannerInput,
   context: ChalinRoutePlanningContext,
 ): Promise<ChalinRoutePlanningResult> {
+  const normalizedInput = normalizeChalinRoutePlannerInput(input);
   const attempt = context.planner
-    ? await context.planner(input, context)
-    : await runStructuredRoutePlanner(input, context);
+    ? await context.planner(normalizedInput, context)
+    : await runStructuredRoutePlanner(normalizedInput, context);
 
   if (!attempt.output) {
     return {
@@ -155,6 +150,19 @@ export async function planChalinRoute(
   };
 }
 
+export function normalizeChalinRoutePlannerInput(input: ChalinRoutePlannerInput): ChalinRoutePlannerInput {
+  return {
+    ...input,
+    topology: normalizeTopologyInput(input.topology),
+  };
+}
+
+function normalizeTopologyInput(topology: ChalinRouteTopologyInput | undefined): NormalizedChalinRouteTopologyInput | undefined {
+  if (topology === "chain") return "sequential";
+  if (topology === "parallel") return "dag";
+  return topology;
+}
+
 export async function runStructuredRoutePlanner(
   input: ChalinRoutePlannerInput,
   context: ChalinRoutePlanningContext,
@@ -168,49 +176,8 @@ export async function runStructuredRoutePlanner(
     return { diagnostics: ["Internal route planner cannot run because no executable pi-chalin agents are available."] };
   }
 
-  const auth = await registry.getApiKeyAndHeaders(model);
-  if (!auth.ok) return { diagnostics: [`Internal route planner model auth failed: ${auth.error}`] };
-
-  const structuredOutputOptions = routePlannerStructuredOutputOptions(model.api);
-  const messages = [{
-    role: "user" as const,
-    timestamp: Date.now(),
-    content: JSON.stringify(routePlannerPayload(input, context.catalog), null, 2),
-  }];
-  const plannerContext: Context = {
-    systemPrompt: routePlannerSystemPrompt(),
-    messages,
-  };
-  const baseOptions = {
-    apiKey: auth.apiKey,
-    headers: auth.headers,
-    temperature: 0,
-    maxTokens: 1_400,
-    timeoutMs: ROUTE_PLANNER_TIMEOUT_MS,
-    maxRetries: 0,
-    signal: context.signal,
-  };
-
   try {
-    if (shouldUseAgentSessionPlanner(model.api)) {
-      return await runAgentSessionRoutePlanner(input, context);
-    }
-    if (structuredOutputOptions) plannerContext.tools = [CHALIN_ROUTE_PLANNER_TOOL];
-    const response = structuredOutputOptions
-      ? await complete(model, plannerContext, { ...baseOptions, ...structuredOutputOptions })
-      : await completeSimple(model, plannerContext, { ...baseOptions, reasoning: "low" });
-    const output = parseChalinRoutePlannerMessage(response, context.catalog);
-    if (output) return { output, diagnostics: [`Internal route planner selected a structured ${output.plan.topology} route.`] };
-    const sessionAttempt = await runAgentSessionRoutePlanner(input, context);
-    return sessionAttempt.output
-      ? { ...sessionAttempt, diagnostics: ["Direct route planner response failed validation; AgentSession fallback succeeded.", ...sessionAttempt.diagnostics] }
-      : {
-          diagnostics: [
-            "Internal route planner response failed structured validation.",
-            routePlannerResponseSummary(response),
-            ...sessionAttempt.diagnostics,
-          ],
-        };
+    return await runAgentSessionRoutePlanner(input, context);
   } catch (error) {
     return { diagnostics: [`Internal route planner failed: ${errorMessage(error)}`] };
   }
@@ -285,22 +252,6 @@ export function validateChalinRoutePlannerOutput(parsed: Record<string, unknown>
   return { plan, requiresWorkspaceMutation: parsed.requiresWorkspaceMutation };
 }
 
-export function routePlannerStructuredOutputOptions(api: Api): ProviderStreamOptions | undefined {
-  if (api === "openai-completions" || api === "mistral-conversations") {
-    return { toolChoice: { type: "function", function: { name: ROUTE_PLANNER_TOOL_NAME } } };
-  }
-  if (api === "anthropic-messages" || api === "bedrock-converse-stream") {
-    return { toolChoice: { type: "tool", name: ROUTE_PLANNER_TOOL_NAME } };
-  }
-  if (api === "google-generative-ai" || api === "google-vertex") {
-    return { toolChoice: "any" };
-  }
-  if (api === "openai-responses" || api === "azure-openai-responses" || api === "openai-codex-responses") {
-    return {};
-  }
-  return undefined;
-}
-
 async function runAgentSessionRoutePlanner(
   input: ChalinRoutePlannerInput,
   context: ChalinRoutePlanningContext,
@@ -311,11 +262,22 @@ async function runAgentSessionRoutePlanner(
 
   let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
   try {
+    const resourceLoader = new DefaultResourceLoader({
+      cwd: context.cwd,
+      agentDir: getAgentDir(),
+      noExtensions: true,
+      noSkills: true,
+      noPromptTemplates: true,
+      noContextFiles: true,
+      systemPrompt: routePlannerSystemPrompt(),
+    });
+    await resourceLoader.reload();
     created = await createAgentSession({
       cwd: context.cwd,
       model,
       modelRegistry: registry,
       sessionManager: SessionManager.inMemory(context.cwd),
+      resourceLoader,
       noTools: "all",
       tools: [ROUTE_PLANNER_TOOL_NAME],
       customTools: [createRoutePlannerTool(context.catalog)],
@@ -341,10 +303,6 @@ async function runAgentSessionRoutePlanner(
   } finally {
     created?.session.dispose();
   }
-}
-
-function shouldUseAgentSessionPlanner(api: Api): boolean {
-  return api === "openai-codex-responses";
 }
 
 function createRoutePlannerTool(catalog: AgentCatalog) {
@@ -426,22 +384,6 @@ function parseChalinRoutePlannerToolResult(message: AssistantMessage, catalog?: 
   return undefined;
 }
 
-function routePlannerResponseSummary(message: AssistantMessage): string {
-  const toolCalls = message.content
-    .filter((block): block is Extract<AssistantMessage["content"][number], { type: "toolCall" }> => block.type === "toolCall")
-    .map((block) => `${block.name} ${truncate(JSON.stringify(block.arguments), 900)}`);
-  const text = message.content
-    .filter((block): block is { type: "text"; text: string } => block.type === "text")
-    .map((block) => block.text)
-    .join("\n")
-    .trim();
-  return [
-    `Planner response trace: ${message.provider}/${message.model} stop=${message.stopReason}.`,
-    toolCalls.length ? `Tool calls: ${toolCalls.join(" | ")}` : "Tool calls: none.",
-    text ? `Text: ${truncate(text, 900)}` : "Text: none.",
-  ].join(" ");
-}
-
 function routePlannerPayload(input: ChalinRoutePlannerInput, catalog: AgentCatalog): Record<string, unknown> {
   return {
     delegatedTask: input.task,
@@ -481,12 +423,22 @@ function routePlannerSystemPrompt(): string {
     "Do not use keyword routing, task-type tables, or fixed mappings from phrases to agents. A PR, bugfix, review, research task, or refactor may need different routes depending on the actual task shape.",
     "Treat any Primary Pi supplied steps/stages as a proposal, not authority. Preserve them only when they are semantically justified.",
     "Select only agents from availableAgents. Prefer the smallest route that can gather evidence, execute required effects, and verify the outcome.",
-    "Use sequential when steps depend on earlier evidence or implementation. Use dag only when stages contain genuinely independent work that can safely run in parallel.",
+    "First decompose the task into responsibilities: reconnaissance, focused review or validation, external research, planning or option comparison, workspace mutation, fan-in synthesis, and final quality gate. Then choose topology and agents for those responsibilities.",
+    "Use sequential when steps depend on earlier evidence, planning, implementation, or synthesized handoffs. Use dag when independent responsibilities or coverage slices can safely run in parallel after their shared prerequisites are known.",
+    "For broad read-only analysis, prefer a coverage-map recon step when the surface is not already known, then parallel focused review/research slices for independent surfaces, then fan-in synthesis when multiple handoffs must be reconciled, and a final review gate when claims or coverage need independent validation.",
+    "Nested delegation is a runtime parent-agent decision, not a route-plan topology feature. Use it when a parent must inspect evidence first, discover the true slices, or coordinate same-role child work under one verdict or plan.",
+    "Do not flatten explicit or semantic parent/child delegation into top-level sibling steps. If a coordinating parent should decide child slices after scout/planner/worker/reviewer evidence, create the parent step at top level and put the child-slice responsibility inside that parent step task for `chalin_delegate`.",
+    "Flatten independent slices into top-level DAG tasks only when no parent coordination, same-role verdict, or runtime slice discovery is needed and each slice can produce a complete handoff directly to the route fan-in.",
+    "Agnostic nested-delegation examples: a reviewer parent splits a broad audit into focused review slices; a worker parent splits implementation across independent ownership boundaries after reading the scoped code; a planner parent splits competing migration/architecture plans before consolidating one plan. In each case, top-level route owns the parent plus later fan-in/final gate, not every child slice.",
+    "Do not use a planning agent as a generic auditor. Use planning for strategy, option comparison, ordered implementation plans, risks, rollback, or validation strategy; use review-capable agents for evidence-backed critique, coverage gaps, and correctness risks.",
+    "When two or more independent handoffs must become one final answer or downstream contract, include an explicit context-building or synthesis responsibility unless a later agent's task clearly owns that fan-in.",
     "If writes are expected, expectedEffects must include read, write, and verify, and requiresWorkspaceMutation must be true.",
+    "If writes are not expected, do not add mutation agents merely to look thorough; read-only routes still need evidence coverage, synthesis, and validation when the scope is broad.",
     "Select agents by their declared concerns, capabilities, tools, and descriptions; do not assign or exclude an agent merely because its name appears to match a task type.",
     "Independent validation, mutation, fresh external evidence, and evidence packaging are responsibilities to cover through the roster, not fixed agent-name recipes.",
     "Set each step's expectedEffects when its responsibility is known; the harness will use those effects as the contract instead of inferring responsibility from agent names.",
     "Step tasks must be concrete, bounded, and mention the evidence, mutation, or verification responsibility of that agent.",
+    "Do not collapse separable responsibilities into one opaque write step solely because they share a workspace or mutable files. Shared mutable surfaces require explicit ordering, dependency, merge ownership, or a coordinating parent step.",
     `When the ${ROUTE_PLANNER_TOOL_NAME} tool is available, call it exactly once with the final route. Otherwise return JSON only with the same fields.`,
   ].join("\n");
 }

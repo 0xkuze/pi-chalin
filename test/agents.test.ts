@@ -67,6 +67,32 @@ test("built-in worker can coordinate nested decomposition below depth limit", ()
   }).includes("chalin_delegate"));
 });
 
+test("built-in worker can coordinate nested decomposition after scout handoff", () => {
+  const cwd = tempDir("pi-chalin-cwd-");
+  const worker = AgentCatalog.load({ cwd }).resolve("worker").agent;
+
+  assert.ok(worker);
+  assert.ok(childToolNames(worker, true, true, {
+    delegationDepth: 1,
+    maxDelegationDepth: 2,
+  }).includes("chalin_delegate"));
+  assert.equal(childToolNames(worker, true, true, {
+    delegationDepth: 2,
+    maxDelegationDepth: 2,
+  }).includes("chalin_delegate"), false);
+});
+
+test("built-in reviewer can coordinate nested review decomposition below depth limit", () => {
+  const cwd = tempDir("pi-chalin-cwd-");
+  const reviewer = AgentCatalog.load({ cwd }).resolve("reviewer").agent;
+
+  assert.ok(reviewer);
+  assert.ok(childToolNames(reviewer, true, true, {
+    delegationDepth: 1,
+    maxDelegationDepth: 2,
+  }).includes("chalin_delegate"));
+});
+
 test("scout receives native bash for branch and PR reconnaissance", () => {
   const cwd = tempDir("pi-chalin-cwd-");
   const scout = AgentCatalog.load({ cwd }).resolve("scout").agent;
@@ -83,6 +109,22 @@ test("read-only built-in agent prompts do not mention unavailable edit tooling",
     const prompt = catalog.resolve(name).agent?.systemPrompt ?? "";
     assert.doesNotMatch(prompt, /\bedit\b/i, `${name} should not mention edit`);
   }
+});
+
+test("built-in agent prompts keep role boundaries explicit", () => {
+  const cwd = tempDir("pi-chalin-cwd-");
+  const catalog = AgentCatalog.load({ cwd });
+
+  assert.match(catalog.resolve("scout").agent?.systemPrompt ?? "", /Suggest only the next responsibility/);
+  assert.match(catalog.resolve("planner").agent?.systemPrompt ?? "", /Do not act as a generic auditor/);
+  assert.match(catalog.resolve("planner").agent?.systemPrompt ?? "", /same-role planning shards/);
+  assert.match(catalog.resolve("context-builder").agent?.systemPrompt ?? "", /Do not upgrade upstream claims/);
+  assert.match(catalog.resolve("researcher").agent?.systemPrompt ?? "", /Do not substitute web research for repository evidence/);
+  assert.match(catalog.resolve("reviewer").agent?.systemPrompt ?? "", /Separate coverage gaps from correctness findings/);
+  assert.match(catalog.resolve("reviewer").agent?.systemPrompt ?? "", /If the route already has top-level sibling reviewers/);
+  assert.match(catalog.resolve("worker").agent?.systemPrompt ?? "", /Worker children are implementation-only/);
+  assert.match(catalog.resolve("worker").agent?.systemPrompt ?? "", /If the route already has top-level sibling workers/);
+  assert.match(catalog.resolve("conflict-resolver").agent?.systemPrompt ?? "", /Do not choose one side wholesale/);
 });
 
 test("edge implementation contracts live in the contextual skill, not base agents", () => {

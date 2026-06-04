@@ -1,5 +1,5 @@
-import { complete, completeSimple, Type, type Api, type AssistantMessage, type Context, type Model, type ProviderStreamOptions, type Tool } from "@earendil-works/pi-ai";
-import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
+import { Type, type Api, type AssistantMessage, type Model } from "@earendil-works/pi-ai";
+import { createAgentSession, DefaultResourceLoader, defineTool, getAgentDir, SessionManager, type ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { ChalinConfig } from "../config/config.ts";
 import type { AgentDefinition, RouteKind, RouteRisk, SkillDefinition, SkillSelectionDecision } from "../domain/schemas.ts";
 import { errorMessage } from "../utils/guards.ts";
@@ -7,6 +7,7 @@ import { compactString, parseJsonObject } from "../utils/json.ts";
 import type { SkillCatalog } from "./skills.ts";
 
 export interface SkillSelectorContext {
+  cwd?: string;
   model?: Model<Api>;
   modelRegistry?: ModelRegistry;
   signal?: AbortSignal;
@@ -27,7 +28,6 @@ export interface SkillSelectorRunResult {
   diagnostics: string[];
 }
 
-const SKILL_SELECTOR_TIMEOUT_MS = 15_000;
 const SKILL_SELECTOR_TOOL_NAME = "chalin_skill_selection";
 const SKILL_SELECTOR_RESULT_KEYS = new Set(["selectedSkills"]);
 const SKILL_SELECTOR_ITEM_KEYS = new Set(["reference", "reason", "confidence"]);
@@ -42,12 +42,6 @@ export const CHALIN_SKILL_SELECTOR_RESULT_SCHEMA = Type.Object({
   }),
 }, { additionalProperties: false });
 
-const CHALIN_SKILL_SELECTOR_TOOL = {
-  name: SKILL_SELECTOR_TOOL_NAME,
-  description: "Emit pi-chalin's semantic skill selection for the current subagent step.",
-  parameters: CHALIN_SKILL_SELECTOR_RESULT_SCHEMA,
-} as const satisfies Tool;
-
 export async function runStructuredSkillSelector(input: SkillSelectorInput): Promise<SkillSelectorRunResult> {
   const model = input.context.model;
   const registry = input.context.modelRegistry;
@@ -55,49 +49,7 @@ export async function runStructuredSkillSelector(input: SkillSelectorInput): Pro
   const availableSkills = input.catalog.list();
   if (availableSkills.length === 0) return { selectedSkills: [], diagnostics: ["Semantic skill selector found no available skills."] };
 
-  const auth = await registry.getApiKeyAndHeaders(model);
-  if (!auth.ok) return { selectedSkills: [], diagnostics: [`Semantic skill selector model auth failed: ${auth.error}`] };
-
-  const selectorContext: Context = {
-    systemPrompt: skillSelectorSystemPrompt(),
-    messages: [{
-      role: "user",
-      timestamp: Date.now(),
-      content: JSON.stringify(skillSelectorPayload(input, availableSkills), null, 2),
-    }],
-  };
-  const structuredOutputOptions = skillSelectorStructuredOutputOptions(model.api);
-  if (structuredOutputOptions) selectorContext.tools = [CHALIN_SKILL_SELECTOR_TOOL];
-
-  try {
-    const response = structuredOutputOptions
-      ? await complete(model, selectorContext, {
-          apiKey: auth.apiKey,
-          headers: auth.headers,
-          temperature: 0,
-          maxTokens: 900,
-          timeoutMs: SKILL_SELECTOR_TIMEOUT_MS,
-          maxRetries: 0,
-          signal: input.context.signal,
-          ...structuredOutputOptions,
-        })
-      : await completeSimple(model, selectorContext, {
-          apiKey: auth.apiKey,
-          headers: auth.headers,
-          temperature: 0,
-          maxTokens: 900,
-          timeoutMs: SKILL_SELECTOR_TIMEOUT_MS,
-          maxRetries: 0,
-          signal: input.context.signal,
-          reasoning: "low",
-        });
-    const selectedSkills = parseSkillSelectorMessage(response, input.catalog);
-    return selectedSkills
-      ? { selectedSkills, diagnostics: [`Semantic skill selector chose ${selectedSkills.length} skill(s).`] }
-      : { selectedSkills: [], diagnostics: ["Semantic skill selector response failed structured validation."] };
-  } catch (error) {
-    return { selectedSkills: [], diagnostics: [`Semantic skill selector failed: ${errorMessage(error)}`] };
-  }
+  return runAgentSessionSkillSelector(input, availableSkills);
 }
 
 export function parseSkillSelectorMessage(message: AssistantMessage, catalog?: SkillCatalog): SkillSelectionDecision[] | undefined {
@@ -201,20 +153,109 @@ function skillSelectorSystemPrompt(): string {
   ].join("\n");
 }
 
-function skillSelectorStructuredOutputOptions(api: Api): ProviderStreamOptions | undefined {
-  if (api === "openai-completions" || api === "mistral-conversations") {
-    return { toolChoice: { type: "function", function: { name: SKILL_SELECTOR_TOOL_NAME } } };
-  }
-  if (api === "anthropic-messages" || api === "bedrock-converse-stream") {
-    return { toolChoice: { type: "tool", name: SKILL_SELECTOR_TOOL_NAME } };
-  }
-  if (api === "google-generative-ai" || api === "google-vertex") {
-    return { toolChoice: "any" };
-  }
-  return undefined;
-}
-
 export const SKILL_SELECTOR_TEST_ONLY = {
   skillSelectorSystemPrompt,
   skillSelectorPayload,
 };
+
+async function runAgentSessionSkillSelector(input: SkillSelectorInput, availableSkills: SkillDefinition[]): Promise<SkillSelectorRunResult> {
+  const model = input.context.model;
+  const registry = input.context.modelRegistry;
+  if (!model || !registry) return { selectedSkills: [], diagnostics: ["Semantic skill selector requires an active Pi model and model registry."] };
+  const cwd = input.context.cwd ?? process.cwd();
+  let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
+  try {
+    const resourceLoader = new DefaultResourceLoader({
+      cwd,
+      agentDir: getAgentDir(),
+      noExtensions: true,
+      noSkills: true,
+      noPromptTemplates: true,
+      noContextFiles: true,
+      systemPrompt: skillSelectorSystemPrompt(),
+    });
+    await resourceLoader.reload();
+    created = await createAgentSession({
+      cwd,
+      model,
+      modelRegistry: registry,
+      sessionManager: SessionManager.inMemory(cwd),
+      resourceLoader,
+      noTools: "all",
+      tools: [SKILL_SELECTOR_TOOL_NAME],
+      customTools: [createSkillSelectorTool(input.catalog)],
+      sessionStartEvent: { type: "session_start", reason: "new" },
+    });
+    const abortSelector = () => { void created?.session.abort(); };
+    input.context.signal?.addEventListener("abort", abortSelector, { once: true });
+    try {
+      await created.session.prompt(skillSelectorSessionPrompt(input, availableSkills), {
+        expandPromptTemplates: false,
+        source: "extension",
+      });
+    } finally {
+      input.context.signal?.removeEventListener("abort", abortSelector);
+    }
+    const messages = Array.isArray(created.session.state.messages) ? created.session.state.messages as unknown[] : [];
+    const selectedSkills = parseSkillSelectorSessionMessages(messages, input.catalog);
+    return selectedSkills
+      ? { selectedSkills, diagnostics: [`Semantic skill selector chose ${selectedSkills.length} skill(s).`] }
+      : { selectedSkills: [], diagnostics: ["Semantic skill selector response failed structured validation."] };
+  } catch (error) {
+    return { selectedSkills: [], diagnostics: [`Semantic skill selector failed: ${errorMessage(error)}`] };
+  } finally {
+    created?.session.dispose();
+  }
+}
+
+function createSkillSelectorTool(catalog: SkillCatalog) {
+  return defineTool({
+    name: SKILL_SELECTOR_TOOL_NAME,
+    label: "Chalin Skill Selection",
+    description: "Emit pi-chalin's semantic skill selection for the current subagent step.",
+    promptSnippet: "Emit pi-chalin's semantic skill selection.",
+    promptGuidelines: [
+      `Call ${SKILL_SELECTOR_TOOL_NAME} exactly once as the final action.`,
+      "Do not answer in prose when this tool is available.",
+    ],
+    parameters: CHALIN_SKILL_SELECTOR_RESULT_SCHEMA,
+    async execute(_toolCallId, params) {
+      const selectedSkills = validateSkillSelectorOutput(params as Record<string, unknown>, catalog);
+      return {
+        content: [{ type: "text", text: selectedSkills ? `Accepted skill selection: ${selectedSkills.length} skill(s)` : "Rejected skill selection: failed catalog or schema validation." }],
+        details: selectedSkills ? { selectedSkills } : { rejected: true, params },
+        terminate: true,
+      };
+    },
+  });
+}
+
+function skillSelectorSessionPrompt(input: SkillSelectorInput, availableSkills: SkillDefinition[]): string {
+  return [
+    "Payload JSON:",
+    JSON.stringify(skillSelectorPayload(input, availableSkills), null, 2),
+  ].join("\n");
+}
+
+function parseSkillSelectorSessionMessages(messages: unknown[], catalog: SkillCatalog): SkillSelectionDecision[] | undefined {
+  for (const message of [...messages].reverse()) {
+    if (!message || typeof message !== "object" || Array.isArray(message)) continue;
+    const record = message as Record<string, unknown>;
+    if (record.details && typeof record.details === "object" && !Array.isArray(record.details)) {
+      const details = record.details as Record<string, unknown>;
+      if (Array.isArray(details.selectedSkills)) {
+        const parsed = validateSkillSelectorOutput({ selectedSkills: details.selectedSkills }, catalog);
+        if (parsed) return parsed;
+      }
+    }
+    if (record.role !== "assistant" || !Array.isArray(record.content)) continue;
+    for (const block of record.content) {
+      if (!block || typeof block !== "object" || Array.isArray(block)) continue;
+      const item = block as Record<string, unknown>;
+      if (item.type !== "toolCall" || item.name !== SKILL_SELECTOR_TOOL_NAME || !item.arguments || typeof item.arguments !== "object" || Array.isArray(item.arguments)) continue;
+      const parsed = validateSkillSelectorOutput(item.arguments as Record<string, unknown>, catalog);
+      if (parsed) return parsed;
+    }
+  }
+  return undefined;
+}

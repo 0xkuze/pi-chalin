@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { EvidenceClaim, RunState, RunStepState } from "../domain/schemas.ts";
-import { truncateText } from "./runner-utils.ts";
+import { compactHandoffItems, compactHandoffText, truncateText } from "./runner-utils.ts";
 
 export interface ContextPacket {
   summary: string;
@@ -23,11 +23,11 @@ export function buildContextPacket(run: RunState, currentStep: RunStepState, pre
   const claims = priorSteps.flatMap((step) => step.output?.claims ?? step.output?.structuredHandoff?.evidenceClaims ?? []).slice(0, 16);
   const changedFiles = sanitizeWorkspacePathList(unique(priorSteps.flatMap((step) => step.output?.structuredHandoff?.changedFiles ?? step.metrics?.filesTouched ?? [])), cwd);
   const verification = unique(priorSteps.flatMap((step) => step.output?.structuredHandoff?.verification ?? []))
-    .map((item) => sanitizeContextText(item, roots));
+    .map((item) => sanitizeContextText(compactHandoffText(item, 260), roots));
   const filesRead = sanitizeWorkspacePathList(unique(priorSteps.flatMap((step) => step.metrics?.filesRead ?? [])), cwd).slice(0, 80);
   const knownGaps = unique([
-    ...priorSteps.flatMap((step) => step.output?.structuredHandoff?.risks ?? []),
-    ...priorSteps.flatMap((step) => step.output?.reviewerVerdict?.missingCoverage ?? []),
+    ...priorSteps.flatMap((step) => step.output?.structuredHandoff?.risks ?? []).map((item) => compactHandoffText(item, 260)),
+    ...priorSteps.flatMap((step) => step.output?.reviewerVerdict?.missingCoverage ?? []).map((item) => compactHandoffText(item, 260)),
     ...priorSteps.filter((step) => step.status === "failed" || step.status === "skipped").map((step) => step.error ?? step.skipReason ?? `${step.agent}/${step.id} did not complete`),
   ]).map((item) => sanitizeContextText(item, roots)).slice(0, 12);
   const summary = sanitizeContextText(buildContextSummary(priorSteps, previous, tokenBudget), roots);
@@ -48,15 +48,52 @@ function buildContextSummary(priorSteps: RunStepState[], previous: string | unde
   const immediate = previous?.trim();
   const upstream = priorSteps
     .map((step) => {
-      const text = (step.output?.handoff ?? step.output?.text ?? "").trim();
+      const text = stepContextSummary(step);
       return text ? `- ${step.agent}/${step.id}: ${text}` : undefined;
     })
     .filter((line): line is string => Boolean(line));
+  const visibleUpstream = immediate
+    ? upstream.filter((line) => !summaryAlreadyRepresented(immediate, line))
+    : upstream;
   const parts = [
     immediate ? `previous: ${immediate}` : undefined,
-    upstream.length ? `upstream:\n${upstream.join("\n")}` : undefined,
+    visibleUpstream.length ? `upstream:\n${visibleUpstream.join("\n")}` : undefined,
   ].filter((line): line is string => Boolean(line));
   return truncateText(parts.join("\n"), tokenBudget);
+}
+
+function stepContextSummary(step: RunStepState): string {
+  const handoff = step.output?.structuredHandoff;
+  if (!handoff) return (step.output?.handoff ?? step.output?.text ?? "").trim();
+  return [
+    compactHandoffText(handoff.summary, 260),
+    handoff.changedFiles.length ? `changed: ${compactHandoffItems(handoff.changedFiles, { itemLimit: 12, itemMax: 160 })}` : undefined,
+    handoff.verification.length ? `verification: ${compactHandoffItems(handoff.verification, { itemLimit: 6, itemMax: 220 })}` : undefined,
+    handoff.risks.length ? `risks: ${compactHandoffItems(handoff.risks, { itemLimit: 6, itemMax: 220 })}` : undefined,
+    handoff.nextActions.length ? `next: ${compactHandoffItems(handoff.nextActions, { itemLimit: 6, itemMax: 220 })}` : undefined,
+  ].filter((line): line is string => Boolean(line)).join(" ");
+}
+
+function summaryAlreadyRepresented(previous: string, upstreamLine: string): boolean {
+  const normalizedPrevious = normalizeSummaryText(previous);
+  const normalizedLine = normalizeSummaryText(summarySegment(upstreamLine.replace(/^-\s+[^:]+:\s*/, "")));
+  if (!normalizedLine) return false;
+  const probe = normalizedLine.slice(0, Math.min(90, normalizedLine.length));
+  return probe.length >= 32 && normalizedPrevious.includes(probe);
+}
+
+function summarySegment(value: string): string {
+  const markers = [" changed:", " verification:", " risks:", " next:"];
+  const lower = value.toLowerCase();
+  const positions = markers
+    .map((marker) => lower.indexOf(marker))
+    .filter((index) => index > 0);
+  const end = positions.length ? Math.min(...positions) : value.length;
+  return value.slice(0, end);
+}
+
+function normalizeSummaryText(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
 function sanitizeContextText(value: string, roots: string[]): string {
@@ -140,8 +177,8 @@ export function formatContextPacket(packet: ContextPacket | undefined): string |
     `ContextPacket: workUnits=${packet.workUnitIds.join(", ") || "none"} budget=${packet.tokenBudget}`,
     packet.summary ? `summary: ${packet.summary}` : undefined,
     packet.changedFiles.length ? `changedFiles: ${packet.changedFiles.slice(0, 12).join(", ")}` : undefined,
-    packet.verification.length ? `verification: ${packet.verification.slice(0, 8).join("; ")}` : undefined,
-    packet.knownGaps.length ? `knownGaps: ${packet.knownGaps.slice(0, 8).join("; ")}` : undefined,
+    packet.verification.length ? `verification: ${compactHandoffItems(packet.verification, { itemLimit: 8, itemMax: 220 })}` : undefined,
+    packet.knownGaps.length ? `knownGaps: ${compactHandoffItems(packet.knownGaps, { itemLimit: 8, itemMax: 220 })}` : undefined,
     packet.filesRead.length ? `alreadyRead: ${packet.filesRead.slice(0, 24).join(", ")}` : undefined,
     packet.unknowns.length ? `unknowns: ${packet.unknowns.map((claim) => `${claim.subject}: ${claim.summary}`).slice(0, 6).join("; ")}` : undefined,
   ];

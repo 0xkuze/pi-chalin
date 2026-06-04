@@ -36,7 +36,7 @@ export type ChalinRouteWidgetDetails = {
 
 type ChalinRouteToolParams = {
   task: string;
-  topology?: "auto" | "sequential" | "dag";
+  topology?: "auto" | "sequential" | "dag" | "chain" | "parallel";
   steps?: Array<{ id?: string; agent: string; task: string }>;
   stages?: Array<{ id?: string; name?: string; tasks?: Array<{ id?: string; agent: string; task: string }> }>;
 };
@@ -54,9 +54,12 @@ export function formatChalinRoutePlanWidget(params: ChalinRouteToolParams): stri
 }
 
 export function formatChalinRouteRequestWidget(params: ChalinRouteToolParams): string {
+  const steps = proposedWidgetSteps(params);
+  const agents = steps.map((step) => step.agent).filter(Boolean);
   return [
-    "chalin · running · 0/1",
-    shortText(params.task, 15, 52),
+    `chalin_route · delegating · ${params.topology ?? "auto"}`,
+    `task: ${shortText(params.task, 15, 80)}`,
+    agents.length ? `agents: ${compactAgentPath(agents)}` : "agents: auto",
   ].join("\n");
 }
 
@@ -68,26 +71,18 @@ export function formatChalinRunWidgetFromDetails(details: ChalinRouteWidgetDetai
   const run = details.run;
   if (!run) return "chalin · pending";
   const visibleItems = visibleWorkItems(run);
-  const active = activeWidgetStep(run.status, run.steps);
-  const parentAgent = active?.agent ?? firstVisibleAgent(visibleItems) ?? details.route?.agents[0] ?? "chalin";
-  const total = visibleItems.length || 1;
-  const completed = visibleItems.length
-    ? visibleItems.filter((item) => isFinishedItemStatus(item.status)).length
+  const countItems = flattenWorkItems(visibleItems);
+  const total = countItems.length || 1;
+  const completed = countItems.length
+    ? countItems.filter((item) => isFinishedItemStatus(item.status)).length
     : run.status === "complete" || run.status === "stale-repaired"
       ? 1
       : 0;
   const displayStatus = statusLabel(run.status);
-  if ((run.status === "complete" || run.status === "stale-repaired") && visibleItems.length > 0) {
-    return [
-      `chalin · ${parentAgent} · ${displayStatus} · ${completed}/${total}`,
-      `${visibleItems.length} task${visibleItems.length === 1 ? "" : "s"} done`,
-    ].join("\n");
-  }
-  const mission = shortText(run.rootTask ?? details.route?.reason ?? active?.task ?? "", 15, 120);
-  const current = currentWidgetLine(active, visibleItems) ?? mission;
+  const active = activeWidgetStep(run.status, run.steps);
+  const mission = shortText(run.rootTask ?? details.route?.reason ?? active?.task ?? "", 10, 80);
   return [
-    `chalin · ${parentAgent} · ${displayStatus} · ${completed}/${total}`,
-    current || undefined,
+    `chalin · ${displayStatus} · ${completed}/${total}${mission ? ` · ${mission}` : ""}`,
     ...visibleItems.slice(0, 8).flatMap((item, index) => formatWorkItemTree(item, index, visibleItems.length)),
     visibleItems.length > 8 ? `└ … +${visibleItems.length - 8} more` : undefined,
   ].filter((line): line is string => Boolean(line)).join("\n");
@@ -150,6 +145,7 @@ type VisibleWorkItem = {
   step?: ChalinRouteWidgetStep;
   unit?: WorkUnit;
   children?: VisibleWorkItem[];
+  counted?: boolean;
 };
 
 function plannedStepsFromRoute(route: RouteDecision): ChalinRouteWidgetStep[] {
@@ -160,9 +156,15 @@ function plannedStepsFromRoute(route: RouteDecision): ChalinRouteWidgetStep[] {
 }
 
 function plannedWidgetSteps(params: ChalinRouteToolParams): ChalinRouteWidgetStep[] {
-  if (params.topology === "sequential") return params.steps ?? [];
-  if (params.topology === "dag") return params.stages?.flatMap((stage) => (stage.tasks ?? []).map((step) => ({ ...step, id: `${stage.id ?? "stage"}:${step.id ?? step.agent}` }))) ?? [];
+  const topology = normalizeWidgetTopology(params.topology);
+  if (topology === "sequential") return params.steps ?? [];
+  if (topology === "dag") return params.stages?.flatMap((stage) => (stage.tasks ?? []).map((step) => ({ ...step, id: `${stage.id ?? "stage"}:${step.id ?? step.agent}` }))) ?? [];
   return [];
+}
+
+function proposedWidgetSteps(params: ChalinRouteToolParams): ChalinRouteWidgetStep[] {
+  if (params.stages?.length) return params.stages.flatMap((stage) => (stage.tasks ?? []).map((step) => ({ ...step, id: `${stage.id ?? "stage"}:${step.id ?? step.agent}` })));
+  return params.steps ?? [];
 }
 
 function visibleWorkItems(run: NonNullable<ChalinRouteWidgetDetails["run"]>): VisibleWorkItem[] {
@@ -174,10 +176,10 @@ function visibleItemsFromUnits(units: WorkUnit[], steps: ChalinRouteWidgetStep[]
   const items: VisibleWorkItem[] = [];
   const unitStepLookup = stepLookupByUnit(steps);
   for (const unit of units) {
-    const step = selectRepresentativeStep(unit, unitStepLookup.get(unit.id) ?? []);
+    const step = selectRepresentativeStep(unit, stepsForUnit(unit, unitStepLookup, steps));
     items.push({
       id: displayId(unit.id),
-      title: unit.title || step?.task || unit.id,
+      title: step?.task || unit.title || unit.id,
       agent: step?.agent ?? unit.kind,
       status: visibleStatus(unit.status, step),
       step,
@@ -186,6 +188,15 @@ function visibleItemsFromUnits(units: WorkUnit[], steps: ChalinRouteWidgetStep[]
     });
   }
   return items;
+}
+
+function stepsForUnit(unit: WorkUnit, unitStepLookup: Map<string, ChalinRouteWidgetStep[]>, steps: ChalinRouteWidgetStep[]): ChalinRouteWidgetStep[] {
+  const direct = unitStepLookup.get(unit.id) ?? [];
+  const ids = new Set([unit.workerStepId, unit.reviewerStepId, unit.finalReviewerStepId, unit.sourceStepId].filter((id): id is string => Boolean(id)));
+  if (ids.size === 0) return direct;
+  const byReference = steps.filter((step) => typeof step.id === "string" && ids.has(step.id));
+  if (byReference.length === 0) return direct;
+  return [...direct, ...byReference.filter((step) => !direct.includes(step))];
 }
 
 function visibleItemsFromSteps(steps: ChalinRouteWidgetStep[], includeNested: boolean): VisibleWorkItem[] {
@@ -206,6 +217,7 @@ function visibleItemsFromSteps(steps: ChalinRouteWidgetStep[], includeNested: bo
       agent: step.agent,
       status: step.status ?? "pending",
       step,
+      counted: true,
       children: includeNested ? nestedItemsFromStep(step) : [],
     });
   }
@@ -226,7 +238,7 @@ function nestedItemsFromStep(step: ChalinRouteWidgetStep | undefined): VisibleWo
       ? visibleItemsFromUnits(run.workUnits, runLike.steps, false)
       : visibleItemsFromSteps(runLike.steps, false);
   });
-  return withUniqueDisplayIds(nestedItems);
+  return withUniqueDisplayIds(markUncounted(nestedItems));
 }
 
 function stepLookupByUnit(steps: ChalinRouteWidgetStep[]): Map<string, ChalinRouteWidgetStep[]> {
@@ -241,25 +253,28 @@ function stepLookupByUnit(steps: ChalinRouteWidgetStep[]): Map<string, ChalinRou
 }
 
 function selectRepresentativeStep(unit: WorkUnit | undefined, steps: ChalinRouteWidgetStep[]): ChalinRouteWidgetStep | undefined {
+  const active = steps.find((step) => step.status === "running")
+    ?? steps.find((step) => step.status === "pending")
+    ?? steps.find((step) => step.status === "paused");
+  if (active) return active;
   const preferredIds = [unit?.workerStepId, unit?.reviewerStepId, unit?.finalReviewerStepId].filter((id): id is string => Boolean(id));
   for (const id of preferredIds) {
     const found = steps.find((step) => step.id === id);
     if (found) return found;
   }
-  return steps.find((step) => step.status === "running")
-    ?? steps.find((step) => step.status === "pending")
-    ?? steps.find((step) => step.status === "paused")
-    ?? [...steps].reverse().find((step) => step.status !== "failed")
+  return [...steps].reverse().find((step) => step.status !== "failed")
     ?? steps.at(-1);
 }
 
 function visibleStatus(unitStatus: RunStepStatus, step: ChalinRouteWidgetStep | undefined): RunStepStatus {
+  if (step?.status === "running" || step?.status === "pending" || step?.status === "paused") return step.status;
+  if (unitStatus === "pending" && step?.status && isFinishedItemStatus(step.status)) return step.status;
   if (unitStatus === "failed" && step && step.status !== "failed") return step.status ?? "running";
   return unitStatus;
 }
 
 function formatWorkItem(item: VisibleWorkItem, index: number, total: number): string {
-  return `${treePrefix(index, total)} ${statusGlyph(item.status)} ${item.agent} - ${item.id} — ${shortText(workItemTitle(item))}`;
+  return `${treePrefix(index, total)} ${statusGlyph(item.status)} ${item.agent} - ${shortText(workItemTitle(item), 10, 80)}`;
 }
 
 function workItemTitle(item: VisibleWorkItem): string {
@@ -268,33 +283,51 @@ function workItemTitle(item: VisibleWorkItem): string {
   return item.title;
 }
 
-function currentWidgetLine(active: ChalinRouteWidgetStep | undefined, items: VisibleWorkItem[]): string | undefined {
-  const current = active
-    ? items.find((item) => item.step === active)
-      ?? items.find((item) => item.children?.some((child) => child.step === active))
-    : items.find((item) => item.status === "running") ?? items.find((item) => item.status === "pending");
-  const agent = current?.agent ?? active?.agent;
-  const title = current ? workItemTitle(current) : active?.task;
-  if (!agent || !title) return undefined;
-  return `current: ${agent} - ${shortText(title, 15, 80)}`;
-}
-
 function formatWorkItemTree(item: VisibleWorkItem, index: number, total: number): string[] {
   const children = item.children ?? [];
   return [
     formatWorkItem(item, index, total),
-    ...children.slice(0, 8).map((child, childIndex) => `   ${formatWorkItem(child, childIndex, children.length)}`),
+    ...children.slice(0, 8).flatMap((child, childIndex) => formatWorkItemSubtree(child, childIndex, children.length, "   ")),
     children.length > 8 ? `   └ … +${children.length - 8} more` : undefined,
+  ].filter((line): line is string => Boolean(line));
+}
+
+function formatWorkItemSubtree(item: VisibleWorkItem, index: number, total: number, indent: string): string[] {
+  const children = item.children ?? [];
+  return [
+    `${indent}${formatWorkItem(item, index, total)}`,
+    ...children.slice(0, 8).flatMap((child, childIndex) => formatWorkItemSubtree(child, childIndex, children.length, `${indent}   `)),
+    children.length > 8 ? `${indent}   └ … +${children.length - 8} more` : undefined,
   ].filter((line): line is string => Boolean(line));
 }
 
 function withUniqueDisplayIds(items: VisibleWorkItem[]): VisibleWorkItem[] {
   const counts = new Map<string, number>();
-  return items.map((item) => {
-    const count = (counts.get(item.id) ?? 0) + 1;
-    counts.set(item.id, count);
-    return count === 1 ? item : { ...item, id: `${item.id}-${count}` };
-  });
+  return items.map((item) => uniqueDisplayItem(item, counts));
+}
+
+function uniqueDisplayItem(item: VisibleWorkItem, counts: Map<string, number>): VisibleWorkItem {
+  const count = (counts.get(item.id) ?? 0) + 1;
+  counts.set(item.id, count);
+  const normalized = count === 1 ? item : { ...item, id: `${item.id}-${count}` };
+  return normalized.children?.length
+    ? { ...normalized, children: normalized.children.map((child) => uniqueDisplayItem(child, counts)) }
+    : normalized;
+}
+
+function flattenWorkItems(items: VisibleWorkItem[]): VisibleWorkItem[] {
+  return items.flatMap((item) => [
+    ...(item.counted === false ? [] : [item]),
+    ...flattenWorkItems(item.children ?? []),
+  ]);
+}
+
+function markUncounted(items: VisibleWorkItem[]): VisibleWorkItem[] {
+  return items.map((item) => ({
+    ...item,
+    counted: false,
+    children: markUncounted(item.children ?? []),
+  }));
 }
 
 function statusGlyph(status: RunStepStatus | undefined): string {
@@ -325,6 +358,12 @@ function routeTitle(topology: ChalinRouteToolParams["topology"], task: string): 
   return `${topology ?? "auto"} · ${shortText(task, 15, 52)}`;
 }
 
+function normalizeWidgetTopology(topology: ChalinRouteToolParams["topology"]): "auto" | "sequential" | "dag" | undefined {
+  if (topology === "chain") return "sequential";
+  if (topology === "parallel") return "dag";
+  return topology;
+}
+
 function compactAgentPath(agents: string[]): string {
   const compact = agents.slice(0, 5).join(" → ");
   return agents.length > 5 ? `${compact} → +${agents.length - 5}` : compact;
@@ -353,12 +392,6 @@ export function footerStateForRun(run: RunState): ChalinFooterState {
 
 export function routeIntent(route: RouteDecision): string {
   return route.agents[0] ?? route.kind;
-}
-
-function firstVisibleAgent(items: VisibleWorkItem[]): string | undefined {
-  return items.find((item) => item.status === "running")?.agent
-    ?? items.find((item) => item.status === "pending")?.agent
-    ?? items[0]?.agent;
 }
 
 function isFinishedItemStatus(status: RunStepStatus): boolean {

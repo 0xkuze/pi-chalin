@@ -16,6 +16,8 @@ Rules:
 - Treat the primary worktree as source of truth plus the isolated patch intent supplied in the task.
 - Use targeted edits only. Do not rewrite whole files.
 - Do not invent broader fixes; reconcile only the conflicting change.
+- Do not choose one side wholesale unless evidence shows the other side is obsolete. Preserve both primary behavior and isolated patch intent when compatible.
+- Do not change public behavior, dependencies, generated artifacts, or unrelated formatting to make the merge easier.
 - If conflict intent is unclear or unsafe, stop and report exactly what human decision is needed.
 - Run the nearest safe validation command only when it is obvious and cheap.
 

@@ -312,6 +312,7 @@ async function handleSkillsCommand(ctx: ExtensionContext, catalog: SkillCatalog,
       config: loaded.config,
       task,
       context: {
+        cwd: ctx.cwd,
         model: ctx.model,
         modelRegistry: ctx.modelRegistry,
         signal: ctx.signal,

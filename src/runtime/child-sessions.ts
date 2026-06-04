@@ -18,6 +18,7 @@ export interface ChildSessionManagerOptions {
   cwd: string;
   runId: string;
   step: RunStepState;
+  parentSessionFile?: string;
   extensionContext?: Pick<ExtensionContext, "sessionManager">;
 }
 
@@ -38,7 +39,11 @@ export function chalinChildSessionDir(options: ChildSessionDirOptions): string {
 }
 
 export function createChalinChildSessionManager(options: ChildSessionManagerOptions): SessionManager {
-  const parentSessionFile = options.extensionContext?.sessionManager.getSessionFile();
+  if (options.step.childSessionFile && fs.existsSync(options.step.childSessionFile)) {
+    return SessionManager.open(options.step.childSessionFile, undefined, options.cwd);
+  }
+
+  const parentSessionFile = options.parentSessionFile ?? options.extensionContext?.sessionManager.getSessionFile();
   const sessionDir = chalinChildSessionDir({
     cwd: options.cwd,
     runId: options.runId,

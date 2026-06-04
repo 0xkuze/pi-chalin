@@ -5,7 +5,10 @@ import { loadEffectiveConfig } from "../config/config.ts";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { buildChalinOrchestratorSystemPrompt } from "../orchestration/orchestration.ts";
 import { chalinSessionIdFromContext, isUsableStepHandoff, loadResumableRunState } from "../runner/runner-state.ts";
-import { beginChalinTurn, getInlineChangedPaths, getInlineCriticalGuardContextMessage, isSemanticPolicyJudgeRequestFresh, recordInlineToolCompletion, recordInlineToolStart, recordSemanticPolicyJudgeResult } from "../runtime/state.ts";
+import { buildCompletionGateContextMessage, buildCompletionGateSteer, completionGateDecisionKey, type CompletionGateDecision } from "../runtime/completion-gate.ts";
+import { compactEvidenceObservation } from "../runtime/evidence-ledger.ts";
+import { beginChalinTurn, getInlineChangedPaths, getInlineCompletionGatePayload, getInlineCriticalGuardContextMessage, isSemanticPolicyJudgeRequestFresh, recordCompletionGateBlock, recordInlineToolCompletion, recordInlineToolStart, recordSemanticPolicyJudgeResult } from "../runtime/state.ts";
+import { runCompletionGateJudge, shouldApplyCompletionGateDecision, type CompletionGateJudgeInput } from "../skills/completion-gate-judge.ts";
 import { formatSemanticPolicyJudgeSteer, runSemanticPolicyJudge, shouldApplySemanticPolicyJudgeResult } from "../skills/semantic-policy-judge.ts";
 import type { InlineNudgeKind, PolicyJudgeDecision } from "../runtime/state.ts";
 import type { RunState } from "../domain/schemas.ts";
@@ -29,6 +32,14 @@ const pendingToolStarts = new WeakMap<object, Map<string, PendingToolArgs[]>>();
 const pendingHumanInputBlocks = new WeakMap<object, PendingHumanInputBlock>();
 type PiThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
 const orchestratorThinkingRestore = new WeakMap<object, PiThinkingLevel>();
+const completionGateEnabledForTurn = new WeakMap<object, boolean>();
+const completionGateFollowupKeys = new WeakMap<object, Set<string>>();
+const completionGateContextCache = new WeakMap<object, CompletionGateJudgeInput["context"]>();
+const semanticPolicyJudgeControllers = new WeakMap<object, Set<AbortController>>();
+type CompletionGateJudgeRunner = (input: CompletionGateJudgeInput) => Promise<CompletionGateDecision | undefined>;
+type SemanticPolicyJudgeRunner = typeof runSemanticPolicyJudge;
+let completionGateJudgeForTests: CompletionGateJudgeRunner | undefined;
+let semanticPolicyJudgeForTests: SemanticPolicyJudgeRunner | undefined;
 
 function runHookEffect<A>(span: string, run: () => A | Promise<A>): Promise<A> {
   return Effect.runPromise(Effect.tryPromise({ try: async () => run(), catch: (error) => error }).pipe(Effect.withSpan(span)));
@@ -38,8 +49,16 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
   pi.on("input", (event, ctx) => Effect.runPromise(inputGuardEffect(event, ctx)));
 
   pi.on("before_agent_start", (event, ctx) => runHookEffect("autoroute.beforeAgentStart", async () => {
+    abortSemanticPolicyJudges(pi);
+    clearCompletionGateFollowups(pi);
+    clearCompletionGateJudgeContext(pi);
     const loaded = loadEffectiveConfig({ cwd: ctx.cwd });
-    if (!loaded.config.enabled) return;
+    if (!loaded.config.enabled) {
+      setCompletionGateEnabledForTurn(pi, false);
+      return;
+    }
+    setCompletionGateEnabledForTurn(pi, true);
+    rememberCompletionGateJudgeContext(pi, ctx);
     const promptText = typeof event.prompt === "string" ? event.prompt : "";
     beginChalinTurn({ prompt: promptText, cwd: ctx.cwd });
     const catalog = AgentCatalog.load({ cwd: ctx.cwd });
@@ -67,25 +86,38 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
   });
 
   pi.on("context", (event) => {
+    const messages = [...event.messages];
+    if (isCompletionGateEnabledForTurn(pi) && !hasCustomMessage(messages, "pi-chalin-completion-gate")) {
+      messages.push({
+        role: "custom",
+        customType: "pi-chalin-completion-gate",
+        content: buildCompletionGateContextMessage(),
+        display: false,
+        timestamp: Date.now(),
+      });
+    }
     const criticalGuard = getInlineCriticalGuardContextMessage();
-    if (!criticalGuard) return;
+    if (criticalGuard && !hasCustomMessage(messages, "pi-chalin-inline-critical-guard")) {
+      messages.push({
+        role: "custom",
+        customType: "pi-chalin-inline-critical-guard",
+        content: criticalGuard,
+        display: false,
+        timestamp: Date.now(),
+      });
+    }
+    if (messages.length === event.messages.length) return;
     return {
-      messages: [
-        ...event.messages,
-        {
-          role: "custom",
-          customType: "pi-chalin-inline-critical-guard",
-          content: criticalGuard,
-          display: false,
-          timestamp: Date.now(),
-        },
-      ],
+      messages,
     };
   });
+
+  pi.on("message_end", (event, ctx) => runCompletionGateMessageEnd(pi, event, ctx));
 
   pi.on("agent_end", (_event, ctx) => {
     clearPendingToolStarts(pi);
     clearPendingHumanInputBlock(pi);
+    abortSemanticPolicyJudges(pi);
     restoreOrchestratorThinking(pi);
     setChalinStatus(ctx, { kind: "idle" });
   });
@@ -117,6 +149,7 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
   });
 
   pi.on("tool_execution_end", (event, ctx) => {
+    rememberCompletionGateJudgeContext(pi, ctx);
     if (event.toolName === "chalin_route" || event.toolName === "chalin_resume") {
       if (event.isError) return;
       const blockedReason = workflowBlockedReason(event);
@@ -128,9 +161,26 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
         }, { triggerTurn: false, deliverAs: "steer" });
         return;
       }
+      const delegatedPendingReason = delegatedMutableWorkPendingReason(event);
+      if (delegatedPendingReason) {
+        pi.sendMessage({
+          customType: "pi-chalin-delegated-work-pending-nudge",
+          content: [
+            `${event.toolName} returned a paused delegated run with pending delegated workspace mutation (${delegatedPendingReason}).`,
+            "Do not continue this delegated implementation inline with normal edit/write/bash tools.",
+            "Ask pending human questions when present, then use chalin_resume for the same run. If resume cannot make progress, report the concrete harness blocker instead of bypassing the run.",
+          ].join("\n"),
+          display: false,
+        }, { triggerTurn: false, deliverAs: "steer" });
+        return;
+      }
       pi.sendMessage({
         customType: "pi-chalin-synthesis-nudge",
-        content: `${event.toolName} finished. Answer the user's original prompt now from the Final answer material in the tool result. Do not call another tool unless that material explicitly names a critical blocking gap.`,
+        content: [
+          `${event.toolName} finished. Answer the user's original prompt from the Final answer material in the tool result after the completion gate passes.`,
+          "Do not call another tool unless that material explicitly names a critical blocking gap or the completion gate finds missing evidence.",
+          buildCompletionGateSteer("route"),
+        ].join("\n"),
         display: false,
       }, { triggerTurn: false, deliverAs: "steer" });
       scheduleNonInteractiveShutdown(ctx);
@@ -138,13 +188,15 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
     }
 
     const eventArgs = (event as { args?: { command?: unknown; path?: unknown } }).args;
+    const eventResult = (event as { result?: unknown }).result;
     const fallbackArgs = takeToolStart(pi, event.toolName);
-    const { shouldProgressNudge, shouldReadyToVerifyNudge, shouldFailureNudge, shouldCompletionNudge, shouldTestCoverageNudge, shouldWeakTestCoverageNudge, shouldPackageMetadataNudge, shouldParallelSurfaceNudge, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldTerminalCompletionNudge, shouldPostTerminalDriftNudge, shouldPreMutationVerificationNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldLocatorLoopNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, verificationCommand, docsOnlyMutation, policyJudge } = recordInlineToolCompletion({
+    const { shouldProgressNudge, shouldReadyToVerifyNudge, shouldFailureNudge, shouldCompletionNudge, shouldTestCoverageNudge, shouldWeakTestCoverageNudge, shouldPackageMetadataNudge, shouldParallelSurfaceNudge, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldTerminalCompletionNudge, shouldPostTerminalDriftNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldLocatorLoopNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, verificationCommand, docsOnlyMutation, policyJudge } = recordInlineToolCompletion({
       toolName: event.toolName,
       isError: event.isError,
       command: typeof eventArgs?.command === "string" ? eventArgs.command : fallbackArgs?.command,
       path: typeof eventArgs?.path === "string" ? eventArgs.path : fallbackArgs?.path,
       argsText: eventArgs ? JSON.stringify(eventArgs) : fallbackArgs?.argsText,
+      observation: toolResultObservation(eventResult),
     });
     const semanticReviewScheduled = scheduleSemanticPolicyJudge(pi, ctx, policyJudge);
     const deferToSemantic = (kind: InlineNudgeKind): boolean => shouldDeferInlineNudgeToSemantic(policyJudge, kind, semanticReviewScheduled);
@@ -152,13 +204,6 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
       pi.sendMessage({
         customType: "pi-chalin-inline-workspace-boundary-nudge",
         content: "Hard stop: inline project work escaped the current workspace root. Do not write or verify in a home/sibling/tmp directory unless the user explicitly provided that absolute target. Recreate the required files under the current cwd using relative paths such as `package.json`, `src/...`, `test/...`, and `README.md`, then run verification from the current cwd. A final answer is invalid until the current workspace contains the delivered source, tests, docs, and manifest.",
-        display: false,
-      }, { triggerTurn: false, deliverAs: "steer" });
-    }
-    if (shouldPreMutationVerificationNudge) {
-      pi.sendMessage({
-        customType: "pi-chalin-inline-pre-mutation-verification-nudge",
-        content: "This bounded code+test task ran verification before any edit. Stop baseline checks now: edit the requested source plus focused tests, then run one nearest verification after mutation. Do not run another pre-edit test command.",
         display: false,
       }, { triggerTurn: false, deliverAs: "steer" });
     }
@@ -186,21 +231,14 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
     if (shouldSourceAndTestReadyNudge && !deferToSemantic("source-and-test-ready")) {
       pi.sendMessage({
         customType: "pi-chalin-inline-source-test-ready-nudge",
-        content: [
-          "Source and tests changed. Stop expanding scope and run the nearest package verification now.",
-          "Self-check before bash: changed behavior, one boundary/counterexample, one preservation/no-op path, runner-compatible imports/assertions, requested test path/glob/extension, and requested package/API/docs/README metadata when relevant. For scaffolds, docs/README are part of the pre-verification batch; do not add them after a passing test.",
-          "If the changed test file only has an empty/smoke/no-op case while the prompt names several criteria, edit tests now instead of running bash; assertions must visibly cover the named criteria.",
-          "Coverage check only if relevant: derive edge cases from the user's contract and changed code, then cover normal behavior, invalid/empty/external inputs, boundaries, ordering/idempotence/mutation invariants, preservation paths, runner discoverability, and deterministic async/time behavior. Do not copy a memorized domain checklist; choose the smallest evidence set that proves the requested behavior.",
-          "Do not read/rewrite more files just to inspect your own edits. Tiny stubs may be replaced once; existing large/partial files stay targeted edits.",
-          "If verification fails, patch the concrete root cause and rerun once. If it passes, final immediately; no changed-file readback after pass unless the verification output itself proves a concrete missing-artifact gap.",
-        ].join("\n"),
+        content: "Source and tests changed. Run the nearest meaningful repo evidence now. Before bash, use LLM judgment: changed behavior, one meaningful boundary or preservation path, runner-compatible tests, and requested docs/package metadata must already be present when relevant. If coverage is only smoke/no-op, edit it first. If evidence fails, patch the concrete root cause and rerun once; if it passes, final after the completion gate.",
         display: false,
       }, { triggerTurn: false, deliverAs: "steer" });
     }
     if (shouldVerificationLoopNudge && !deferToSemantic("verification-loop")) {
       pi.sendMessage({
         customType: "pi-chalin-inline-verification-loop-nudge",
-        content: "Verification is looping. Do not run another check until one focused edit addresses the latest failure. If the latest verification passed, use one changed-file readback and final.",
+        content: "Evidence is looping. Do not run another check until one focused edit addresses the latest failure. If the latest evidence already covers the request, final after the completion gate.",
         display: false,
       }, { triggerTurn: false, deliverAs: "steer" });
     }
@@ -208,8 +246,9 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
       pi.sendMessage({
         customType: "pi-chalin-inline-post-failure-evidence-nudge",
         content: [
-          "A verification failure already gave you a concrete signal, and you have now spent multiple tools investigating without editing.",
-          "Stop diagnostic probing. Patch the smallest root cause from the failure plus current evidence, then rerun the nearest verification once. If the needed API is still unknown, use one targeted read of official/local docs or existing tests, not more exploratory shell probes.",
+          "Evidence debt is still open: a post-mutation verification or shell check failed earlier.",
+          "Do NOT final from narrower helper, parser, static, or diagnostic evidence unless it covers the same user-facing acceptance surface that failed or the user requested.",
+          "Use LLM judgment over the failed output, changed code, and latest evidence. If the failure is behavioral, patch the smallest plausible root cause and run representative evidence for the requested behavior. If the failure is environment/tooling/config/dependency related, preserve the latest plausible implementation hypothesis, seek direct representative evidence or a faithful surrogate, and report the unresolved blocker instead of completion if that evidence cannot run.",
         ].join("\n"),
         display: false,
       }, { triggerTurn: false, deliverAs: "steer" });
@@ -226,8 +265,9 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
         customType: "pi-chalin-terminal-completion-nudge",
         content: [
           "The requested external workflow completed successfully.",
-          "Final now. Do not call tools, rewrite PR body files, rerun support commands, or keep polishing local artifacts.",
+          "Run the completion gate. If it passes, final now. Do not call tools, rewrite PR body files, rerun support commands, or keep polishing local artifacts.",
           "Use the user's language and give a compact receipt with the PR/action result, verification already run, and any important notes.",
+          buildCompletionGateSteer("terminal"),
         ].join("\n"),
         display: false,
       }, { triggerTurn: false, deliverAs: "steer" });
@@ -246,14 +286,20 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
     if (shouldPostVerificationShellNudge && !deferToSemantic("post-verification-shell")) {
       pi.sendMessage({
         customType: "pi-chalin-post-verification-shell-nudge",
-        content: "Verification already passed and no later edit was observed. Stop running shell/test commands; final now. Do not read back after pass just to summarize; if this command exposed a concrete defect, edit that root cause and rerun the nearest verification once.",
+        content: [
+          "Post-mutation evidence already ran and no later edit was observed. Stop running shell commands just to gain confidence; final after the completion gate passes. If this command exposed a concrete defect, edit that root cause and rerun the nearest meaningful evidence once.",
+          buildCompletionGateSteer("inline"),
+        ].join("\n"),
         display: false,
       }, { triggerTurn: false, deliverAs: "steer" });
     }
     if (shouldPostVerificationExplorationNudge && !deferToSemantic("post-verification-exploration")) {
       pi.sendMessage({
         customType: "pi-chalin-post-verification-exploration-nudge",
-        content: "Verification already passed and no later edit was observed. Stop post-verification discovery: final now. Do not read back just to summarize; if this tool exposed a concrete defect, patch that root cause and rerun the nearest verification once.",
+        content: [
+          "Post-mutation evidence already ran and no later edit was observed. Stop discovery just to summarize; final after the completion gate passes. If this tool exposed a concrete defect, patch that root cause and rerun the nearest meaningful evidence once.",
+          buildCompletionGateSteer("inline"),
+        ].join("\n"),
         display: false,
       }, { triggerTurn: false, deliverAs: "steer" });
     }
@@ -262,13 +308,7 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
         customType: "pi-chalin-inline-progress-nudge",
         content: docsOnlyMutation
           ? "Docs changed. The next tool must be `read` on the updated docs artifact; do not run find/grep/bash after the write or continue polishing. Name unresolved surfaces as searched/not-found only after readback. If readback is complete, final in exactly three one-line bullets: Changed, Verification, Notes."
-          : [
-            "Files changed. Keep the loop proportional: complete the nearest source/test contract, run one focused verification, then patch only concrete failures.",
-            "If the first mutation happened before reading an existing source/test surface and this is not explicit empty greenfield work, pause and read the starter imports/stubs now; existing modules and runner-discovered tests define the acceptance surface.",
-            "If tests were requested or the test path is obvious, add/update the focused tests before the first verification after a source edit. Put coverage where the runner discovers it; for Python unittest prefer `tests/test_<stem>.py` plus `python -m unittest discover -s tests` when a `tests/` root exists. If you wrote a sibling module/test before reading the starter surface, consolidate to the starter import/path and remove the duplicate before verification.",
-            "Preserve compatibility and requested package/CLI/API metadata, exports, real command path, requested test paths/extensions, and runner-discoverable tests when relevant.",
-            "After a passing verification, final with supported claims. Do not read back just to summarize; read changed files only for concrete missing evidence.",
-          ].join("\n"),
+          : "Files changed. Keep the loop compact: finish the nearest source/test contract, run one focused verification, then patch only concrete failures. If you edited before reading an existing surface, read the starter source/test now. Add obvious focused tests before verification when behavior changed. After a pass, final; read files only for concrete missing evidence.",
         display: false,
       }, { triggerTurn: false, deliverAs: "steer" });
     }
@@ -277,11 +317,7 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
         customType: "pi-chalin-inline-ready-to-verify-nudge",
         content: docsOnlyMutation
           ? "Docs-only edit ready. No bash. Read updated docs: the next tool must be read on the updated docs artifact; revise only for unresolved named surfaces, otherwise final."
-          : [
-            "Implementation changed and verification is pending. Stop broad exploration. If the latest evidence proves real breadth, ambiguity, repeated failure, or context pressure, stop inline work and explain the concrete blocker instead of improvising a broader workflow.",
-            "If a later verification after the latest edit already passed, this pending-verification steer is stale: final now and do not run another shell/test command.",
-            "Run the nearest meaningful verification once. If it fails, fix only the root cause and rerun after the final edit.",
-          ].join("\n"),
+          : "Implementation changed and verification is pending. Stop broad exploration. If the work no longer fits a compact inline loop, delegate or ask with the concrete blocker. Otherwise run the nearest meaningful repo evidence once. A custom probe is enough only when it semantically covers the requested behavior plus relevant boundary or preservation context. If it fails, repair the root cause and rerun once.",
         display: false,
       }, { triggerTurn: false, deliverAs: "steer" });
     }
@@ -300,8 +336,8 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
       pi.sendMessage({
         customType: "pi-chalin-inline-weak-test-coverage-nudge",
         content: [
-          "Verification passed, but the latest test write looked like trivial smoke/empty coverage for a source change.",
-          "Do NOT final yet. Edit the nearest test file so assertions visibly cover the prompt-named criteria plus one boundary or preservation path, then rerun the nearest verification once.",
+          "Post-mutation evidence ran, but the latest test write looked like trivial smoke/empty coverage for a source change.",
+          "Do NOT final yet. Edit the nearest test file so assertions visibly cover the prompt-named criteria plus one boundary or preservation path, then rerun the nearest meaningful evidence once.",
           "Keep it compact; do not broaden into an unrelated matrix.",
         ].join("\n"),
         display: false,
@@ -311,8 +347,8 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
       pi.sendMessage({
         customType: "pi-chalin-inline-package-metadata-nudge",
         content: [
-          "Verification passed, but package metadata looks incomplete for the delivered scaffold entrypoints.",
-          "Do NOT final yet. Patch package metadata so module format and delivered bin/main/exports agree with the source files, then rerun the nearest package verification once.",
+          "Post-mutation evidence ran, but package metadata looks incomplete for the delivered scaffold entrypoints.",
+          "Do NOT final yet. Patch package metadata so module format and delivered bin/main/exports agree with the source files, then rerun the nearest meaningful evidence once.",
           "Do not add build/dist indirection unless those artifacts are generated and tested.",
         ].join("\n"),
         display: false,
@@ -330,22 +366,15 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
       }, { triggerTurn: false, deliverAs: "steer" });
     }
     if (shouldFailureNudge) {
-      const commandText = verificationCommand ? `\`${verificationCommand}\`` : "the verification command";
+      const commandText = verificationCommand ? `\`${verificationCommand}\`` : "the evidence command";
       pi.sendMessage({
         customType: "pi-chalin-inline-verification-failed-nudge",
-        content: [
-          `${commandText} failed after file changes. Do NOT answer as done yet.`,
-          "Use the latest failure as evidence. Change tests only when prompt+repo evidence proves the expectation is wrong; otherwise fix implementation. Do not broaden parser/tokenizer behavior to unrelated token classes just to satisfy one failing assertion.",
-          "Patch the exact failing source or assertion from the error output. Do not grep/find/read broad surfaces for a known symbol; use at most one targeted read of an already changed file only if the failure output is insufficient.",
-          "If verification discovers fewer tests than you wrote, move/merge the substantive coverage into the runner-discovered test path before claiming completion.",
-          "If you already made a later edit and the nearest verification after that edit passed, this failure is superseded: final now instead of rerunning the same command.",
-          "Keep the repo runner/package manager and requested files/APIs/toolchain coherent. If package.json/config says `npm test` -> `node --test`, tests must use node:test/node:assert; if the package runner is Vitest, use compatible imports. Rerun the package/nearest verification after the final edit; stale, failed, or wrong-runner verification is invalid.",
-        ].join("\n"),
+        content: `${commandText} failed after file changes. Do NOT answer as done. Use LLM judgment to classify the failed output as behavioral evidence or environment/tooling/config/dependency blockage. If behavioral, fix the source or assertion only when prompt+repo evidence proves it wrong. If environment/tooling/config/dependency related, do not narrow, revert, or simplify a plausible source fix; preserve the hypothesis, run direct representative evidence or a faithful surrogate if possible, otherwise report the blocker. Rerun the nearest meaningful evidence after the final edit.`,
         display: false,
       }, { triggerTurn: false, deliverAs: "steer" });
     }
     if (!shouldCompletionNudge) return;
-    const commandText = verificationCommand ? `\`${verificationCommand}\`` : "the verification command";
+    const commandText = verificationCommand ? `\`${verificationCommand}\`` : "the evidence command";
     const changedPaths = getInlineChangedPaths();
     const changedPathText = changedPaths.length > 0
       ? changedPaths.map((item) => `\`${item}\``).join(", ")
@@ -353,24 +382,13 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
     const completionContent = docsOnlyMutation
       ? [
         `Docs readback complete with ${commandText}.`,
-        "Final now. Do not call tools, do not keep thinking, and do not write a plan.",
-        "Use the user's language; translate bullet labels when appropriate.",
-        "Use exactly 3 bullets, one line each:",
-        `- Changed: ${changedPathText} updated with the requested operational fields`,
-        `- Verification: ${commandText}`,
-        "- Notes: cite the manifest/source evidence paths and only mention unresolved searched/not-found gaps if relevant.",
+        "Run the completion gate. If it passes, final now with Changed, Evidence, and Notes. If evidence is missing, make the smallest docs correction or ask.",
+        buildCompletionGateSteer("inline"),
       ].join("\n")
       : [
         `You changed files and ran ${commandText}.`,
-        `Final now if the last edit output plus ${commandText} already prove the requested behavior. For one-file/path-bounded tasks with visible edit output and a passing runner, readback after pass is waste; do not read ${changedPathText} just to summarize.`,
-        "If requested API/tests/docs/README/manifest/bin/export/toolchain, package-runner coherence, or verification evidence is missing, edit it and rerun verification. Otherwise answer now; do not run another shell/test command unless you edit again or the last output was not passing.",
-        "For transformations and refactors, tests must visibly cover the named criteria plus one boundary/preservation path; command-only success with a trivial smoke test is not enough.",
-        "For greenfield package/library/CLI work, README/API/usage docs and package/bin/export/module metadata are required when requested or implied by the package shape. If runner tests already cover the CLI command path, no extra post-test shell is needed. A final answer that only says what you will do is invalid for a mutation request.",
-        "Use the user's language; translate bullet labels when appropriate.",
-        "Final should be concise but complete: a compact receipt, not a test-matrix recap. Use exactly three bullets, one line each:",
-        "- Changed: `path/to/file`[, `path/to/test`]",
-        `- Verification: ${commandText} passed only if the command output showed success and no failure/assertion/error appeared`,
-        "- Notes: one sentence with requested behavior/constraints, boundary/preservation evidence, and 2-4 useful design/boundary facts: public response/API shape, standard-library/domain primitive used, most important edge tests, and no duplicate or skipped helper surface; test counts and paths must match the actual verification output, not a skipped helper file.",
+        `Do not read ${changedPathText} just to summarize. If requested artifacts or evidence are missing, edit the smallest gap and rerun nearest meaningful evidence once. Otherwise final now with Changed, Evidence, and Notes.`,
+        buildCompletionGateSteer("inline"),
       ].join("\n");
     pi.sendMessage({
       customType: "pi-chalin-inline-completion-nudge",
@@ -380,6 +398,7 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", () => {
+    abortSemanticPolicyJudges(pi);
     restoreOrchestratorThinking(pi);
     // No background workers are owned by this module across session shutdown.
     // Hidden subagent workflows run inside the current turn and honor Pi's
@@ -392,29 +411,69 @@ function scheduleSemanticPolicyJudge(pi: ExtensionAPI, ctx: unknown, determinist
   if (!deterministic || !request) return false;
   const context = semanticPolicyJudgeContext(ctx);
   if (!context.model || !context.modelRegistry) return false;
+  const controller = createSemanticPolicyJudgeController(pi);
+  const upstreamSignal = context.signal;
+  const abortFromUpstream = () => controller.abort();
+  if (upstreamSignal?.aborted) controller.abort();
+  else upstreamSignal?.addEventListener("abort", abortFromUpstream, { once: true });
   void runHookEffect("autoroute.semanticPolicyJudge", async () => {
-    const semantic = await runSemanticPolicyJudge({
-      deterministic,
-      request,
-      context,
-    });
-    if (!semantic) return;
-    if (!isSemanticPolicyJudgeRequestFresh(request)) return;
-    recordSemanticPolicyJudgeResult(semantic);
-    if (!shouldApplySemanticPolicyJudgeResult(deterministic, semantic)) return;
-    pi.sendMessage({
-      customType: "pi-chalin-semantic-policy-judge",
-      content: formatSemanticPolicyJudgeSteer(semantic),
-      display: false,
-    }, { triggerTurn: false, deliverAs: "steer" });
+    try {
+      const semantic = await runSemanticPolicyJudgeForTurn({
+        deterministic,
+        request,
+        context: { ...context, signal: controller.signal },
+      });
+      if (!semantic || controller.signal.aborted) return;
+      if (!isSemanticPolicyJudgeRequestFresh(request)) return;
+      recordSemanticPolicyJudgeResult(semantic);
+      if (!shouldApplySemanticPolicyJudgeResult(deterministic, semantic)) return;
+      pi.sendMessage({
+        customType: "pi-chalin-semantic-policy-judge",
+        content: formatSemanticPolicyJudgeSteer(semantic),
+        display: false,
+      }, { triggerTurn: false, deliverAs: "steer" });
+    } finally {
+      upstreamSignal?.removeEventListener("abort", abortFromUpstream);
+      forgetSemanticPolicyJudgeController(pi, controller);
+    }
   }).catch(() => undefined);
   return true;
+}
+
+function runSemanticPolicyJudgeForTurn(input: Parameters<SemanticPolicyJudgeRunner>[0]): ReturnType<SemanticPolicyJudgeRunner> {
+  const runner = semanticPolicyJudgeForTests ?? runSemanticPolicyJudge;
+  return runner(input);
+}
+
+function createSemanticPolicyJudgeController(pi: ExtensionAPI): AbortController {
+  const controller = new AbortController();
+  const key = pi as unknown as object;
+  const controllers = semanticPolicyJudgeControllers.get(key) ?? new Set<AbortController>();
+  controllers.add(controller);
+  semanticPolicyJudgeControllers.set(key, controllers);
+  return controller;
+}
+
+function forgetSemanticPolicyJudgeController(pi: ExtensionAPI, controller: AbortController): void {
+  const key = pi as unknown as object;
+  const controllers = semanticPolicyJudgeControllers.get(key);
+  controllers?.delete(controller);
+  if (controllers && controllers.size === 0) semanticPolicyJudgeControllers.delete(key);
+}
+
+function abortSemanticPolicyJudges(pi: ExtensionAPI): void {
+  const key = pi as unknown as object;
+  const controllers = semanticPolicyJudgeControllers.get(key);
+  if (!controllers) return;
+  for (const controller of controllers) controller.abort();
+  semanticPolicyJudgeControllers.delete(key);
 }
 
 function shouldDeferInlineNudgeToSemantic(policyJudge: PolicyJudgeDecision | undefined, kind: InlineNudgeKind, scheduled: boolean): boolean {
   if (!scheduled) return false;
   if (policyJudge?.nudgeKind !== kind) return false;
-  return kind !== "completion";
+  if (kind === "completion" || kind === "ready-to-verify" || kind === "post-failure-evidence") return false;
+  return true;
 }
 
 function semanticPolicyJudgeContext(ctx: unknown): Parameters<typeof runSemanticPolicyJudge>[0]["context"] {
@@ -424,6 +483,177 @@ function semanticPolicyJudgeContext(ctx: unknown): Parameters<typeof runSemantic
     modelRegistry: value.modelRegistry as never,
     signal: value.signal,
   };
+}
+
+function completionGateJudgeContext(pi: ExtensionAPI, ctx: unknown): CompletionGateJudgeInput["context"] {
+  const value = ctx as { cwd?: unknown; model?: unknown; modelRegistry?: unknown; signal?: AbortSignal };
+  const cached = completionGateContextCache.get(pi as unknown as object);
+  const model = value.model ?? cached?.model;
+  const modelRegistry = value.modelRegistry ?? cached?.modelRegistry;
+  return {
+    cwd: typeof value.cwd === "string" ? value.cwd : cached?.cwd,
+    model: model as never,
+    modelRegistry: modelRegistry as never,
+    signal: value.signal ?? cached?.signal,
+  };
+}
+
+function rememberCompletionGateJudgeContext(pi: ExtensionAPI, ctx: unknown): void {
+  const value = ctx as { cwd?: unknown; model?: unknown; modelRegistry?: unknown; signal?: AbortSignal };
+  if (!value.model || !value.modelRegistry) return;
+  completionGateContextCache.set(pi as unknown as object, {
+    cwd: typeof value.cwd === "string" ? value.cwd : undefined,
+    model: value.model as never,
+    modelRegistry: value.modelRegistry as never,
+    signal: value.signal,
+  });
+}
+
+async function runCompletionGateJudgeForTurn(input: CompletionGateJudgeInput): Promise<CompletionGateDecision | undefined> {
+  const runner = completionGateJudgeForTests ?? runCompletionGateJudge;
+  return runner(input);
+}
+
+function runCompletionGateMessageEnd(pi: ExtensionAPI, event: unknown, ctx: unknown): Promise<{ message: any } | undefined> {
+  return runHookEffect("autoroute.completionGate", async () => {
+    if (!isCompletionGateEnabledForTurn(pi)) return;
+    const finalAnswer = assistantTextOnlyFinal(event);
+    if (!finalAnswer) return;
+    const payload = getInlineCompletionGatePayload({ finalAnswer });
+    if (!shouldRunCompletionGate(payload)) return;
+    const decision = await runCompletionGateJudgeForTurn({ payload, context: completionGateJudgeContext(pi, ctx) });
+    if (!decision) {
+      const key = completionGateUnavailableKey(payload);
+      if (!hasCompletionGateFollowup(pi, key)) {
+        rememberCompletionGateFollowup(pi, key);
+        sendCompletionGateUnavailableDiagnostic(pi, payload);
+      }
+      return completionGateUnavailableReplacement(event);
+    }
+    const key = completionGateDecisionKey(payload, decision);
+    if (!hasCompletionGateFollowup(pi, key)) {
+      rememberCompletionGateFollowup(pi, key);
+      sendCompletionGateAudit(pi, decision);
+    }
+    if (!shouldApplyCompletionGateDecision(decision)) return;
+    recordCompletionGateBlock(decision);
+    return completionGateContinuationReplacement(event, decision);
+  });
+}
+
+function sendCompletionGateAudit(pi: ExtensionAPI, decision: CompletionGateDecision): void {
+  pi.appendEntry("pi-chalin-completion-gate-decision", {
+    canFinalize: decision.canFinalize,
+    confidence: decision.confidence,
+    nextAction: decision.nextAction,
+    reason: decision.reason,
+    missingEvidence: decision.missingEvidence,
+    requiredEvidence: decision.requiredEvidence ?? [],
+    timestamp: Date.now(),
+  });
+}
+
+function sendCompletionGateUnavailableDiagnostic(pi: ExtensionAPI, payload: ReturnType<typeof getInlineCompletionGatePayload>): void {
+  pi.appendEntry("pi-chalin-completion-gate-diagnostic", {
+    status: "judge-unavailable",
+    changedPaths: payload.state.changedPaths,
+    verificationObserved: payload.state.verificationObserved,
+    evidenceAfterLatestMutation: payload.ledger.evidenceAfterLatestMutation,
+    commandCount: payload.ledger.commandRecords.length,
+    timestamp: Date.now(),
+  });
+}
+
+function completionGateUnavailableKey(payload: ReturnType<typeof getInlineCompletionGatePayload>): string {
+  return JSON.stringify({
+    status: "judge-unavailable",
+    prompt: payload.originalPrompt,
+    changedPaths: payload.state.changedPaths,
+    readPaths: payload.state.readPaths,
+    evidenceAfterLatestMutation: payload.ledger.evidenceAfterLatestMutation,
+    mutations: payload.ledger.mutationRecords.map((record) => [record.toolName, record.status, record.afterFailedCommand, record.path ?? "", record.args ?? "", record.observation ?? ""]),
+    commands: payload.ledger.commandRecords.map((record) => [record.command, record.status, record.afterLatestMutation]),
+    failedCommandsAfterMutation: payload.ledger.failedCommandsAfterMutation.map((record) => [record.command, record.status, record.afterLatestMutation]),
+    postFailureMutations: payload.ledger.postFailureMutationRecords.map((record) => [record.toolName, record.status, record.path ?? "", record.args ?? "", record.observation ?? ""]),
+    observations: payload.ledger.observations.map((record) => [record.toolName, record.status, record.afterLatestMutation, record.path ?? "", record.command ?? "", record.text]),
+  });
+}
+
+function completionGateContinuationReplacement(event: unknown, decision: CompletionGateDecision): { message: any } | undefined {
+  const message = (event as { message?: unknown }).message;
+  if (!isRecord(message) || message.role !== "assistant") return undefined;
+  const missing = compactDecisionItems(decision.missingEvidence);
+  const required = compactDecisionItems(decision.requiredEvidence ?? []);
+  return {
+    message: {
+      ...message,
+      content: [{
+        type: "text",
+        text: [
+          "Completion gate: I cannot call this complete yet.",
+          missing ? `Missing evidence: ${missing}.` : undefined,
+          required ? `Required evidence: ${required}.` : undefined,
+          `Next action: ${decision.nextAction}.`,
+          `Reason: ${compactDecisionText(decision.reason)}.`,
+        ].filter(Boolean).join("\n"),
+      }],
+    },
+  };
+}
+
+function completionGateUnavailableReplacement(event: unknown): { message: any } | undefined {
+  const message = (event as { message?: unknown }).message;
+  if (!isRecord(message) || message.role !== "assistant") return undefined;
+  return {
+    message: {
+      ...message,
+      content: [{
+        type: "text",
+        text: [
+          "Completion gate: I cannot call this complete yet because the pre-final evidence check was unavailable.",
+          "Use direct repo/spec evidence or report the concrete blocker before finalizing.",
+        ].join("\n"),
+      }],
+    },
+  };
+}
+
+function compactDecisionItems(items: readonly string[]): string {
+  return items
+    .map((item) => compactDecisionText(item, 120))
+    .filter(Boolean)
+    .slice(0, 3)
+    .join("; ");
+}
+
+function compactDecisionText(value: string, max = 180): string {
+  const text = value.trim();
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(0, max - 3)).trimEnd()}...`;
+}
+
+function shouldRunCompletionGate(payload: ReturnType<typeof getInlineCompletionGatePayload>): boolean {
+  if (payload.state.terminalActionObserved) return true;
+  if (!payload.state.mutationObserved) return false;
+  if (payload.state.docsOnlyMutation) return true;
+  if (payload.state.sourceMutationObserved || payload.state.testMutationObserved) return true;
+  return payload.ledger.evidenceAfterLatestMutation;
+}
+
+function assistantTextOnlyFinal(event: unknown): string | undefined {
+  const message = isRecord(event) ? event.message : undefined;
+  if (!isRecord(message) || message.role !== "assistant") return undefined;
+  const content = message.content;
+  if (typeof content === "string") return content.trim() || undefined;
+  if (!Array.isArray(content)) return undefined;
+  const chunks: string[] = [];
+  for (const block of content) {
+    if (!isRecord(block)) continue;
+    if (block.type === "toolCall") return undefined;
+    if (block.type === "text" && typeof block.text === "string") chunks.push(block.text);
+  }
+  const text = chunks.join("\n").trim();
+  return text || undefined;
 }
 
 function restoreOrchestratorThinking(pi: ExtensionAPI): void {
@@ -467,15 +697,63 @@ function currentHumanInputBlock(pi: ExtensionAPI): PendingHumanInputBlock | unde
 
 function suppressProviderToolsForHumanInput(payload: unknown): unknown {
   if (!isRecord(payload) || !Array.isArray(payload.tools)) return payload;
-  const next: Record<string, unknown> = { ...payload, tools: [] };
-  if ("tool_choice" in next) next.tool_choice = "none";
-  if ("toolChoice" in next) next.toolChoice = "none";
-  return next;
+  return { ...payload, tools: [] };
+}
+
+function hasCustomMessage(messages: readonly unknown[], customType: string): boolean {
+  return messages.some((message) => isRecord(message) && message.customType === customType);
+}
+
+function setCompletionGateEnabledForTurn(pi: ExtensionAPI, enabled: boolean): void {
+  completionGateEnabledForTurn.set(pi as unknown as object, enabled);
+}
+
+function isCompletionGateEnabledForTurn(pi: ExtensionAPI): boolean {
+  return completionGateEnabledForTurn.get(pi as unknown as object) === true;
+}
+
+function clearCompletionGateEnabledForTurn(pi: ExtensionAPI): void {
+  completionGateEnabledForTurn.delete(pi as unknown as object);
 }
 
 export function resetAutorouteToolStateForTests(): void {
   // WeakMap intentionally has no clear(); tests use fresh fake APIs, so this is
   // a marker hook for symmetry with runtime-state resets.
+  completionGateJudgeForTests = undefined;
+  semanticPolicyJudgeForTests = undefined;
+}
+
+export function setCompletionGateJudgeForTests(judge: CompletionGateJudgeRunner | undefined): void {
+  completionGateJudgeForTests = judge;
+}
+
+export function setSemanticPolicyJudgeForTests(judge: SemanticPolicyJudgeRunner | undefined): void {
+  semanticPolicyJudgeForTests = judge;
+}
+
+function completionGateFollowupsFor(pi: ExtensionAPI): Set<string> {
+  const key = pi as unknown as object;
+  const existing = completionGateFollowupKeys.get(key);
+  if (existing) return existing;
+  const created = new Set<string>();
+  completionGateFollowupKeys.set(key, created);
+  return created;
+}
+
+function hasCompletionGateFollowup(pi: ExtensionAPI, key: string): boolean {
+  return completionGateFollowupsFor(pi).has(key);
+}
+
+function rememberCompletionGateFollowup(pi: ExtensionAPI, key: string): void {
+  completionGateFollowupsFor(pi).add(key);
+}
+
+function clearCompletionGateFollowups(pi: ExtensionAPI): void {
+  completionGateFollowupKeys.delete(pi as unknown as object);
+}
+
+function clearCompletionGateJudgeContext(pi: ExtensionAPI): void {
+  completionGateContextCache.delete(pi as unknown as object);
 }
 
 export function setAutorouteHumanInputBlockForTests(pi: ExtensionAPI, block: Omit<PendingHumanInputBlock, "createdAt"> & { createdAt?: number }): void {
@@ -525,13 +803,40 @@ function stringArg(args: object, key: string): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
+function toolResultObservation(result: unknown): string | undefined {
+  if (typeof result === "string") return compactEvidenceObservation(result);
+  if (!isRecord(result)) return undefined;
+  const content = result.content;
+  if (!Array.isArray(content)) return undefined;
+  const chunks: string[] = [];
+  for (const block of content) {
+    if (!isRecord(block)) continue;
+    if (block.type === "text" && typeof block.text === "string" && block.text.trim()) {
+      chunks.push(block.text);
+    }
+  }
+  return compactEvidenceObservation(chunks.join("\n"));
+}
+
 function compactResumeCandidateMessage(run: RunState): string {
   const completed = run.steps.filter((step) => isUsableStepHandoff(step)).length;
   const total = Math.max(run.steps.length, 1);
   const next = run.steps.find((step) => !isUsableStepHandoff(step));
+  const blockingQuestions = run.recoveryState?.blockedByHumanInput ? (run.recoveryState.repairOptions ?? []).filter(Boolean) : [];
+  if (blockingQuestions.length || run.intentContract?.requiresInterview) {
+    return [
+      "Paused pi-chalin run is blocked on user input in this same session.",
+      `Run id: ${run.id}. Status: ${run.status}. Progress: ${completed}/${total}. Next agent: ${next?.agent ?? "unknown"}.`,
+      "Do not start another chalin_route for the same work. Ask the user the blocking question(s), then continue this run after the answer.",
+      blockingQuestions.length ? "Blocking question(s):" : undefined,
+      ...blockingQuestions.slice(0, 5).map((question) => `- ${question}`),
+      "If the user is asking for new unrelated work, ignore this resume context.",
+    ].filter((line): line is string => Boolean(line)).join("\n");
+  }
   return [
     "Resumable pi-chalin run available; use LLM judgment for whether the current user intent is continuation.",
     `Run id: ${run.id}. Status: ${run.status}. Progress: ${completed}/${total}. Next agent: ${next?.agent ?? "unknown"}.`,
+    "Do not start another chalin_route for the same work.",
     `If the user wants to continue that run, call \`chalin_resume\` with {"runId":"${run.id}"} before answering from partial findings.`,
     "If the user is asking for new unrelated work, ignore this resume context.",
   ].join("\n");
@@ -545,6 +850,41 @@ function workflowBlockedReason(event: unknown): string | undefined {
     return typeof reason === "string" && reason.trim() ? `${action}: ${reason}` : action;
   }
   return undefined;
+}
+
+function delegatedMutableWorkPendingReason(event: unknown): string | undefined {
+  const run = delegatedRunFromEvent(event);
+  if (!run || run.status !== "paused") return undefined;
+  if (run.intentContract?.requiresInterview || run.recoveryState?.blockedByHumanInput) {
+    const question = run.recoveryState?.repairOptions?.find((item) => item.trim());
+    return question ? `human input required: ${compactDecisionText(question, 120)}` : "human input required";
+  }
+  const units = Array.isArray(run.workUnits) ? run.workUnits : [];
+  const pendingWriteUnits = units.filter((unit) => {
+    if (!isPendingDelegatedStatus(unit.status)) return false;
+    return unit.expectedEffects.includes("write");
+  });
+  if (pendingWriteUnits.length === 0) return undefined;
+  return pendingWriteUnits
+    .slice(0, 3)
+    .map((unit) => compactDecisionText(unit.title || unit.id, 80))
+    .join("; ");
+}
+
+function delegatedRunFromEvent(event: unknown): RunState | undefined {
+  const result = (event as { result?: unknown }).result;
+  if (!isRecord(result)) return undefined;
+  const details = result.details;
+  if (!isRecord(details)) return undefined;
+  const run = details.run;
+  if (!isRecord(run)) return undefined;
+  if (typeof run.id !== "string" || typeof run.status !== "string") return undefined;
+  if (!Array.isArray(run.steps)) return undefined;
+  return run as unknown as RunState;
+}
+
+function isPendingDelegatedStatus(status: unknown): boolean {
+  return status === "pending" || status === "running" || status === "paused" || status === "checkpointed" || status === "skipped";
 }
 
 export function shouldScheduleNonInteractiveShutdown(ctx: { hasUI?: boolean; shutdown?: () => void }): boolean {

@@ -18,6 +18,9 @@ Rules:
 - Preserve per-unit status, blockers, skipped work, changed files, verification, and unresolved gaps.
 - Do not claim completion for failed, skipped, unreviewed, or unsupported units.
 - Mark inference explicitly when a conclusion is not directly supported by handoff evidence.
+- Do not upgrade upstream claims. Keep findings tied to their source handoff and preserve contradictions instead of silently choosing a winner.
+- Do not create new strategy, critique, or implementation scope. Package evidence for the next agent or final synthesis; leave decisions to planner/reviewer/primary.
+- For broad audits, preserve coverage matrix, evidence table, unknowns, severity labels, and final-answer-ready material as separate sections when upstream handoffs provide them.
 
 
 Tool discipline:

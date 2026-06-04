@@ -10,8 +10,8 @@ import { createMemoryCandidate } from "../memory/memory.ts";
 import { createConfiguredMemoryStore } from "../memory/memory-provider.ts";
 import { formatInterviewResult, runChalinInterview, type InterviewRequestInput, type InterviewResult } from "../interview/interview.ts";
 import { loadFailedRunDiagnostic } from "../runner/run-recovery.ts";
-import { chalinSessionIdFromContext, loadResumableRunState } from "../runner/runner-state.ts";
-import { activateSkillForTurn, disableSkillForTurn, hasInlineToolStarted, setLatestRun } from "../runtime/state.ts";
+import { chalinSessionIdFromContext, loadResumableRunState, markRunHumanInputAnswered } from "../runner/runner-state.ts";
+import { activateSkillForTurn, disableSkillForTurn, getLatestRun, setLatestRun } from "../runtime/state.ts";
 import { setChalinStatus } from "../ui/ui-status.ts";
 import { chalinRouteUpdateDetails, colorizeChalinWidget, footerStateForRun, formatChalinRouteRequestWidget, formatChalinRunWidget, formatChalinRunWidgetFromDetails, isUsableStepStatus, routeIntent, type ChalinRouteWidgetDetails } from "../routing/route-widget.ts";
 import { fetchWebUrls, formatWebBundle, formatWebBundleProgressWidget, formatWebBundleWidget, searchWeb, type WebBundleProgressWidgetInput, type WebContextBundle } from "../webfetch/webfetch.ts";
@@ -61,7 +61,7 @@ const ChalinRouteStageParams = Type.Object({
 
 const ChalinRouteParams = Type.Object({
   task: Type.String({ minLength: 12, description: "Original user request or the exact work to delegate to the pi-chalin orchestrator." }),
-  topology: Type.Optional(Type.Union([Type.Literal("auto"), Type.Literal("sequential"), Type.Literal("dag")], { description: "Optional proposal context. Omit or use auto so pi-chalin selects topology from task intent." })),
+  topology: Type.Optional(Type.Union([Type.Literal("auto"), Type.Literal("sequential"), Type.Literal("dag"), Type.Literal("chain"), Type.Literal("parallel")], { description: "Optional proposal context. Omit or use auto so pi-chalin selects topology from task intent. Legacy aliases are accepted: chain -> sequential, parallel -> dag." })),
   steps: Type.Optional(Type.Array(ChalinRouteStepParams, { minItems: 1, maxItems: 6, description: "Proposal context: ordered subagent steps only when the workflow is already explicitly known." })),
   stages: Type.Optional(Type.Array(ChalinRouteStageParams, { minItems: 1, maxItems: 8, description: "Proposal context: DAG stages for already-known independent work." })),
   risk: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"), Type.Literal("critical")])),
@@ -256,6 +256,7 @@ export function registerChalinTools(pi: ExtensionAPI): void {
           config: loaded.config,
           task,
           context: {
+            cwd: ctx.cwd,
             model: ctx.model,
             modelRegistry: ctx.modelRegistry,
             signal: ctx.signal,
@@ -325,16 +326,18 @@ export function registerChalinTools(pi: ExtensionAPI): void {
     description: "Ask blocking clarification questions in the TUI and persist answers as pi-chalin artifacts for inline or delegated work.",
     promptSnippet: "chalin_interview: ask concise questions only when a remaining human decision blocks safe progress after discoverable context is used.",
     promptGuidelines: [
-      "Use chalin_interview when proceeding would require guessing user intent, constraints, tradeoffs, or safety boundaries that cannot be discovered cheaply.",
+      "Use chalin_interview when proceeding would require guessing user intent, constraints, tradeoffs, or safety boundaries that cannot be discovered from repo evidence, public docs, package metadata, or current web evidence.",
+      "Do not use chalin_interview to ask permission for read-only docs, npm/package metadata, public API references, or hypothetical fallback preferences after a lookup/test failure.",
       "Ask only what blocks correct planning. Prefer one to five questions per batch. Each question must have two to five concise options and exactly one recommended option when possible.",
       "Always allow a custom answer unless the answer space must be constrained for safety.",
-      "After chalin_interview returns, use the persisted answers as artifact context and continue only when you are confident enough.",
+      "After chalin_interview answers a paused chalin run, call chalin_resume for that same run before doing inline work.",
     ],
     parameters: ChalinInterviewParams,
     async execute(_toolCallId, params: InterviewRequestInput, _signal, _onUpdate, ctx) {
       const store = new ArtifactStore({ cwd: ctx.cwd });
       const result = await runChalinInterview(ctx, store, params);
-      return textResult(formatInterviewResult(result), { interview: result });
+      const resumeRunId = result.status === "answered" ? clearAnsweredHumanInputBlockForLatestRun() : undefined;
+      return textResult(formatInterviewResult(result, { resumeRunId }), { interview: result, resumeRunId });
     },
     renderCall(args, theme) {
       const count = Array.isArray(args.questions) ? args.questions.length : 0;
@@ -346,7 +349,7 @@ export function registerChalinTools(pi: ExtensionAPI): void {
       ].join(""), 0, 0);
     },
     renderResult(result, _options, theme) {
-      const details = result.details as { interview?: InterviewResult } | undefined;
+      const details = result.details as { interview?: InterviewResult; resumeRunId?: string } | undefined;
       const interview = details?.interview;
       if (!interview) return new Text(result.content.find((part) => part.type === "text")?.text ?? "", 0, 0);
       const statusColor = interview.status === "answered" ? "success" : interview.status === "cancelled" ? "warning" : "muted";
@@ -357,7 +360,9 @@ export function registerChalinTools(pi: ExtensionAPI): void {
           const suffix = answer.custom ? " (custom)" : answer.recommended ? " (recommended)" : "";
           return `- ${theme.fg("accent", answer.questionId)}: ${truncateForTool(answer.answer, 120)}${theme.fg("muted", suffix)}`;
         }),
-        interview.status === "answered" ? theme.fg("dim", "next: continue with these answers") : theme.fg("warning", "next: ask before routing"),
+        details?.resumeRunId
+          ? theme.fg("dim", `next: resume chalin run ${details.resumeRunId}`)
+          : interview.status === "answered" ? theme.fg("dim", "next: continue with these answers") : theme.fg("warning", "next: ask before routing"),
       ];
       return new Text(lines.join("\n"), 0, 0);
     },
@@ -373,19 +378,15 @@ export function registerChalinTools(pi: ExtensionAPI): void {
       "Do not call chalin_route just to decide whether to delegate. Decide with LLM judgment from the task shape, evidence burden, risk, ambiguity, decomposition value, and verification burden.",
       "Default to intent-only delegation: pass task, expectedEffects when obvious, risk if obvious, and workUnitStrategy when needed. Omit topology, steps, and stages unless the user or prior evidence already gave explicit independent slices.",
       "If a non-discoverable human decision blocks safe progress, use chalin_interview before delegating. If uncertainty is discoverable from repo/web evidence, pass it into the delegated workflow.",
-      "Use explicit topology/steps/stages only as proposal context when the user or prior evidence already identified independent slices. Pi-chalin still validates and selects the executable route from delegated task intent.",
+      "Use explicit topology/steps/stages only as proposal context when the user or prior evidence already identified independent slices. Prefer topology `sequential` or `dag`; legacy aliases `chain` and `parallel` are normalized. Pi-chalin still validates and selects the executable route from delegated task intent.",
       "For mutation, include expectedEffects read/write/verify and let pi-chalin's internal planner select mutation and verification coverage.",
-      "Do not call chalin_web_search in the same assistant turn as chalin_route. Let the delegated route gather local evidence first; use web only after the route reports an explicit external gap.",
+      "Avoid redundant chalin_web_search calls when a delegated route can gather the same evidence, but do not block useful current external evidence. Prefer route-local evidence first when the external gap is discoverable there.",
       "Keep the user experience simple: after chalin_route returns, answer from its final material without exposing internal delegation labels unless the user asks.",
     ],
     parameters: ChalinRouteParams,
     async execute(_toolCallId, params: ChalinRouteToolParams, signal, onUpdate, ctx) {
       const loaded = loadEffectiveConfig({ cwd: ctx.cwd });
       const catalog = AgentCatalog.load({ cwd: ctx.cwd });
-      onUpdate?.({
-        content: [{ type: "text", text: formatChalinRouteRequestWidget(params) }],
-        details: { status: "pending", params },
-      });
       try {
         const result = await executeDelegatedChalinRoute(params, params.task, ctx, { signal, onUpdate });
         if (result.run) setLatestRun(result.run);
@@ -412,27 +413,35 @@ export function registerChalinTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "chalin_resume",
     label: "Chalin Resume",
-    description: "Resume the latest paused or stale pi-chalin subagent run, preserving completed steps and continuing pending DAG/chain work.",
-    promptSnippet: "chalin_resume: resume an interrupted pi-chalin run when the user's current intent is continuation after ESC, abort, terminal close, or a paused run.",
+    description: "Continue the latest pi-chalin workflow from persisted state, preserving completed steps and resuming pending, failed-recoverable, or final-synthesis work.",
+    promptSnippet: "chalin_resume: continue an interrupted pi-chalin workflow when the user's current intent is continuation after ESC, abort, terminal close, failed tool/model call, or missed final synthesis.",
     promptGuidelines: [
       "Use this before answering from partial findings when the user asks to continue a paused/interrupted chalin run; infer continuation from intent and resumable-run context, not literal phrase matching.",
-      "Do not start a new subagent workflow for a paused run; resume the persisted run instead.",
-      "After chalin_resume returns, answer the user from the resumed Final answer material.",
+      "Do not start a new subagent workflow for an incomplete run; continue the persisted run instead.",
+      "If the persisted run already completed, answer from its final material without rerunning subagents.",
+      "After chalin_resume returns, answer the user from the resumed or synthesized Final answer material.",
     ],
     parameters: ChalinResumeParams,
     async execute(_toolCallId, params: ChalinResumeToolParams, signal, onUpdate, ctx) {
       const loaded = loadEffectiveConfig({ cwd: ctx.cwd });
       const sessionId = chalinSessionIdFromContext(ctx);
-      if (!sessionId && !params.runId) {
-        return textResult("No current Pi session id is available, so chalin_resume will not search project-wide paused runs. Provide an explicit runId to resume a specific run.", { runId: params.runId });
-      }
-      const run = loadResumableRunState({ cwd: ctx.cwd, runId: params.runId, ...(sessionId ? { sessionId } : {}) });
+      const sessionScopedRun = !params.runId && sessionId
+        ? loadResumableRunState({ cwd: ctx.cwd, sessionId, includeCompleted: true })
+        : undefined;
+      const run = sessionScopedRun ?? loadResumableRunState({ cwd: ctx.cwd, runId: params.runId, includeCompleted: true });
       if (!run) {
-        const failed = loadFailedRunDiagnostic({ cwd: ctx.cwd, runId: params.runId, ...(sessionId ? { sessionId } : {}) });
+        const failed = loadFailedRunDiagnostic({ cwd: ctx.cwd, runId: params.runId });
         if (failed) return textResult(failed.message, { runId: failed.run.id, run: failed.run, recoveryState: failed.run.recoveryState });
-        return textResult(params.runId ? `No resumable pi-chalin run found for '${params.runId}'.` : "No paused or stale pi-chalin run found to resume.", { runId: params.runId });
+        return textResult(params.runId ? `No continuable pi-chalin workflow found for '${params.runId}'.` : "No continuable pi-chalin workflow found in this project.", { runId: params.runId });
       }
       const catalog = AgentCatalog.load({ cwd: ctx.cwd });
+      if (run.status === "complete") {
+        const diagnostics = [...loaded.diagnostics, ...catalog.diagnostics.warnings, ...catalog.diagnostics.errors];
+        const result = { route: run.route, approval: { action: "allow" as const, reason: "Completed pi-chalin run synthesized from persisted workflow state." }, run, memories: [], diagnostics };
+        setLatestRun(run);
+        setChalinStatus(ctx, { kind: "complete", intent: routeIntent(run.route) });
+        return finalToolResult(ctx, formatRoute(run.route, result), compactRouteDetails(run.route, result, diagnostics));
+      }
       const memory = createConfiguredMemoryStore({ cwd: ctx.cwd }, loaded.config);
       const kernel = new ChalinKernel({
         cwd: ctx.cwd,
@@ -617,12 +626,6 @@ export function registerChalinTools(pi: ExtensionAPI): void {
     ],
     parameters: ChalinWebSearchParams,
     async execute(_toolCallId, params: ChalinWebSearchToolParams, signal, onUpdate, ctx) {
-      if (hasInlineToolStarted("chalin_route")) {
-        return textResult(
-          "Blocked by pi-chalin: chalin_web_search cannot run in the same assistant turn as chalin_route. Use the delegated route result first; search web only after it reports an explicit external gap.",
-          { blocked: true, reason: "route_web_same_turn", params },
-        );
-      }
       const urls = [...(params.urls ?? []), ...(params.url ? [params.url] : [])].filter(Boolean);
       const progressDetails: WebBundleProgressWidgetInput & { status: "running"; provider: "exa-mcp" } = urls.length > 0
         ? { status: "running", provider: "exa-mcp", mode: "fetch", label: urls.length === 1 ? urls[0] ?? "URL" : `${urls.length} URLs`, requested: urls, done: 0, total: urls.length }
@@ -644,4 +647,10 @@ export function registerChalinTools(pi: ExtensionAPI): void {
       return new Text(rendered, 0, 0);
     },
   });
+}
+
+function clearAnsweredHumanInputBlockForLatestRun(): string | undefined {
+  const run = getLatestRun();
+  if (!run || run.status !== "paused") return undefined;
+  return markRunHumanInputAnswered(run) ? run.id : undefined;
 }

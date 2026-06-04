@@ -69,7 +69,8 @@ export function buildSdkPrompt(
     "",
     "## pi-chalin child tool policy",
     "- Inspect read/find/grep/ls and repository status with read-only intent. Use `edit` for existing files, including full-content replacements; `write` only after evidence path is new; scratch in cwd.",
-    "- If your semantic judgment says the next action may affect external services, irreversible state, credentials, repository history/state, data, or broad project files, call `chalin_request_approval` before that action, then `chalin_interview`. Do not wait for command-name classification by the harness.",
+    "- If your semantic judgment says the next action may affect external services with side effects, irreversible state, credentials, repository history/state, data, protected files, or broad project files, call `chalin_request_approval` before that action, then `chalin_interview`. Do not wait for command-name classification by the harness.",
+    "- Reading docs, package metadata, and public API references is evidence gathering, not human authorization. Do not ask permission for read-only external documentation checks.",
     "- Use repo-relative tool paths; for cwd omit `path` or use `.`. Do not pass absolute cwd.",
     "- Discovery/snapshot: inventory/git history only; not run mutations. Read exact evidence before claims.",
     "- Bash is role-scoped full shell; use purposeful commands.",
@@ -97,29 +98,36 @@ export function buildSdkPrompt(
       ? "- Goal-aware scouting: map the source, tests, fixtures, config, docs, and verification evidence needed for the Original User Goal. Do not declare coverage sufficient without direct evidence for each requested criterion; hand off concrete gaps."
       : undefined,
     "- Prefer concise evidence; stop after high-value actionable issues.",
+    "- External evidence handoff: after docs/package metadata/public API lookup, pass exact source URL, package name/version, API surface, config choice, and unresolved gaps. If lookup succeeded, do not hand off vague instructions to check docs later.",
     options.workUnitStrategy && options.workUnitStrategy !== "none"
-      ? `- WorkUnit strategy: ${options.workUnitStrategy}. Use bounded units when scope exceeds one reliable ownership boundary. Parallel units need independent ownership; shared mutable surfaces require merge or order.`
+      ? `- WorkUnit strategy: ${options.workUnitStrategy}. Use bounded units when scope exceeds one reliable ownership boundary. Parallel units need independent ownership; shared mutable surfaces require merge or order, not a collapsed opaque step.`
+      : undefined,
+    previous && options.priorFilesRead?.length
+      ? "- Prior evidence economy: prefer the previous handoff and `Already Covered Evidence Paths`; do not re-read those paths unless you name the concrete gap, symbol, line, or claim being verified."
       : undefined,
     mutationRelevant || agent?.concern === "planning" || writeDiscoveryAuthorityRelevant
       ? fanoutAuthorized && writeDiscoveryAuthorityRelevant
-        ? "- Human-input: fanout is already authorized for discovered independent targets. If at least two safe WorkUnits can proceed with bounded scope and verification, keep requiresHumanInput=false, emit those workUnits, and record blocked/omitted surfaces as risks/nextActions. Set requiresHumanInput=true, workUnits=[] only when no safe authorized unit can proceed or the user's required outcome depends on a human decision."
-        : "- Human-input: if scope/API/security/arch/ownership or multi-target write lacks authority, requiresHumanInput=true, workUnits=[]."
+        ? "- Human-input: the user already authorized applying work across discovered independent targets. If safe WorkUnits can proceed with bounded scope and verification, keep requiresHumanInput=false, emit those workUnits, and record blocked/omitted surfaces as risks/nextActions. Set requiresHumanInput=true, workUnits=[] only when no safe authorized unit can proceed or the user's required outcome depends on a human decision."
+        : "- Human-input: if a non-discoverable product/API/security/architecture/ownership or multi-target write decision lacks authority, requiresHumanInput=true, workUnits=[]. Do not set requiresHumanInput to ask permission for docs, package metadata, public API references, or current external evidence."
+      : undefined,
+    mutationRelevant || agent?.concern === "planning" || writeDiscoveryAuthorityRelevant
+      ? "- Do not ask fallback preference questions for failed verification, docs lookup, package metadata lookup, or command discovery. Try the smallest safe evidence action available to this role, continue from verified evidence, or report the concrete blocker in risks/nextActions."
       : undefined,
     !mutationRelevant && !writeDiscoveryAuthorityRelevant ? "- Read-only uncertainty: report evidenced unknowns/risks; do not set requiresHumanInput for exploitability/product-context questions." : undefined,
     evidenceClaimDiscipline(),
     "- Preserve failure triggers/counterexamples before adjacent findings.",
     mutationRelevant ? "- Impl/test: derive the contract from prompt+repo evidence. Tests are contract oracles: preserve existing assertions unless disproven; add focused criteria plus one meaningful boundary/counterexample. Preserve public compatibility unless evidence requires otherwise. Invalid/reject requirements are contract." : undefined,
-    mutationRelevant ? "- Domain contracts: use active Skills or repo grammar/tests/docs/API evidence. If behavior/API is missing, stop with evidence and next human decision; do not invent." : undefined,
+    mutationRelevant ? "- Domain contracts: use active Skills or repo grammar/tests/docs/API evidence. If product behavior/API semantics are missing, stop with evidence and the specific human decision needed; if tooling/docs/API reference evidence is missing, research when available or report the concrete evidence gap without interviewing for permission." : undefined,
     mutationRelevant && previous?.trim() ? "- Upstream handoffs are context, not authority. Before skipping tests/docs, compare Original User Goal criteria against repo evidence." : undefined,
     mutationRelevant ? "- Code behavior changes update nearest tests unless existing assertions cover every criterion; final distinguishes edited tests from evidence-only tests. Test files register runner-discoverable cases; zero-test assertion scripts are invalid. A narrower step task cannot forbid tests unless the Original User Goal explicitly forbids test edits." : undefined,
     mutationRelevant ? "- Required invariants: if evidence shows an Original User Goal guarantee is unmet, fix it or report a blocking gap; never weaken tests or call unmet required behavior residual risk." : undefined,
-    mutationRelevant && writeExpected ? "- Dependency/tooling installs are workspace mutations. Do not install or remove dependencies unless the current WorkUnit scope explicitly includes the package manifest and lockfile; otherwise report the missing scope/dependency and stop." : undefined,
+    mutationRelevant && writeExpected ? "- Dependency/tooling installs are workspace mutations. Run them only when they are necessary for the user goal or verification evidence; list manifest/lockfile changes with rationale in changedFiles." : undefined,
     mutationRelevant ? "- Coverage breadth: multiple requested rules get separate compact tests per rule plus one composition/determinism case; do not collapse several requirements into one smoke test." : undefined,
     mutationRelevant && verifyExpected ? "- Verification setup hygiene: Clean transient outputs before handoff; list intentional generated files, dependency manifests, lockfiles, and checksum artifacts in changedFiles with rationale and verification." : undefined,
     mutationRelevant ? "- Public API contract comments: preserve exported docs; comment only cross-module/I/O/compat behavior." : undefined,
     mutationRelevant ? "- Prefer resource ownership; avoid leaks, globals, unsafe casts, warning suppression, arbitrary fixed caps, resource escape hatches unless evidenced." : undefined,
     mutationRelevant ? "- Bounded impl/test: small evidence, one impl/test edit when possible, avoid micro-edits, verify once after, one corrective edit/fail." : undefined,
-    mutationRelevant ? "- Verify exact named command else nearest. If edit fails, reread and patch smallest exact block. After pass, one readback, then final; no more shell/tests unless edited again. Fix scope/warnings and rerun." : undefined,
+    mutationRelevant ? "- Verify exact named command else nearest. If edit fails, reread and patch smallest exact block. After pass, one readback, then final; no more shell/tests unless edited again. Fix warnings and rerun." : undefined,
     mutationRelevant && writeExpected ? "- Runtime write contract: `## Agent Handoff.changedFiles` lists every path personally edited; empty changedFiles fails writer steps." : undefined,
     mutationRelevant && verifyExpected ? "- Runtime verification contract: `## Agent Handoff.verification` lists exact command/readback/result evidence or concrete blocked reason; empty verification fails verification-responsible steps." : undefined,
     mutationRelevant ? "- Modified files: `## Handoff` includes `Changed:`, `Verification:`, `Notes:`, exact paths, readback, exact implementation and test/evidence source paths. Never write only local/existing tests, binaries, or commands." : "- Handoff cites exact evidence paths, unresolved uncertainty, and avoids raw logs or unsupported claims.",
@@ -129,12 +137,15 @@ export function buildSdkPrompt(
     implementationReviewRelevant ? "- Reviewer verdict is structured, not prose-parsed. Emit `## Reviewer Verdict` as JSON with verdict, blockingFindings, missingCoverage, evidence, residualRisks, and requiredRepair. For pass, blockingFindings, missingCoverage, and requiredRepair MUST be empty. Evidence items are structured records: {kind:\"reviewed-content\", paths:[...], summary:\"...\"} for reviewed files/content and, when verification is expected, {kind:\"verification\", command:\"...\", status:\"pass|fail|unknown\", result:\"...\"}. Use fail/gap for blocking bugs, missing requested criteria, verification blind spots, skipped scope, or insufficient permanent tests. Residual risks are optional/future-hardening only; unmet Original User Goal guarantees are blockingFindings or missingCoverage." : undefined,
     implementationReviewRelevant ? "- Review unavailable optional verification carefully: block only when the Original User Goal, planner acceptance criteria, or discovered repo commands require it. Otherwise put the non-blocking concern in residualRisks without inventing required repair." : undefined,
     implementationReviewRelevant && verifyExpected ? "- Runtime review contract: `## Agent Handoff.verification` cites verification evidence reviewed or names missing verification as a blocking gap." : undefined,
-    implementationReviewRelevant && verifyExpected ? "- Review-only/no-mutation still allows running existing repo verification commands; a user ban on temporary scripts/files is not a ban on safe existing commands. PASS requires at least one Reviewer Verdict evidence record {kind:\"verification\", command:\"...\", status:\"pass\", result:\"observed output\"}. If you only inspected config or skipped required verification, use verdict:\"gap\" with missingCoverage/requiredRepair instead of PASS." : undefined,
+    implementationReviewRelevant && verifyExpected ? "- Review-only/no-mutation still allows running existing repo evidence commands; a user ban on temporary scripts/files is not a ban on safe existing commands. PASS requires at least one Reviewer Verdict evidence record {kind:\"verification\", command:\"...\", status:\"pass\", result:\"observed output\"}. If you only inspected config or skipped required evidence, use verdict:\"gap\" with missingCoverage/requiredRepair instead of PASS." : undefined,
     !mutationRelevant ? "- For project analysis, cite full relative paths from the repo root, not only basenames, and preserve exact runnable commands discovered in README, package manifests, Makefiles, CI, or test files; do not replace them with generic labels like tests exist." : undefined,
-    !mutationRelevant ? "- When package scripts are present, report them as runnable invocations using the detected package manager, such as `pnpm test`, `npm run build`, or `yarn test`." : undefined,
+    !mutationRelevant ? "- When package scripts are present, report the runnable invocations exactly as discovered in repo files; do not replace them with memorized package-manager examples." : undefined,
     "- Continue while the next action has clear expected value. When runtime pressure rises, produce a recoverable checkpoint or compact handoff with completed evidence, uncertainty, and the next continuation option before deciding whether more tools are worth it.",
     agent && hasAnyCapability(agent, ["coordinate"])
-      ? "- Nested delegation is rare but required when evidence proves scope exceeds one agent's reliable ownership boundary. Pass the bounded objective, evidence, effects, dependencies, and success criteria to chalin_delegate; do not choose topology, agents, steps, stages, or budgets yourself."
+      ? "- Runtime delegation decision: after reading the current handoff/evidence, decide whether the assigned scope is still one reliable ownership loop. Use `chalin_delegate` only when the scope naturally splits into bounded same-role child objectives with separate evidence, acceptance criteria, and a parent-owned consolidation. Do not delegate merely because the task is large, and do not delegate slices already represented as top-level sibling steps unless your assigned slice remains too broad."
+      : undefined,
+    agent && hasAnyCapability(agent, ["coordinate"])
+      ? nestedDelegationInstruction(agent)
       : undefined,
     options.rootTask?.trim() ? "- The Original User Goal below is the contract. Step tasks and handoffs may be partial; preserve the user's exact failure trigger, constraints, requested output fields, and no-code/no-mutation boundaries over any narrower subtask wording." : undefined,
     "- No web unless this role needs fresh external context.",
@@ -187,7 +198,7 @@ export function buildSdkPrompt(
     "## Agent Handoff",
     structuredHandoffRequired
       ? fanoutAuthorized && writeDiscoveryAuthorityRelevant
-        ? "- JSON fields: summary, changedFiles, verification, evidenceClaims, risks, nextActions, requiresHumanInput, humanInputQuestions, workUnits. Writers fill changedFiles; verify steps fill verification. Full human block => requiresHumanInput=true, workUnits=[]. Partial blockers in authorized fanout => requiresHumanInput=false, safe workUnits=[...], blocked decisions in risks/nextActions."
+        ? "- JSON fields: summary, changedFiles, verification, evidenceClaims, risks, nextActions, requiresHumanInput, humanInputQuestions, workUnits. Writers fill changedFiles; verify steps fill verification. Full human block => requiresHumanInput=true, workUnits=[]. Partial blockers in authorized discovered-target work => requiresHumanInput=false, safe workUnits=[...], blocked decisions in risks/nextActions."
         : "- JSON fields: summary, changedFiles, verification, evidenceClaims, risks, nextActions, requiresHumanInput, humanInputQuestions, workUnits. Writers fill changedFiles; verify steps fill verification; human block => requiresHumanInput=true, workUnits=[]."
       : "- JSON object: summary, changedFiles, verification, evidenceClaims, risks, nextActions, requiresHumanInput, humanInputQuestions, workUnits. Use [] for absent arrays.",
     options.workUnitStrategy === "discover" ? workUnitDiscoveryContract(writeExpected, fanoutAuthorized) : undefined,
@@ -221,13 +232,12 @@ function promptDiscoveryEntryLimit(profile: ToolBudgetProfile): number {
 function workUnitDiscoveryContract(writeExpected: boolean, fanoutAuthorized = false): string {
   return [
     "- Discovery contract: workUnits=[{id,title,scope:{files,purpose},dependencies,expectedEffects,acceptanceCriteria}] for bounded work surfaces only. Do not assign agents, topology, stages, or budgets; the planner decides the executable route from these units. expectedEffects is per unit, using read/write/verify; only units that must mutate the workspace should include write.",
-    writeExpected && fanoutAuthorized ? "Authorized fanout: the user already authorized working discovered independent targets. Emit safe WorkUnits for bounded surfaces that can proceed; omit surfaces needing extra scope/API/security/arch/tooling decisions and report them as risks/nextActions instead of blocking the whole fanout." : undefined,
-    writeExpected && !fanoutAuthorized ? "Discovered write units need user authority: if units are alternative owners for the same requested behavior and the user did not authorize all targets, set requiresHumanInput=true, humanInputQuestions=[...], workUnits=[] instead of fanout." : undefined,
-    "scope.files is the only mutation authority for write units: include every expected source, test, docs, config, manifest, lock, generated, or verification-support file the unit may edit/create; do not write acceptance criteria that authorize files missing from scope.files. If needed files are uncertain, mark a scope gap instead of omitting them.",
+    writeExpected && fanoutAuthorized ? "Authorized discovered-target work: the user already authorized working across discovered independent targets. Emit safe WorkUnits for bounded surfaces that can proceed; omit surfaces needing extra scope/API/security/arch/tooling decisions and report them as risks/nextActions instead of blocking the whole workflow." : undefined,
+    writeExpected && !fanoutAuthorized ? "Discovered-target caution: dependency-ordered units inside the already requested outcome may proceed. If you conclude the discovered units are alternative targets, repeated application beyond the requested outcome, or require a human product/security/API/architecture decision, set requiresHumanInput=true, humanInputQuestions=[...], workUnits=[] instead of launching them." : undefined,
     writeExpected ? "Do not invent new product/API/runtime behavior for inert placeholders or surfaces with no observable contract in code, tests, docs, config, routes, or caller evidence; omit them from runnable write WorkUnits or make them docs/read-only review only, and record the needed human decision in risks/nextActions." : undefined,
-    "If a write unit may change an exported API/signature, include direct callers/update surfaces in scope.files or require compatibility in acceptanceCriteria.",
+    "If a write unit may change an exported API/signature, name direct callers/update surfaces in files or require compatibility in acceptanceCriteria.",
     "Use short stable ids and put only other unit ids or exact titles in dependencies; shared mutable surfaces require dependencies, not parallel-ready units.",
-    "Mutation units need a credible verification path from discovered repo commands, direct readback, or an explicitly planned verification artifact; if setup/tooling commands may update repo files, include those versioned mutation surfaces in scope.files, split setup into a dependency unit, or report a scope gap before launching workers.",
+    "Mutation units need a credible verification path from discovered repo commands, direct readback, or an explicitly planned verification artifact; if setup/tooling commands update repo files, record those versioned surfaces in changedFiles with rationale.",
     "Do not list dependency cache/install directories as deliverables unless the repo already versions them.",
   ].filter(Boolean).join(" ");
 }
@@ -268,7 +278,7 @@ export function childToolNames(agent: AgentDefinition | undefined, needsArtifact
   }
   const delegationDepth = options.delegationDepth ?? 1;
   const maxDelegationDepth = options.maxDelegationDepth ?? 2;
-  if (hasAnyCapability(agent, ["coordinate"]) && delegationDepth < maxDelegationDepth && !hasPrevious) {
+  if (hasAnyCapability(agent, ["coordinate"]) && delegationDepth < maxDelegationDepth) {
     names.add("chalin_delegate");
   }
   names.add("chalin_project_discovery");
@@ -451,4 +461,17 @@ function formatPriorFilesRead(files: string[]): string {
 
 function hasAnyCapability(agent: AgentDefinition, capabilities: AgentCapability[]): boolean {
   return capabilities.some((capability) => agent.capabilities.includes(capability));
+}
+
+function nestedDelegationInstruction(agent: AgentDefinition): string {
+  if (agent.concern === "planning") {
+    return "- Nested delegation is planning-only for this planner: delegate only bounded planning shards to planning agents, never workspace mutation or worker/reviewer execution. Use it when alternatives, migrations, or architecture areas need separate plans before one consolidated parent plan. Consolidate child planning handoffs into one global plan for the parent workflow.";
+  }
+  if (agent.concern === "implementation") {
+    return "- Nested delegation is implementation-only for this worker: delegate only tiny bounded write slices to implementation agents after evidence shows independent ownership boundaries, separate files/surfaces, and a credible verification path per slice. Do not include reviewer children; reviewer fan-out happens later under the reviewer parent.";
+  }
+  if (agent.concern === "review") {
+    return "- Nested delegation is review-only for this reviewer: delegate only focused review slices to review agents, never workspace mutation. Use it when a broad audit naturally splits by module/domain/risk area and one parent verdict must reconcile the child findings. Consolidate child review findings into one Reviewer Verdict.";
+  }
+  return "- Nested delegation is available when evidence shows the assigned scope exceeds one agent's reliable ownership boundary. Use chalin_delegate for bounded child objectives; pass evidence, effects, dependencies, and success criteria, and let the nested planner choose topology, agents, steps, stages, and budgets.";
 }

@@ -82,10 +82,13 @@ function routeResultInstruction(result: ChalinHandleResult, finalMaterial: strin
     return "Instruction: answer from Final answer material; use more tools only for an explicit critical gap.";
   }
   if (result.run?.status === "paused") {
+    if (result.run.recoveryState?.blockedByHumanInput || result.run.intentContract?.requiresInterview) {
+      return "Instruction: ask the user the blocking question(s) before continuing this same run; do not start another route for the same work.";
+    }
     return "Instruction: paused before final synthesis; treat summary as partial context.";
   }
   if (result.run?.status === "failed") {
-    return "Instruction: failed before final synthesis; explain the gap and next repair step.";
+    return `Instruction: failed before final synthesis; preserve this workflow state. If the user asks to continue, call chalin_resume with {"runId":"${result.run.id}"} and do not start another route for the same work.`;
   }
   return "Instruction: answer from the summary and name any remaining gap explicitly.";
 }
@@ -247,6 +250,7 @@ function runObservabilityMaterial(run: RunState | undefined): string | undefined
     run.workUnits?.length ? `- work units: ${run.workUnits.length} · skipped steps: ${run.steps.filter((step) => step.status === "skipped").length}` : undefined,
     run.recoveryState?.failedStepId ? `- failed: ${run.recoveryState.failedStepId}${run.recoveryState.failedUnitId ? ` · unit: ${run.recoveryState.failedUnitId}` : ""}` : undefined,
     run.recoveryState?.reviewersNotRun.length ? `- reviewers not run: ${run.recoveryState.reviewersNotRun.join(", ")}` : undefined,
+    run.recoveryState?.blockedByHumanInput && run.recoveryState.repairOptions.length ? `- blocking questions: ${run.recoveryState.repairOptions.join("; ")}` : undefined,
     run.recoveryState?.repairOptions.length ? `- repair options: ${run.recoveryState.repairOptions.join("; ")}` : undefined,
     run.mutationLedger?.length || run.verificationLedger?.length ? `- ledgers: mutations ${run.mutationLedger?.length ?? 0} · verification ${run.verificationLedger?.length ?? 0}` : undefined,
   ];

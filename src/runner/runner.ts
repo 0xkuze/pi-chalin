@@ -9,7 +9,7 @@ import { evaluateBudgetUsage, policyForStep, recordRuntimeCheckpoint, scoreProgr
 import { claimsNeedingAudit, claimsRequireAudit } from "../observability/evidence-claims.ts";
 import type { ChalinPathsOptions } from "../config/paths.ts";
 import { createConfiguredMemoryStore } from "../memory/memory-provider.ts";
-import type { AgentOutput, AgentStep, BudgetCapHit, EvidenceClaim, NestedRunTrace, RouteDecision, RouteExpectedEffect, RoutePlan, RunState, RunStepMetrics, RunStepPauseReason, RunStepRepairKind, RunStepState, TokenUsageSummary, ToolBudgetProfile, WorkUnit } from "../domain/schemas.ts";
+import type { AgentOutput, AgentStep, BudgetCapHit, EvidenceClaim, NestedRunTrace, RouteDecision, RouteExpectedEffect, RoutePlan, RunState, RunStepMetrics, RunStepPauseReason, RunStepRepairKind, RunStepState, TokenUsageSummary, ToolBudgetProfile } from "../domain/schemas.ts";
 import { createChildToolPolicy, createChildTools, type ChalinDelegateParamsShape, type ChildToolActivity, type ChildToolPolicy } from "../tools/child-tools.ts";
 import { createChalinChildSessionManager } from "../runtime/child-sessions.ts";
 import { AgentCatalog } from "../agents/agents.ts";
@@ -32,7 +32,7 @@ import { normalizeMetricFilePath } from "../utils/paths.ts";
 import { parseAgentOutput } from "./agent-output.ts";
 import { buildContextPacket, formatContextPacket, sanitizeWorkspacePathList, sanitizeWorkspaceTextForRoots } from "./context-packet.ts";
 import { markBlockedDependentsSkipped, markHumanBlockedDependentsSkipped, updateRecoveryState } from "./run-recovery.ts";
-import { isRecord, truncateText } from "./runner-utils.ts";
+import { compactHandoffItems, compactHandoffText, handoffBudgetChars, isRecord, truncateText } from "./runner-utils.ts";
 import { expandWorkUnitsFromBestHandoff, expandWorkUnitsFromHandoff, refreshWorkUnitStatuses } from "./work-units.ts";
 
 export { parseAgentOutput } from "./agent-output.ts";
@@ -45,6 +45,7 @@ export interface WorkerRunnerContext extends ChalinPathsOptions {
   thinkingOverrides?: Record<string, AgentThinkingLevel>;
   parentRunId?: string;
   parentStepId?: string;
+  parentSessionFile?: string;
   delegationDepth?: number;
   explicitSkills?: string[];
   disabledSkills?: string[];
@@ -178,10 +179,9 @@ export class SdkWorkerRunner implements WorkerRunner {
         if (runBlockedByHumanInput(run) || step.status === "skipped") break;
         const result = await runSdkStep(step, context, extensionContext, run, { previous, cwd: context.cwd });
         if (result.aborted || result.paused) break;
-        previous = result.handoff ?? previous;
+        previous = formatStepHandoffForNextAgent(step) ?? result.handoff ?? previous;
         afterStepHandoff(run, step);
         if (runBlockedByHumanInput(run)) break;
-        maybeAppendWorkerScopeGapRepair(run, step, context.agents);
         maybeAppendImplementationReviewRepair(run, step, context.agents);
         if (step.status === "failed") break;
       }
@@ -213,20 +213,18 @@ export class SdkWorkerRunner implements WorkerRunner {
         const step = run.steps[index]!;
         if (runBlockedByHumanInput(run) || step.status === "skipped") break;
         if (isUsableStepHandoff(step)) {
-          previous = step.output?.handoff ?? step.output?.text ?? previous;
+          previous = formatStepHandoffForNextAgent(step) ?? step.output?.handoff ?? step.output?.text ?? previous;
           afterStepHandoff(run, step);
           if (runBlockedByHumanInput(run)) break;
-          maybeAppendWorkerScopeGapRepair(run, step, context.agents);
           maybeAppendImplementationReviewRepair(run, step, context.agents);
           if (step.status === "failed") break;
           continue;
         }
         const result = await runSdkStep(step, context, extensionContext, run, { previous, cwd: context.cwd });
         if (result.aborted || result.paused) break;
-        previous = result.handoff ?? previous;
+        previous = formatStepHandoffForNextAgent(step) ?? result.handoff ?? previous;
         afterStepHandoff(run, step);
         if (runBlockedByHumanInput(run)) break;
-        maybeAppendWorkerScopeGapRepair(run, step, context.agents);
         maybeAppendImplementationReviewRepair(run, step, context.agents);
         if (step.status === "failed") break;
       }
@@ -247,10 +245,9 @@ async function runMockDag(run: RunState, stages: Extract<RoutePlan, { kind: "dag
     afterStageHandoffs(run, stageSteps);
     if (runBlockedByHumanInput(run)) break;
     for (const step of stageSteps) {
-      maybeAppendWorkerScopeGapRepair(run, step, context.agents);
       maybeAppendImplementationReviewRepair(run, step, context.agents);
     }
-    previous = aggregateHandoff(outputs.map((output) => ({ agent: output.agent, text: output.handoff ?? output.text })));
+    previous = aggregateStageHandoff(stageSteps) || aggregateHandoff(outputs.map((output) => ({ agent: output.agent, text: output.handoff ?? output.text })));
   }
 }
 
@@ -266,7 +263,6 @@ async function resumeMockDag(run: RunState, stages: Extract<RoutePlan, { kind: "
       afterStageHandoffs(run, stageSteps);
       if (runBlockedByHumanInput(run)) break;
       for (const step of stageSteps) {
-        maybeAppendWorkerScopeGapRepair(run, step, context.agents);
         maybeAppendImplementationReviewRepair(run, step, context.agents);
       }
       continue;
@@ -278,16 +274,12 @@ async function resumeMockDag(run: RunState, stages: Extract<RoutePlan, { kind: "
       run,
       `mock-dag-resume:${stage.id}`,
     );
-    const completedOutputs = stageSteps
-      .filter((step) => isUsableStepHandoff(step))
-      .map((step) => ({ agent: step.agent, text: step.output?.handoff ?? step.output?.text ?? "" }));
     afterStageHandoffs(run, stageSteps);
     if (runBlockedByHumanInput(run)) break;
     for (const step of stageSteps) {
-      maybeAppendWorkerScopeGapRepair(run, step, context.agents);
       maybeAppendImplementationReviewRepair(run, step, context.agents);
     }
-    previous = aggregateHandoff([...completedOutputs, ...outputs.map((output) => ({ agent: output.agent, text: output.handoff ?? output.text }))]);
+    previous = aggregateStageHandoff(stageSteps) || aggregateHandoff(outputs.map((output) => ({ agent: output.agent, text: output.handoff ?? output.text })));
   }
 }
 
@@ -364,7 +356,6 @@ export function declaredFilesByIsolatedStepId(scopeSteps: RunStepState[]): Map<s
   const files = new Map<string, string[]>();
   for (const step of scopeSteps) {
     if (step.status !== "complete") continue;
-    if ((step.metrics?.policyViolations ?? []).some(isFatalToolPolicyViolation)) continue;
     const changedFiles = step.output?.structuredHandoff?.changedFiles ?? [];
     if (changedFiles.length === 0) continue;
     files.set(step.id.split(":").at(-1) ?? step.id, changedFiles);
@@ -439,7 +430,6 @@ async function runSdkDag(
     afterStageHandoffs(run, stageSteps);
     if (runBlockedByHumanInput(run)) break;
     for (const step of stageSteps) {
-      maybeAppendWorkerScopeGapRepair(run, step, context.agents);
       maybeAppendImplementationReviewRepair(run, step, context.agents);
     }
     previous = aggregateStageHandoff(stageSteps);
@@ -458,81 +448,10 @@ async function runSdkDag(
 
 function aggregateStageHandoff(stageSteps: RunStepState[]): string {
   return aggregateHandoff(stageSteps.map((step) => {
-    if (isUsableStepHandoff(step)) return { agent: step.agent, text: step.output?.handoff ?? step.output?.text ?? "" };
+    if (isUsableStepHandoff(step)) return { agent: step.agent, text: formatStepHandoffForNextAgent(step) ?? "" };
     if (step.status === "failed") return { agent: step.agent, text: `FAILED: ${step.error ?? "unknown error"}. Treat this as a known coverage gap and make it explicit in downstream synthesis.` };
     return { agent: step.agent, text: "" };
   }));
-}
-
-function maybeAppendWorkerScopeGapRepair(run: RunState, step: RunStepState, agents: Map<string, AgentDefinition>): boolean {
-  if (!isWriteResponsibleAgent(agents.get(step.agent)) || !isUsableStepHandoff(step)) return false;
-  const gapFiles = workUnitScopeGapPaths(step.metrics?.policyViolations ?? []);
-  if (gapFiles.length === 0) return false;
-  const stepIndex = run.steps.indexOf(step);
-  if (stepIndex < 0 || hasLaterImplementationRepair(run, stepIndex)) return false;
-
-  const existingRepairCycles = repairCycleCount(run, "scope-gap");
-  const maxRepairCycles = maxImplementationReviewRepairCycles();
-  if (existingRepairCycles >= maxRepairCycles) {
-    step.status = "failed";
-    step.error = `Worker reported WorkUnit scope gap(s) after ${existingRepairCycles} repair cycle(s): ${gapFiles.slice(0, 8).join(", ")}.`;
-    run.warnings.push(`${step.error} Stopping instead of finalizing incomplete routed implementation.`);
-    persistRun(run);
-    return false;
-  }
-
-  const cycle = existingRepairCycles + 1;
-  const sequence = nextReviewRepairSequence(run);
-  const repairUnit = ensureWorkerScopeGapRepairScope(run, step, gapFiles, sequence);
-  const originalTask = run.rootTask ?? run.route.reason;
-  const workerText = truncateText(step.output?.handoff ?? step.output?.text ?? "", 900);
-  const repairWorker: RunStepState = {
-    id: `review-repair-${sequence}-mutation`,
-    agent: step.agent,
-    task: [
-      "Repair the worker-reported WorkUnit scope gap.",
-      formatRepairUnitContext(repairUnit),
-      "Apply only the missing cross-scope repair named by the previous worker handoff, then run the nearest verification command.",
-      "Handoff exact changed paths, verification command/result, and any remaining risk.",
-      `Original task: ${originalTask}`,
-      `Previous worker handoff: ${workerText}`,
-    ].join(" "),
-    budget: "tight",
-    status: "pending",
-    workUnitId: repairUnit.id,
-    dependencies: [step.id],
-    repairCycle: cycle,
-    repairKind: "scope-gap",
-  };
-  const reviewerAgent = selectVerificationAgentForRepair(run, agents, step.agent);
-  const repairReviewer: RunStepState = {
-    id: `review-repair-${sequence}-verification`,
-    agent: reviewerAgent,
-    task: [
-      "Review the scope-gap repair against the original task, the previous worker handoff, and the repair WorkUnit scope.",
-      "Return PASS only if the blocked file gap is resolved and verification evidence is real.",
-      "Return FAIL/GAP with structured blocker files if the repair is incomplete.",
-      `Original task: ${originalTask}`,
-      `Previous worker handoff: ${workerText}`,
-    ].join(" "),
-    budget: "tight",
-    status: "pending",
-    workUnitId: repairUnit.id,
-    repairCycle: cycle,
-    repairKind: "scope-gap",
-  };
-
-  appendImplementationReviewRepair(
-    run,
-    sequence,
-    repairWorker,
-    repairReviewer,
-    "because a worker reported a WorkUnit scope gap",
-    { afterStageId: run.route.plan?.kind === "dag" ? step.stageId ?? stageIdForStep(step.id) : undefined },
-  );
-  run.warnings.push(`${step.agent} reported WorkUnit scope gap(s); queued repair cycle ${cycle}/${maxRepairCycles} for ${gapFiles.slice(0, 8).join(", ")}.`);
-  persistRun(run);
-  return true;
 }
 
 function maybeAppendImplementationReviewRepair(run: RunState, step: RunStepState, agents: Map<string, AgentDefinition>): boolean {
@@ -570,7 +489,7 @@ function maybeAppendImplementationReviewRepair(run: RunState, step: RunStepState
       agent: step.agent,
       task: [
         "Re-audit the previous implementation review evidence, not the implementation itself unless a named claim needs one targeted read.",
-        "Scope this evidence repair to the same WorkUnit as the previous reviewer. Do not report pending, skipped, or unrelated WorkUnits as blocking findings; those units keep their own mutation/verification gates.",
+        "Keep this evidence repair tied to the same WorkUnit context as the previous reviewer. Do not report pending, skipped, or unrelated WorkUnits as blocking findings; those units keep their own mutation/verification gates.",
         reviewerUnitContext,
         "Return a structured Reviewer Verdict. PASS requires evidence records: {kind:\"reviewed-content\", paths:[...], summary:\"...\"} and, when verification is expected, {kind:\"verification\", command:\"...\", status:\"pass|fail|unknown\", result:\"...\"}.",
         "If the earlier PASS was wrong, return FAIL/GAP with exact blocking findings and required repair.",
@@ -601,8 +520,7 @@ function maybeAppendImplementationReviewRepair(run: RunState, step: RunStepState
 
   const workerIndex = findImplementationWorkerIndexForReviewer(run, step, stepIndex, agents);
   if (workerIndex < 0) return false;
-  let reviewerGap = !reviewerMissingVerdict && reviewerBlockingHandoffNeedsRepair(step, reviewerAgent);
-  if (reviewerGap && downgradeOutOfScopeReviewerEvidenceRepairGap(run, step)) reviewerGap = false;
+  const reviewerGap = !reviewerMissingVerdict && reviewerBlockingHandoffNeedsRepair(step, reviewerAgent);
   const permanentTestGap = !reviewerGap && implementationPassNeedsPermanentTestRepair(run, workerIndex, stepIndex);
   if (!reviewerGap && !permanentTestGap) return false;
   if (existingImplementationRepairCycles >= maxRepairCycles) {
@@ -623,18 +541,17 @@ function maybeAppendImplementationReviewRepair(run: RunState, step: RunStepState
   const repairScope = reviewerGap
     ? "Use the previous reviewer handoff as the gap list; do not repeat broad discovery unless a named file is missing."
     : "Add/update permanent runner-discoverable tests for the changed behavior. Preserve the implementation unless the new tests reveal a bug. Ignore narrower step wording that prohibited tests unless the Original User Goal explicitly prohibited test edits.";
-  const repairUnit = reviewerGap ? ensureCrossWorkUnitRepairScope(run, step, implementationUnitId, sequence, agents) : undefined;
-  const repairWorkUnitId = repairUnit?.id ?? implementationUnitId;
-  const repairUnitContext = repairUnit ? formatRepairUnitContext(repairUnit) : formatImplementationRepairUnitContext(run, step, implementationUnitId, agents);
+  const repairWorkUnitId = implementationUnitId;
+  const repairUnitContext = formatImplementationRepairUnitContext(run, step, implementationUnitId, agents);
   const repairWorker: RunStepState = {
     id: `review-repair-${sequence}-mutation`,
     agent: run.steps[workerIndex]?.agent ?? selectMutationAgentForRepair(run, agents, step.agent),
     task: [
       repairIntro,
       repairUnitContext,
-      "Read only the changed implementation/test files needed for the repair, apply the smallest corrective edit, add or update focused regression tests for the missed criteria, then run the requested or nearest verification command.",
+      "Read only the changed implementation/test files needed for the repair, apply the smallest corrective edit, add or update focused regression tests for the missed criteria, then run the requested or nearest meaningful evidence command discovered in the repo.",
       "Before handoff, check workspace status and clean transient generated outputs from verification/build/setup commands unless those generated files are intentional deliverables listed in changedFiles.",
-      "Handoff exact changed paths, tests added/updated, verification command, and any remaining risk.",
+      "Handoff exact changed paths, tests added/updated, evidence command/result, and any remaining risk.",
       `Original task: ${originalTask}`,
       repairScope,
     ].join(" "),
@@ -678,51 +595,6 @@ function maybeAppendImplementationReviewRepair(run: RunState, step: RunStepState
   return true;
 }
 
-function downgradeOutOfScopeReviewerEvidenceRepairGap(run: RunState, step: RunStepState): boolean {
-  if (!isReviewerOnlyEvidenceRepairStep(run, step)) return false;
-  const verdict = step.output?.reviewerVerdict;
-  const unit = run.workUnits?.find((candidate) => candidate.id === step.workUnitId);
-  const unitFiles = new Set((unit?.files ?? []).map(normalizeMetricFilePath).filter(Boolean));
-  if (!verdict || unitFiles.size === 0) return false;
-  const blockingTexts = [...verdict.blockingFindings, ...verdict.missingCoverage, verdict.requiredRepair ?? ""].filter(Boolean);
-  const blockingPaths = pathsMentionedInTexts(blockingTexts);
-  const failedEvidencePaths = (verdict.evidenceRecords ?? [])
-    .filter((record) => record.status === "fail")
-    .flatMap((record) => record.paths.map(normalizeMetricFilePath).filter(Boolean));
-  const scopedBlockingPaths = [...new Set([...blockingPaths, ...failedEvidencePaths])];
-  if (scopedBlockingPaths.length === 0 || scopedBlockingPaths.some((filePath) => unitFiles.has(filePath))) return false;
-
-  const warning = `Reviewer evidence repair reported out-of-scope gap(s) for ${scopedBlockingPaths.slice(0, 8).join(", ")}; kept them as residual risks instead of queuing a mutation repair for ${step.workUnitId ?? "unknown WorkUnit"}.`;
-  verdict.residualRisks = [
-    ...new Set([
-      ...(verdict.residualRisks ?? []),
-      ...verdict.blockingFindings,
-      ...verdict.missingCoverage,
-      ...(verdict.requiredRepair ? [verdict.requiredRepair] : []),
-    ]),
-  ];
-  verdict.verdict = "pass";
-  verdict.blockingFindings = [];
-  verdict.missingCoverage = [];
-  delete verdict.requiredRepair;
-  step.output!.warnings = appendUnique(step.output!.warnings, warning);
-  pushUniqueWarnings(run, [warning]);
-  return true;
-}
-
-function isReviewerOnlyEvidenceRepairStep(run: RunState, step: RunStepState): boolean {
-  if (step.repairKind !== "review-evidence") return false;
-  const cycle = reviewRepairCycleId(step.id);
-  if (!cycle) return false;
-  return !run.steps.some((candidate) => candidate.id.startsWith(`review-repair-${cycle}-mutation`));
-}
-
-function reviewRepairCycleId(stepId: string): string | undefined {
-  const normalized = stepId.trim();
-  const match = /^review-repair-(\d+)-verification(?::|$)/.exec(normalized);
-  return match?.[1];
-}
-
 function pathsMentionedInTexts(texts: string[]): string[] {
   const paths: string[] = [];
   const pathPattern = /(?:^|[\s(:])([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+|[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+)/g;
@@ -737,113 +609,22 @@ function pathsMentionedInTexts(texts: string[]): string[] {
 
 function formatReviewRepairUnitContext(run: RunState, step: RunStepState): string {
   const unit = run.workUnits?.find((candidate) => candidate.id === step.workUnitId);
-  if (!unit) return `WorkUnit scope: ${step.workUnitId ?? "unknown"}.`;
+  if (!unit) return `WorkUnit context: ${step.workUnitId ?? "unknown"}.`;
   const files = unit.files?.length ? unit.files.join(", ") : "no declared files";
   const criteria = unit.acceptanceCriteria?.length ? unit.acceptanceCriteria.join("; ") : "no explicit criteria";
-  return `WorkUnit scope: ${unit.id} (${unit.title}). Files: ${files}. Acceptance criteria: ${criteria}.`;
+  return `WorkUnit context: ${unit.id} (${unit.title}). Candidate files: ${files}. Acceptance criteria: ${criteria}.`;
 }
 
 function formatImplementationRepairUnitContext(run: RunState, reviewerStep: RunStepState, implementationUnitId: string | undefined, agents: Map<string, AgentDefinition>): string {
   const unit = run.workUnits?.find((candidate) => candidate.id === implementationUnitId) ?? run.workUnits?.find((candidate) => candidate.id === reviewerStep.workUnitId);
-  if (!unit) return `WorkUnit scope: ${implementationUnitId ?? reviewerStep.workUnitId ?? "unknown"}.`;
+  if (!unit) return `WorkUnit context: ${implementationUnitId ?? reviewerStep.workUnitId ?? "unknown"}.`;
   const repairFiles = [
     ...(unit.files ?? []),
     ...priorWorkerChangedFilesForReviewer(run, reviewerStep, implementationUnitId, agents),
   ];
   const files = repairFiles.length ? [...new Set(repairFiles)].join(", ") : "no declared files";
   const criteria = unit.acceptanceCriteria?.length ? unit.acceptanceCriteria.join("; ") : "reviewer-confirmed blocking findings";
-  return `WorkUnit scope: ${unit.id} (${unit.title}). Files: ${files}. Acceptance criteria: ${criteria}.`;
-}
-
-function ensureCrossWorkUnitRepairScope(run: RunState, reviewerStep: RunStepState, implementationUnitId: string | undefined, cycle: number, agents: Map<string, AgentDefinition>): WorkUnit | undefined {
-  const verdict = reviewerStep.output?.reviewerVerdict;
-  const repairFiles = normalizedRepairFiles(verdict?.repairFiles ?? []);
-  if (repairFiles.length === 0) return undefined;
-
-  const baseUnit = run.workUnits?.find((candidate) => candidate.id === implementationUnitId || candidate.id === reviewerStep.workUnitId);
-  const baseFiles = normalizedRepairFiles([
-    ...(baseUnit?.files ?? []),
-    ...priorWorkerChangedFilesForReviewer(run, reviewerStep, implementationUnitId, agents),
-  ]);
-  const baseFileSet = new Set(baseFiles);
-  const outsideBase = repairFiles.filter((filePath) => !baseFileSet.has(filePath));
-  if (outsideBase.length === 0) return undefined;
-
-  const expectedEffects = [...routeExpectedEffects(run)];
-  const unit: WorkUnit = {
-    id: uniqueRepairUnitId(run, `repair-${cycle}-${implementationUnitId ?? reviewerStep.workUnitId ?? "work-unit"}`),
-    title: baseUnit ? `Repair ${baseUnit.title}` : "Repair reviewer findings",
-    kind: "repair",
-    status: "pending",
-    scope: [
-      "Repair reviewer-confirmed blocking findings that cross the original WorkUnit file boundary.",
-    ],
-    files: [...new Set([...baseFiles, ...repairFiles])],
-    dependencies: baseUnit ? [baseUnit.id] : [],
-    expectedEffects: expectedEffects.length ? expectedEffects : ["read", "write", "verify"],
-    acceptanceCriteria: repairAcceptanceCriteria(verdict),
-    sourceStepId: reviewerStep.id,
-    createdFrom: "repair",
-  };
-  run.workUnits ??= [];
-  run.workUnits.push(unit);
-  const warning = `Created cross-WorkUnit repair scope ${unit.id} for reviewer-confirmed file(s): ${outsideBase.slice(0, 8).join(", ")}${outsideBase.length > 8 ? `, and ${outsideBase.length - 8} more` : ""}.`;
-  pushUniqueWarnings(run, [warning]);
-  return unit;
-}
-
-function ensureWorkerScopeGapRepairScope(run: RunState, step: RunStepState, gapFiles: string[], cycle: number): WorkUnit {
-  const baseUnit = run.workUnits?.find((candidate) => candidate.id === step.workUnitId);
-  const baseFiles = normalizedRepairFiles([
-    ...(baseUnit?.files ?? []),
-    ...(step.output?.structuredHandoff?.changedFiles ?? []),
-  ]);
-  const normalizedGapFiles = normalizedRepairFiles(gapFiles);
-  const ownerUnitIds = workUnitIdsOwningFiles(run, normalizedGapFiles);
-  const expectedEffects = [...routeExpectedEffects(run)];
-  const unit: WorkUnit = {
-    id: uniqueRepairUnitId(run, `repair-${cycle}-${step.workUnitId ?? "scope-gap"}`),
-    title: baseUnit ? `Repair ${baseUnit.title}` : "Repair WorkUnit scope gap",
-    kind: "repair",
-    status: "pending",
-    scope: [
-      "Repair a worker-reported missing dependency or file boundary from the current WorkUnit.",
-    ],
-    files: [...new Set([...baseFiles, ...normalizedGapFiles])],
-    dependencies: [...new Set([...(baseUnit ? [baseUnit.id] : []), ...ownerUnitIds])],
-    expectedEffects: expectedEffects.length ? expectedEffects : ["read", "write", "verify"],
-    acceptanceCriteria: workerScopeGapAcceptanceCriteria(step, normalizedGapFiles),
-    sourceStepId: step.id,
-    createdFrom: "repair",
-  };
-  run.workUnits ??= [];
-  run.workUnits.push(unit);
-  const warning = `Created WorkUnit scope-gap repair ${unit.id} for ${normalizedGapFiles.slice(0, 8).join(", ")}${normalizedGapFiles.length > 8 ? `, and ${normalizedGapFiles.length - 8} more` : ""}.`;
-  pushUniqueWarnings(run, [warning]);
-  return unit;
-}
-
-function formatRepairUnitContext(unit: WorkUnit): string {
-  const files = unit.files?.length ? unit.files.join(", ") : "no declared files";
-  const criteria = unit.acceptanceCriteria.length ? unit.acceptanceCriteria.join("; ") : "reviewer-confirmed blocking findings";
-  return `Repair WorkUnit scope: ${unit.id} (${unit.title}). Files: ${files}. Acceptance criteria: ${criteria}.`;
-}
-
-function workerScopeGapAcceptanceCriteria(step: RunStepState, gapFiles: string[]): string[] {
-  const handoff = step.output?.structuredHandoff;
-  const criteria = [
-    ...gapFiles.map((filePath) => `Resolve WorkUnit scope gap for ${filePath}.`),
-    ...(handoff?.nextActions ?? []),
-    ...(handoff?.risks ?? []),
-  ].map((item) => item.trim()).filter(Boolean);
-  return criteria.length ? [...new Set(criteria)].slice(0, 12) : ["Resolve the worker-reported scope gap and verify the repair."];
-}
-
-function workUnitIdsOwningFiles(run: RunState, files: string[]): string[] {
-  const wanted = new Set(files.map(normalizeMetricFilePath));
-  return [...new Set((run.workUnits ?? [])
-    .filter((unit) => (unit.files ?? []).map(normalizeMetricFilePath).some((filePath) => wanted.has(filePath)))
-    .map((unit) => unit.id))];
+  return `WorkUnit context: ${unit.id} (${unit.title}). Candidate files: ${files}. Acceptance criteria: ${criteria}.`;
 }
 
 function priorWorkerChangedFilesForReviewer(run: RunState, reviewerStep: RunStepState, implementationUnitId: string | undefined, agents: Map<string, AgentDefinition>): string[] {
@@ -860,15 +641,6 @@ function priorWorkerChangedFilesForReviewer(run: RunState, reviewerStep: RunStep
     )
   ));
   return workerIndex >= 0 ? run.steps[workerIndex]?.output?.structuredHandoff?.changedFiles ?? [] : [];
-}
-
-function repairAcceptanceCriteria(verdict: ReviewerVerdict | undefined): string[] {
-  const criteria = [
-    ...(verdict?.blockingFindings ?? []),
-    ...(verdict?.missingCoverage ?? []),
-    verdict?.requiredRepair ?? "",
-  ].map((item) => item.trim()).filter(Boolean);
-  return criteria.length ? [...new Set(criteria)].slice(0, 12) : ["Resolve the reviewer-confirmed blocking findings and verify the repair."];
 }
 
 function selectVerificationAgentForRepair(run: RunState, agents: Map<string, AgentDefinition>, avoidAgent?: string): string {
@@ -915,16 +687,6 @@ function normalizeRepairFile(filePath: string): string | undefined {
   if (!normalized || normalized === "." || normalized === "..") return undefined;
   if (path.isAbsolute(normalized) || normalized.startsWith("../") || normalized.includes("/../")) return undefined;
   return normalized;
-}
-
-function uniqueRepairUnitId(run: RunState, baseId: string): string {
-  let id = baseId;
-  let suffix = 2;
-  while (run.workUnits?.some((unit) => unit.id === id)) {
-    id = `${baseId}-${suffix}`;
-    suffix += 1;
-  }
-  return id;
 }
 
 function findImplementationWorkerIndexForReviewer(run: RunState, reviewerStep: RunStepState, reviewerIndex: number, agents: Map<string, AgentDefinition>): number {
@@ -1525,184 +1287,6 @@ function applyWorkspaceHygieneGate(run: RunState, step: RunStepState, agent: Age
   }
 }
 
-function applyFatalToolPolicyGate(run: RunState, step: RunStepState, agent: AgentDefinition | undefined): void {
-  if (step.status !== "complete") return;
-  const fatalViolations = (step.metrics?.policyViolations ?? []).filter(isFatalToolPolicyViolation);
-  if (fatalViolations.length === 0) return;
-  const reason = `Tool policy violation(s): ${fatalViolations.slice(0, 5).join("; ")}${fatalViolations.length > 5 ? `; and ${fatalViolations.length - 5} more` : ""}.`;
-  step.output!.warnings = appendUnique(step.output!.warnings, reason);
-  pushUniqueWarnings(run, [reason]);
-  if (isWriteResponsibleAgent(agent)) {
-    step.status = "failed";
-    step.error = reason;
-  }
-}
-
-export function reconcileDeclaredGeneratedScopeViolations(run: RunState, step: RunStepState, cwd?: string): string[] {
-  if (step.status !== "complete") return [];
-  const metrics = step.metrics;
-  const output = step.output;
-  const handoff = output?.structuredHandoff;
-  if (!metrics?.policyViolations?.length || !output || !handoff || handoff.verification.length === 0) return [];
-  const unit = run.workUnits?.find((candidate) => candidate.id === step.workUnitId);
-  if (!unit) return [];
-  const changedFileList = handoff.changedFiles.map(normalizeMetricFilePath).filter(Boolean);
-  const changedFiles = new Set(changedFileList);
-  const filesTouched = new Set((metrics.filesTouched ?? []).map(normalizeMetricFilePath).filter(Boolean));
-  const currentUnitFiles = new Set((unit.files ?? []).map(normalizeMetricFilePath).filter(Boolean));
-  const removedGeneratedArtifacts = scopeViolationPaths(metrics.policyViolations)
-    .filter((filePath) => changedFiles.has(filePath))
-    .filter((filePath) => !filesTouched.has(filePath))
-    .filter((filePath) => !currentUnitFiles.has(filePath))
-    .filter((filePath) => Boolean(cwd) && !workspaceMetricPathExists(cwd!, filePath));
-  if (removedGeneratedArtifacts.length > 0) {
-    metrics.policyViolations = removeScopeViolationPaths(metrics.policyViolations, removedGeneratedArtifacts);
-    handoff.changedFiles = handoff.changedFiles.filter((filePath) => !removedGeneratedArtifacts.includes(normalizeMetricFilePath(filePath)));
-    const warning = `Ignored removed generated artifact(s) outside WorkUnit deliverables: ${removedGeneratedArtifacts.slice(0, 8).join(", ")}${removedGeneratedArtifacts.length > 8 ? `, and ${removedGeneratedArtifacts.length - 8} more` : ""}.`;
-    output.warnings = appendUnique(output.warnings, warning);
-    pushUniqueWarnings(run, [warning]);
-  }
-  const transientDependencyArtifacts = scopeViolationPaths(metrics.policyViolations)
-    .filter((filePath) => changedFiles.has(filePath))
-    .filter((filePath) => !filesTouched.has(filePath))
-    .filter((filePath) => !currentUnitFiles.has(filePath))
-    .filter(isDependencyResolutionArtifactPath)
-    .filter((filePath) => !unitOwnsDependencyResolutionSurface(unit, changedFileList, filePath));
-  if (transientDependencyArtifacts.length > 0) {
-    metrics.policyViolations = removeScopeViolationPaths(metrics.policyViolations, transientDependencyArtifacts);
-    handoff.changedFiles = handoff.changedFiles.filter((filePath) => !transientDependencyArtifacts.includes(normalizeMetricFilePath(filePath)));
-    const warning = `Ignored transient dependency artifact(s) outside WorkUnit ownership: ${transientDependencyArtifacts.slice(0, 8).join(", ")}${transientDependencyArtifacts.length > 8 ? `, and ${transientDependencyArtifacts.length - 8} more` : ""}.`;
-    output.warnings = appendUnique(output.warnings, warning);
-    pushUniqueWarnings(run, [warning]);
-  }
-  const resolvable = scopeViolationPaths(metrics.policyViolations)
-    .filter((filePath) => changedFiles.has(filePath) || changedFileList.length > 0)
-    .filter((filePath) => !filesTouched.has(filePath))
-    .filter((filePath) => !currentUnitFiles.has(filePath))
-    .filter((filePath) => !looksLikeDirectoryPath(filePath))
-    .filter((filePath) => !isDeclaredByAnotherWorkUnit(run, unit.id, filePath));
-  if (resolvable.length === 0) return [];
-
-  const resolved = new Set(resolvable);
-  unit.files = [...new Set([...(unit.files ?? []), ...resolvable])];
-  handoff.changedFiles = [...new Set([...handoff.changedFiles, ...resolvable])];
-  metrics.policyViolations = metrics.policyViolations.flatMap((reason) => {
-    const paths = scopeViolationPaths([reason]);
-    if (paths.length === 0) return [reason];
-    const unresolved = paths.filter((filePath) => !resolved.has(filePath));
-    if (unresolved.length === paths.length) return [reason];
-    return unresolved.length ? [`outside_work_unit_scope:${unresolved.join(",")}`] : [];
-  });
-  const warning = `Expanded WorkUnit scope from declared generated output(s): ${resolvable.slice(0, 8).join(", ")}${resolvable.length > 8 ? `, and ${resolvable.length - 8} more` : ""}.`;
-  output.warnings = appendUnique(output.warnings, warning);
-  pushUniqueWarnings(run, [warning]);
-  return resolvable;
-}
-
-function isFatalToolPolicyViolation(reason: string): boolean {
-  return reason.startsWith("outside_work_unit_scope:")
-    || reason.startsWith("work_unit_scope_gap:")
-    || reason.startsWith("policy_stopped_after_scope_violation:")
-    || reason === "bash_denied_for_work_unit_scope";
-}
-
-function scopeViolationPaths(reasons: string[]): string[] {
-  const paths: string[] = [];
-  for (const reason of reasons) {
-    if (!reason.startsWith("outside_work_unit_scope:")) continue;
-    const raw = reason.slice("outside_work_unit_scope:".length);
-    for (const item of raw.split(",")) {
-      const normalized = normalizeMetricFilePath(item);
-      if (normalized && normalized !== "unknown") paths.push(normalized);
-    }
-  }
-  return [...new Set(paths)];
-}
-
-function workUnitScopeGapPaths(reasons: string[]): string[] {
-  const paths: string[] = [];
-  for (const reason of reasons) {
-    if (!reason.startsWith("work_unit_scope_gap:")) continue;
-    const raw = reason.slice("work_unit_scope_gap:".length);
-    for (const item of raw.split(",")) {
-      const normalized = normalizeRepairFile(item);
-      if (normalized) paths.push(normalized);
-    }
-  }
-  return [...new Set(paths)];
-}
-
-function isDeclaredByAnotherWorkUnit(run: RunState, unitId: string, filePath: string): boolean {
-  const normalized = normalizeMetricFilePath(filePath);
-  return Boolean(run.workUnits?.some((unit) => unit.id !== unitId && (unit.files ?? []).map(normalizeMetricFilePath).includes(normalized)));
-}
-
-function removeScopeViolationPaths(reasons: string[], removedPaths: string[]): string[] {
-  const removed = new Set(removedPaths.map(normalizeMetricFilePath));
-  return reasons.flatMap((reason) => {
-    const paths = scopeViolationPaths([reason]);
-    if (paths.length === 0) return [reason];
-    const unresolved = paths.filter((filePath) => !removed.has(filePath));
-    if (unresolved.length === paths.length) return [reason];
-    return unresolved.length ? [`outside_work_unit_scope:${unresolved.join(",")}`] : [];
-  });
-}
-
-function unitOwnsDependencyResolutionSurface(unit: WorkUnit, changedFiles: string[], artifactPath: string): boolean {
-  const artifactDir = parentMetricDir(artifactPath);
-  const candidateFiles = [...(unit.files ?? []), ...changedFiles]
-    .map(normalizeMetricFilePath)
-    .filter((filePath) => filePath !== normalizeMetricFilePath(artifactPath));
-  return candidateFiles.some((filePath) => parentMetricDir(filePath) === artifactDir && isDependencyManifestPath(filePath));
-}
-
-function isDependencyResolutionArtifactPath(filePath: string): boolean {
-  const base = metricBaseName(filePath).toLowerCase();
-  if (DEPENDENCY_RESOLUTION_ARTIFACTS.has(base)) return true;
-  return base.endsWith(".lock") || base.endsWith("-lock.json") || base.endsWith(".lock.hcl");
-}
-
-function isDependencyManifestPath(filePath: string): boolean {
-  return DEPENDENCY_MANIFESTS.has(metricBaseName(filePath).toLowerCase());
-}
-
-const DEPENDENCY_RESOLUTION_ARTIFACTS = new Set([
-  ".terraform.lock.hcl",
-  "cargo.lock",
-  "composer.lock",
-  "deno.lock",
-  "flake.lock",
-  "gemfile.lock",
-  "go.sum",
-  "go.work.sum",
-  "mix.lock",
-  "npm-shrinkwrap.json",
-  "package-lock.json",
-  "package.resolved",
-  "pipfile.lock",
-  "pnpm-lock.yaml",
-  "poetry.lock",
-  "uv.lock",
-  "yarn.lock",
-]);
-
-const DEPENDENCY_MANIFESTS = new Set([
-  "bunfig.toml",
-  "cargo.toml",
-  "composer.json",
-  "deno.json",
-  "deno.jsonc",
-  "gemfile",
-  "go.mod",
-  "go.work",
-  "mix.exs",
-  "package.json",
-  "pipfile",
-  "pnpm-workspace.yaml",
-  "pyproject.toml",
-  "requirements.txt",
-]);
-
 function metricBaseName(filePath: string): string {
   const normalized = normalizeMetricFilePath(filePath);
   return normalized.split("/").pop() ?? normalized;
@@ -1781,7 +1365,7 @@ function removeTransientGeneratedWorkspaceOutput(cwd: string, filePath: string):
     return false;
   }
   if (!stat.isFile() || stat.isSymbolicLink()) return false;
-  if (!isLikelyBinaryFile(fullPath)) return false;
+  if (!isLikelyBinaryFile(fullPath) && !isLikelyGeneratedTextOutput(fullPath, filePath)) return false;
   try {
     fs.unlinkSync(fullPath);
     return true;
@@ -1812,6 +1396,21 @@ function isLikelyBinaryFile(filePath: string): boolean {
     return false;
   }
   return buffer.includes(0);
+}
+
+function isLikelyGeneratedTextOutput(fullPath: string, workspacePath: string): boolean {
+  const base = metricBaseName(workspacePath).toLowerCase();
+  if (!base.endsWith(".tsbuildinfo") && !base.endsWith(".buildinfo")) return false;
+  let content: string;
+  try {
+    const stat = fs.statSync(fullPath);
+    if (stat.size > 2_000_000) return false;
+    content = fs.readFileSync(fullPath, "utf-8");
+  } catch {
+    return false;
+  }
+  const trimmed = content.trimStart();
+  return trimmed.startsWith("{") || trimmed.startsWith("[");
 }
 
 function statusLineEntry(line: string): WorkspaceDirtyEntry | undefined {
@@ -1967,6 +1566,7 @@ async function runSdkStep(
       routeKind: run.route.kind,
       risk: run.route.risk,
       context: {
+        cwd: options.cwd,
         model: selectedModel.model,
         modelRegistry: extensionContext.modelRegistry,
         signal: context.signal ?? extensionContext.signal,
@@ -2001,7 +1601,7 @@ async function runSdkStep(
       maxDelegationDepth: maxSubagentDepth(),
       previousClaimsNeedAudit: claimsRequireAudit(previousClaims),
     });
-    const allowedTools = allowedToolsForStep(effectiveSkillToolNames(baseAllowedTools, skillResolution.active.map((item) => item.skill)), run, step, options.cwd);
+    const allowedTools = effectiveSkillToolNames(baseAllowedTools, skillResolution.active.map((item) => item.skill));
     const prompt = buildSdkPrompt(agent, promptTask, options.cwd, promptPrevious, budgetPolicy, "normal", promptOptions);
     const promptPhase = promptTokenomicsPhaseForStep(step, agent);
     const tokenomics = buildPromptTokenomics({
@@ -2099,8 +1699,6 @@ async function runSdkStep(
     }
     step.status = resolveStepCompletionStatus(step);
     applyStructuredHandoffContract(run, step, agent);
-    reconcileDeclaredGeneratedScopeViolations(run, step, options.cwd);
-    applyFatalToolPolicyGate(run, step, agent);
     applyWorkspaceHygieneGate(run, step, agent, options.cwd, dirtyPathBaseline, { isolatedWorktree: options.cwd !== context.cwd });
     if (step.status === "checkpointed") {
       run.warnings.push(`${step.agent} checkpointed partial handoff for ${step.checkpoint?.continuation ?? "continuation"}.`);
@@ -2108,7 +1706,7 @@ async function runSdkStep(
     }
     persistRun(run);
     context.onUpdate?.(run);
-    return { aborted: false, handoff: step.output?.handoff ?? step.output?.text };
+    return { aborted: false, handoff: formatStepHandoffForNextAgent(step) ?? step.output?.handoff ?? step.output?.text };
   } catch (error) {
     if (isAbortError(error)) {
       step.status = "paused";
@@ -2241,7 +1839,6 @@ async function runSdkSessionAttempt(input: {
       maxDepth: maxSubagentDepth(),
       execute: (params) => runNestedDelegation(params, input),
     },
-    workUnitScope: workUnitMutationScopeForStep(input.run, input.step),
     onActivity: recordToolActivity,
   });
   const attemptMetrics = (messages: unknown[] = []) => {
@@ -2254,7 +1851,14 @@ async function runSdkSessionAttempt(input: {
     };
   };
   const { createAgentSession } = await import("@earendil-works/pi-coding-agent");
-  const sessionManager = createChalinChildSessionManager({ cwd: input.cwd, runId: input.run.id, step: input.step, extensionContext: input.extensionContext });
+  const resumeChildSession = Boolean(input.step.childSessionFile && fs.existsSync(input.step.childSessionFile));
+  const sessionManager = createChalinChildSessionManager({
+    cwd: input.cwd,
+    runId: input.run.id,
+    step: input.step,
+    parentSessionFile: input.context.parentSessionFile,
+    extensionContext: input.extensionContext,
+  });
   const releaseChildEnv = enterChildEnv();
   try {
     const created = await createAgentSession({
@@ -2265,8 +1869,12 @@ async function runSdkSessionAttempt(input: {
       sessionManager,
       tools: input.allowedTools,
       customTools: createChildTools(childPolicy),
-      sessionStartEvent: { type: "session_start", reason: "new" },
+      sessionStartEvent: { type: "session_start", reason: resumeChildSession ? "resume" : "new" },
     });
+    if (created.session.sessionFile) {
+      input.step.childSessionFile = created.session.sessionFile;
+      persistRun(input.run);
+    }
     input.step.thinkingLevel = (created.session.thinkingLevel as AgentThinkingLevel | undefined) ?? input.step.thinkingLevel;
     const liveRef: LiveStepSessionRef = {
       runId: input.run.id,
@@ -2337,6 +1945,7 @@ async function runNestedDelegation(params: ChalinDelegateParamsShape, input: {
   const planned = await planNestedDelegationRoute(params, {
     cwd: input.cwd,
     agents: input.context.agents,
+    parentAgent: input.context.agents.get(input.step.agent),
     model: input.extensionContext.model,
     modelRegistry: input.extensionContext.modelRegistry,
     signal: input.context.signal ?? input.extensionContext.signal,
@@ -2373,6 +1982,7 @@ async function runNestedDelegation(params: ChalinDelegateParamsShape, input: {
     ].filter(Boolean).join("\n\n"),
     parentRunId: input.run.id,
     parentStepId: input.step.id,
+    parentSessionFile: input.step.childSessionFile ?? input.context.parentSessionFile,
     delegationDepth: parentDepth,
     onUpdate: recordNestedUpdate,
   });
@@ -2415,6 +2025,7 @@ export type NestedDelegationRoutePlanningSource = "llm" | "failed";
 export async function planNestedDelegationRoute(input: ChalinDelegateParamsShape, context: {
   cwd: string;
   agents: ReadonlyMap<string, AgentDefinition>;
+  parentAgent?: AgentDefinition;
   model?: Model<Api>;
   modelRegistry?: ExtensionContext["modelRegistry"];
   signal?: AbortSignal;
@@ -2438,6 +2049,14 @@ export async function planNestedDelegationRoute(input: ChalinDelegateParamsShape
     planner: context.planner,
   });
   if (planned.source !== "failed" && planned.route.plan) {
+    const boundaryViolation = nestedDelegationBoundaryViolation(input, planned.route, context.parentAgent, context.agents);
+    if (boundaryViolation) {
+      return {
+        route: nestedRoutePlanningBlockedRoute(boundaryViolation),
+        source: "failed",
+        diagnostics: [...planned.diagnostics, boundaryViolation],
+      };
+    }
     return { route: planned.route, source: "llm", diagnostics: planned.diagnostics };
   }
   const reason = [
@@ -2450,6 +2069,56 @@ export async function planNestedDelegationRoute(input: ChalinDelegateParamsShape
     source: "failed",
     diagnostics: [...planned.diagnostics, reason],
   };
+}
+
+function nestedDelegationBoundaryViolation(
+  input: ChalinDelegateParamsShape,
+  route: RouteDecision,
+  parentAgent: AgentDefinition | undefined,
+  agents: ReadonlyMap<string, AgentDefinition>,
+): string | undefined {
+  if (!parentAgent || !route.plan) return undefined;
+  const steps = nestedRouteSteps(route);
+  const routeWrites = input.requiresWorkspaceMutation === true
+    || route.expectedEffects?.includes("write") === true
+    || steps.some((step) => step.expectedEffects?.includes("write"));
+  if (parentAgent.concern === "planning") {
+    if (routeWrites) return "Planner nested delegation is planning-only: child routes cannot request workspace mutation or write effects. Planner children may only produce bounded planning shards for the parent planner to consolidate.";
+    const invalid = firstStepOutsideConcern(steps, agents, "planning");
+    if (invalid) return `Planner nested delegation is planning-only: selected ${invalid.agent} (${invalid.concern}) instead of a planning agent.`;
+    return undefined;
+  }
+  if (parentAgent.concern === "implementation") {
+    const invalid = firstStepOutsideConcern(steps, agents, "implementation");
+    if (invalid) return `Worker nested delegation is implementation-only: selected ${invalid.agent} (${invalid.concern}) instead of an implementation agent. Reviewer fan-out belongs under the reviewer parent after the worker handoff.`;
+    if (!routeWrites) return "Worker nested delegation is implementation-only: child routes must implement bounded write slices from the parent worker plan.";
+    return undefined;
+  }
+  if (parentAgent.concern === "review") {
+    if (routeWrites) return "Reviewer nested delegation is review-only: child routes cannot request workspace mutation or write effects.";
+    const invalid = firstStepOutsideConcern(steps, agents, "review");
+    if (invalid) return `Reviewer nested delegation is review-only: selected ${invalid.agent} (${invalid.concern}) instead of a review agent.`;
+  }
+  return undefined;
+}
+
+function nestedRouteSteps(route: RouteDecision): AgentStep[] {
+  if (route.plan?.kind === "dag") return route.plan.stages.flatMap((stage) => stage.tasks);
+  if (route.plan?.kind === "sequential") return route.plan.steps;
+  return [];
+}
+
+function firstStepOutsideConcern(
+  steps: AgentStep[],
+  agents: ReadonlyMap<string, AgentDefinition>,
+  concern: AgentDefinition["concern"],
+): { agent: string; concern: string } | undefined {
+  for (const step of steps) {
+    const agent = agents.get(step.agent);
+    if (!agent) continue;
+    if (agent.concern !== concern) return { agent: step.agent, concern: agent.concern };
+  }
+  return undefined;
 }
 
 function nestedExpectedEffects(input: ChalinDelegateParamsShape): RouteExpectedEffect[] {
@@ -2560,23 +2229,6 @@ function runWorkspaceRoot(run: Pick<RunState, "logsPath">): string | undefined {
   return path.dirname(path.dirname(path.dirname(run.logsPath)));
 }
 
-export function allowedToolsForStep(tools: string[], run: Pick<RunState, "workUnits">, step: Pick<RunStepState, "workUnitId">, cwd: string): string[] {
-  if (!tools.includes("write")) return tools;
-  const unit = run.workUnits?.find((candidate) => candidate.id === step.workUnitId);
-  if (!unit?.files?.length) return tools;
-  const hasNewStructuredFile = unit.files.some((file) => !fs.existsSync(resolveStepFilePath(cwd, file)));
-  return hasNewStructuredFile ? tools : tools.filter((tool) => tool !== "write");
-}
-
-export function workUnitMutationScopeForStep(run: Pick<RunState, "workUnits">, step: Pick<RunStepState, "workUnitId">): { files: string[]; mode: "strict"; bash: "allow-with-postcheck" } | undefined {
-  const unit = run.workUnits?.find((candidate) => candidate.id === step.workUnitId);
-  return unit?.files?.length ? { files: unit.files, mode: "strict", bash: "allow-with-postcheck" } : undefined;
-}
-
-function resolveStepFilePath(cwd: string, file: string): string {
-  return path.isAbsolute(file) ? file : path.resolve(cwd, file);
-}
-
 async function compactMemoryContextForStep(cwd: string, step: RunStepState, agent: AgentDefinition | undefined, previous?: string): Promise<string | undefined> {
   if (!agent?.memory.read || !agent.capabilities.includes("memory-read")) return undefined;
   const query = [step.task, previous ? `Previous handoff: ${previous.slice(0, 700)}` : ""].filter(Boolean).join("\n");
@@ -2641,7 +2293,7 @@ function aggregateCompletedHandoffBefore(steps: RunStepState[], endIndex: number
   return aggregateHandoff(steps
     .slice(0, endIndex)
     .filter((step) => isUsableStepHandoff(step))
-    .map((step) => ({ agent: step.agent, text: step.output?.handoff ?? step.output?.text ?? "" })));
+    .map((step) => ({ agent: step.agent, text: formatStepHandoffForNextAgent(step) ?? "" })));
 }
 
 function aggregateHandoff(items: Array<{ agent: string; text: string }>): string {
@@ -2649,6 +2301,25 @@ function aggregateHandoff(items: Array<{ agent: string; text: string }>): string
     .filter((item) => item.text.trim().length > 0)
     .map((item) => `- ${item.agent}: ${truncateText(item.text.trim(), 450)}`)
     .join("\n");
+}
+
+function formatStepHandoffForNextAgent(step: RunStepState): string | undefined {
+  const handoff = step.output?.structuredHandoff;
+  if (!handoff) return step.output?.handoff ?? step.output?.text;
+  const verdict = step.output?.reviewerVerdict;
+  const lines = [
+    `summary: ${compactHandoffText(handoff.summary, 320)}`,
+    handoff.changedFiles.length ? `changedFiles: ${compactHandoffItems(handoff.changedFiles, { itemLimit: 16, itemMax: 180 })}` : undefined,
+    handoff.verification.length ? `verification: ${compactHandoffItems(handoff.verification, { itemLimit: 8, itemMax: 260 })}` : undefined,
+    handoff.risks.length ? `risks: ${compactHandoffItems(handoff.risks, { itemLimit: 8, itemMax: 220 })}` : undefined,
+    handoff.nextActions.length ? `nextActions: ${compactHandoffItems(handoff.nextActions, { itemLimit: 8, itemMax: 220 })}` : undefined,
+    handoff.requiresHumanInput ? `humanInput: ${compactHandoffItems(handoff.humanInputQuestions ?? handoff.nextActions, { itemLimit: 6, itemMax: 220 })}` : undefined,
+    verdict ? `reviewerVerdict: ${verdict.verdict}` : undefined,
+    verdict?.blockingFindings.length ? `blockingFindings: ${compactHandoffItems(verdict.blockingFindings, { itemLimit: 8, itemMax: 220 })}` : undefined,
+    verdict?.missingCoverage.length ? `missingCoverage: ${compactHandoffItems(verdict.missingCoverage, { itemLimit: 8, itemMax: 220 })}` : undefined,
+    step.error ? `stepError: ${step.error}` : undefined,
+  ].filter((line): line is string => Boolean(line));
+  return truncateText(lines.join("\n"), handoffBudgetChars(step.agent));
 }
 
 function afterStageHandoffs(run: RunState, stageSteps: RunStepState[]): void {
@@ -2681,7 +2352,7 @@ function maybePauseForHumanInput(run: RunState, step: RunStepState): boolean {
   const handoff = step.output?.structuredHandoff;
   if (!handoff?.requiresHumanInput) return false;
   if (shouldProceedWithAuthorizedPartialFanout(run, step)) {
-    run.warnings.push(`Human input questions from ${step.agent}/${step.id} recorded as non-blocking authorized fanout risks; proceeding with ${step.output?.structuredHandoff?.workUnits?.length ?? 0} safe WorkUnit(s).`);
+    run.warnings.push(`Human input questions from ${step.agent}/${step.id} recorded as non-blocking discovered-target risks; proceeding with ${step.output?.structuredHandoff?.workUnits?.length ?? 0} safe WorkUnit(s).`);
     return false;
   }
   const questions = handoff.humanInputQuestions?.length ? handoff.humanInputQuestions : handoff.nextActions;
@@ -2718,7 +2389,8 @@ function recordStepLedgers(run: RunState, step: RunStepState): void {
       });
     }
   }
-  if (handoff?.verification.length || step.output.reviewerVerdict) {
+  const expectsVerification = expectedEffectsForStep(run, step).has("verify");
+  if ((expectsVerification && handoff?.verification.length) || step.output.reviewerVerdict) {
     run.verificationLedger ??= [];
     if (!run.verificationLedger.some((entry) => entry.stepId === step.id)) {
       const verdict = step.output.reviewerVerdict;
@@ -2726,13 +2398,13 @@ function recordStepLedgers(run: RunState, step: RunStepState): void {
       const reviewerEvidenceGap = verdict?.verdict === "pass"
         ? reviewerPassNeedsEvidenceRepair(step, { expectsReviewedContent: true, expectsVerify: routeExpectedEffects(run).has("verify") })
         : false;
-      const status = reviewerEvidenceGap ? "gap" : verdict?.verdict ?? (reviewerMissingVerdict ? "gap" : handoff?.verification.length ? "pass" : "unknown");
+      const status = reviewerEvidenceGap ? "gap" : verdict?.verdict ?? (reviewerMissingVerdict ? "gap" : expectsVerification && handoff?.verification.length ? "pass" : "unknown");
       run.verificationLedger.push({
         unitId: step.workUnitId,
         stepId: step.id,
         agent: step.agent,
         status,
-        evidence: verdict?.evidence.length ? verdict.evidence : handoff?.verification ?? [],
+        evidence: verdict?.evidence.length ? verdict.evidence : expectsVerification ? handoff?.verification ?? [] : [],
         covers: handoff?.changedFiles ?? [],
         gaps: [
           ...(reviewerEvidenceGap ? ["Structured Reviewer Verdict PASS lacks required contractual evidence."] : []),
@@ -2775,19 +2447,17 @@ function runChainEffect(
     for (const step of steps) {
       if (runBlockedByHumanInput(run) || step.status === "skipped") break;
       if (options.resume && isUsableStepHandoff(step)) {
-        previous = aggregateHandoff([{ agent: step.agent, text: step.output?.handoff ?? step.output?.text ?? previous }]);
+        previous = aggregateHandoff([{ agent: step.agent, text: formatStepHandoffForNextAgent(step) ?? previous }]);
         afterStepHandoff(run, step);
         if (runBlockedByHumanInput(run)) break;
-        maybeAppendWorkerScopeGapRepair(run, step, context.agents);
         maybeAppendImplementationReviewRepair(run, step, context.agents);
         continue;
       }
       yield* checkAbortEffect(context.signal);
       const output = yield* runStepEffect(step, context, previous, run);
-      previous = output.handoff ?? output.text;
+      previous = formatStepHandoffForNextAgent(step) ?? output.handoff ?? output.text;
       afterStepHandoff(run, step);
       if (runBlockedByHumanInput(run)) break;
-      maybeAppendWorkerScopeGapRepair(run, step, context.agents);
       maybeAppendImplementationReviewRepair(run, step, context.agents);
       if (step.status === "failed") break;
     }
@@ -3580,7 +3250,7 @@ function trajectoryEventsForStep(step: RunStepState, metrics: RunStepMetrics, pr
       decision: success ? "pass" : "attempted",
       confidence: success ? 0.82 : 0.55,
       blockingGap: !success,
-      reason: success ? "post-mutation verification command succeeded" : "post-mutation verification was attempted without recorded success",
+      reason: success ? "post-mutation evidence command succeeded" : "post-mutation evidence was attempted without recorded success",
       metadata: {
         postMutationShellCommands: metrics.postMutationShellCommands ?? 0,
         successfulPostMutationShellCommands: metrics.successfulPostMutationShellCommands ?? 0,

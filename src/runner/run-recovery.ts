@@ -63,7 +63,7 @@ function markDependentsSkipped(run: RunState, blocker: RunStepState, options: { 
     step.status = "skipped";
     step.skipReason = options.reason;
     step.endedAt = new Date().toISOString();
-    if (stepRequiresVerification(run, step)) reviewersNotRun.push(step.id);
+    if (stepIsReviewWork(run, step)) reviewersNotRun.push(step.id);
     skipped += 1;
   }
   if (options.recovery === "human-input") {
@@ -95,11 +95,10 @@ function stepDependsOn(run: RunState, step: RunStepState, dependencyId: string, 
   return false;
 }
 
-function stepRequiresVerification(run: RunState, step: RunStepState): boolean {
+function stepIsReviewWork(run: RunState, step: RunStepState): boolean {
   const unit = step.workUnitId ? run.workUnits?.find((candidate) => candidate.id === step.workUnitId) : undefined;
-  if (unit?.expectedEffects.includes("verify")) return true;
-  const routeStep = findRouteStep(run, step);
-  return Boolean(routeStep?.expectedEffects?.includes("verify"));
+  if (unit) return unit.kind === "review";
+  return step.agent === "reviewer";
 }
 
 function findRouteStep(run: RunState, step: RunStepState): { id?: string; agent: string; task: string; expectedEffects?: string[] } | undefined {
@@ -163,13 +162,6 @@ export function formatFailedRunDiagnostic(run: RunState, failedStep = firstFaile
 export function repairOptionsFor(run: RunState, failedStep?: RunStepState): string[] {
   if (run.intentContract?.requiresInterview || run.recoveryState?.blockedByHumanInput) return ["Ask the user the blocking interview questions, then rerun the route."];
   if (!failedStep) return ["Start a new routed run with clearer scope."];
-  const policyViolations = failedStep.metrics?.policyViolations ?? [];
-  if (policyViolations.some(isWorkUnitScopeContractViolation)) {
-    return [
-      "Run a scope repair route that updates or splits the failed WorkUnit contract before retrying.",
-      "Retry the failed work unit only after the mutation allowlist covers every required source, test, docs, config, generated, and verification-support file.",
-    ];
-  }
   const effects = expectedEffectsForStep(run, failedStep);
   if (effects.includes("write")) return ["Run a mutation repair route from the failed step.", "Retry the failed work unit after fixing the handoff contract."];
   if (effects.includes("verify")) return ["Run an implementation repair route from the verification findings.", "Retry verification after adding missing evidence."];
@@ -182,12 +174,6 @@ function expectedEffectsForStep(run: RunState, step: RunStepState): string[] {
   const routeStep = findRouteStep(run, step);
   if (routeStep?.expectedEffects?.length) return routeStep.expectedEffects;
   return run.route.expectedEffects ?? ["read"];
-}
-
-function isWorkUnitScopeContractViolation(reason: string): boolean {
-  return reason.startsWith("outside_work_unit_scope:")
-    || reason.startsWith("work_unit_scope_gap:")
-    || reason === "bash_denied_for_work_unit_scope";
 }
 
 function readRunsNewestFirst(options: ChalinPathsOptions): RunState[] {

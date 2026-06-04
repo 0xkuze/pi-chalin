@@ -98,6 +98,91 @@ test("buildSdkPrompt frames budgets as advisory pressure, not hard stopping auth
   assert.doesNotMatch(prompt, /budget exceeded/i);
 });
 
+test("buildSdkPrompt treats docs and package metadata as discoverable evidence, not human authorization", () => {
+  const agent = worker();
+  const task = "Implement OpenAPI client generation using current package docs if needed.";
+  const prompt = buildSdkPrompt(agent, task, tempDir("pi-chalin-docs-prompt-"), undefined, policyForStep(agent, { agent: agent.name, task, budget: "normal" }), "normal", {
+    rootTask: "Use current docs and package metadata when local evidence cannot verify generator APIs.",
+  });
+
+  assert.match(prompt, /Reading docs, package metadata, and public API references is evidence gathering, not human authorization/i);
+  assert.match(prompt, /Do not set requiresHumanInput to ask permission for docs/i);
+  assert.match(prompt, /Do not ask fallback preference questions for failed verification/i);
+  assert.match(prompt, /External evidence handoff/i);
+  assert.match(prompt, /source URL, package name\/version, API surface/i);
+});
+
+test("buildSdkPrompt treats nested delegation as available decomposition with prior handoff", () => {
+  const agent = worker();
+  const task = "Implement the evidenced workspace alignment and verify it.";
+  const prompt = buildSdkPrompt(
+    agent,
+    task,
+    tempDir("pi-chalin-nested-delegation-prompt-"),
+    "Previous Handoff: scout mapped the relevant implementation surfaces.",
+    policyForStep(agent, { agent: agent.name, task, budget: "normal" }),
+    "normal",
+    {
+      expectedEffects: ["read", "write", "verify"],
+      workUnitStrategy: "discover",
+      fanoutAuthorized: false,
+    },
+  );
+
+  assert.match(prompt, /Nested delegation is implementation-only/i);
+  assert.match(prompt, /Runtime delegation decision/i);
+  assert.match(prompt, /one reliable ownership loop/i);
+  assert.match(prompt, /bounded same-role child objectives/i);
+  assert.match(prompt, /Do not include reviewer children/i);
+  assert.match(prompt, /Discovered-target caution/i);
+  assert.doesNotMatch(prompt, /Unauthorized fanout/i);
+  assert.match(prompt, /not a collapsed opaque step/i);
+  assert.doesNotMatch(prompt, /Nested delegation is rare/i);
+});
+
+test("buildSdkPrompt teaches reviewer parents when to use nested review children", () => {
+  const agent = AgentCatalog.load({ cwd: tempDir("pi-chalin-reviewer-agent-") }).resolve("reviewer").agent;
+  assert.ok(agent);
+  const task = "Audit a broad security surface after scout mapped auth, logging, and secret handling.";
+  const prompt = buildSdkPrompt(
+    agent,
+    task,
+    tempDir("pi-chalin-reviewer-nested-prompt-"),
+    "Previous Handoff: scout found independent auth, logging, and secret-handling surfaces.",
+    policyForStep(agent, { agent: agent.name, task, budget: "normal" }),
+    "normal",
+    { expectedEffects: ["read", "verify"] },
+  );
+
+  assert.match(prompt, /Nested delegation is review-only/i);
+  assert.match(prompt, /broad audit naturally splits by module\/domain\/risk area/i);
+  assert.match(prompt, /one parent verdict must reconcile the child findings/i);
+  assert.match(prompt, /never workspace mutation/i);
+});
+
+test("buildSdkPrompt makes prior handoff evidence the default to reduce duplicate reads", () => {
+  const agent = worker();
+  const task = "Continue from scout evidence and apply the scoped API change.";
+  const prompt = buildSdkPrompt(
+    agent,
+    task,
+    tempDir("pi-chalin-prior-evidence-prompt-"),
+    "Previous Handoff: scout verified apps/api/package.json and apps/api/src/main.ts.",
+    policyForStep(agent, { agent: agent.name, task, budget: "normal" }),
+    "normal",
+    {
+      priorFilesRead: ["apps/api/package.json", "apps/api/src/main.ts"],
+      expectedEffects: ["read", "write", "verify"],
+    },
+  );
+
+  assert.match(prompt, /Already Covered Evidence Paths/);
+  assert.match(prompt, /apps\/api\/package\.json/);
+  assert.match(prompt, /do not re-read/i);
+  assert.match(prompt, /name the concrete gap/i);
+  assert.match(prompt, /prefer the previous handoff/i);
+});
+
 test("buildSdkPrompt keeps numeric tool budgets out of subagent instructions", () => {
   const agent = worker();
   const prompt = buildSdkPrompt(agent, "Inspect the scoped parser fix.", tempDir("pi-chalin-agent-budget-prompt-"));

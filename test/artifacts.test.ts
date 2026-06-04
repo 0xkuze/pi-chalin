@@ -106,6 +106,7 @@ test("ChalinKernel records run artifacts for long or artifact-aware workflows", 
   assert.equal(summary?.routeKind, "multi-agent-sequential");
   assert.deepEqual(summary?.agents, ["scout", "reviewer"]);
   assert.ok((summary?.handoffs.length ?? 0) >= 1);
+  assert.deepEqual(summary?.metrics, result.run!.metrics);
 });
 
 

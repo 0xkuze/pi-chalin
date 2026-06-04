@@ -1,4 +1,6 @@
 import type { RouteDecision, RunState } from "../domain/schemas.ts";
+import type { CompletionGateDecision, CompletionGatePayload } from "./completion-gate.ts";
+import { buildEvidenceLedger } from "./evidence-ledger.ts";
 import {
   INLINE_NUDGE_FLAGS,
   inlineNudgeFlagForKind,
@@ -42,6 +44,7 @@ interface ChalinRouteInvocation {
 interface InlineWorkState {
   turnId: number;
   cwd?: string;
+  prompt?: string;
   toolEvents: InlineToolEvent[];
   mutationObserved: boolean;
   sourceMutationObserved: boolean;
@@ -57,7 +60,6 @@ interface InlineWorkState {
   searchToolCount: number;
   readToolCount: number;
   verificationAttemptCount: number;
-  preMutationVerificationNudgeSent: boolean;
   terminalActionObserved: boolean;
   terminalActionCommand?: string;
   terminalCompletionNudgeSent: boolean;
@@ -87,6 +89,8 @@ interface InlineWorkState {
   verificationLoopNudgeSent: boolean;
   postFailureEvidenceToolCount: number;
   postFailureEvidenceNudgeSent: boolean;
+  postMutationCustomEvidenceObserved: boolean;
+  completionGateBlocks: CompletionGateDecision[];
   nudgeSent: boolean;
 }
 
@@ -163,6 +167,7 @@ export function beginChalinTurn(options: { prompt?: string; cwd?: string } = {})
   inlineWork = freshInlineWorkState(nextInlineWorkTurnId());
   clearSkillOverridesForTurn();
   inlineWork.cwd = options.cwd;
+  inlineWork.prompt = options.prompt;
   inlineWork.promptCodePaths = new Set(promptPathTokens(options.prompt ?? "").filter(isCodeLikePath).map(normalizeWorkflowPath));
 }
 
@@ -180,6 +185,35 @@ export function getInlineToolEventsForTests(): InlineToolEvent[] {
 
 export function getInlinePolicySnapshot(): InlinePolicySnapshot {
   return inlinePolicySnapshot();
+}
+
+export function getInlineCompletionGatePayload(options: { finalAnswer?: string } = {}): CompletionGatePayload {
+  return {
+    originalPrompt: inlineWork.prompt,
+    ...(options.finalAnswer ? { finalAnswer: options.finalAnswer } : {}),
+    ...(inlineWork.completionGateBlocks.length ? { priorBlocks: inlineWork.completionGateBlocks.map(cloneCompletionGateDecision) } : {}),
+    ledger: buildEvidenceLedger(inlineWork.toolEvents),
+    state: {
+      mutationObserved: inlineWork.mutationObserved,
+      sourceMutationObserved: inlineWork.sourceMutationObserved,
+      testMutationObserved: inlineWork.testMutationObserved,
+      verificationObserved: inlineWork.verificationObserved,
+      ...(inlineWork.verificationCommand ? { verificationCommand: inlineWork.verificationCommand } : {}),
+      terminalActionObserved: inlineWork.terminalActionObserved,
+      ...(inlineWork.terminalActionCommand ? { terminalActionCommand: inlineWork.terminalActionCommand } : {}),
+      docsOnlyMutation: inlineDocsOnlyMutation(),
+      changedPaths: [...inlineWork.changedPaths].sort(),
+      readPaths: [...inlineWork.readPaths].sort(),
+      promptCodePaths: [...inlineWork.promptCodePaths].sort(),
+    },
+  };
+}
+
+export function recordCompletionGateBlock(decision: CompletionGateDecision): void {
+  inlineWork.completionGateBlocks.push(cloneCompletionGateDecision(decision));
+  if (inlineWork.completionGateBlocks.length > 5) {
+    inlineWork.completionGateBlocks.splice(0, inlineWork.completionGateBlocks.length - 5);
+  }
 }
 
 export function recordSemanticPolicyJudgeResult(result: SemanticPolicyJudgeResult): void {
@@ -210,12 +244,11 @@ export function getInlineDerivedGapDiagnosticsForTests(): { weakTestCoverage: bo
   };
 }
 
-export function recordInlineToolCompletion(options: { toolName: string; isError?: boolean; command?: string; path?: string; argsText?: string }): InlineToolCompletionAdapter {
+export function recordInlineToolCompletion(options: { toolName: string; isError?: boolean; command?: string; path?: string; argsText?: string; observation?: string }): InlineToolCompletionAdapter {
   appendInlineToolEvent({ ...options, phase: "completed" });
   let shouldProgressNudge = false;
   let shouldWorkspaceBoundaryNudge = false;
   let shouldDocsShellNudge = false;
-  let shouldPreMutationVerificationNudge = false;
   let shouldPostVerificationShellNudge = false;
   let shouldPostVerificationExplorationNudge = false;
   let shouldLocatorLoopNudge = false;
@@ -253,7 +286,7 @@ export function recordInlineToolCompletion(options: { toolName: string; isError?
     inlineWork.readPaths.add(normalizeWorkflowPath(options.path));
   }
   if (options.toolName === "edit" || options.toolName === "write") {
-    if (options.isError) return inlineWorkAdapter({ shouldProgressNudge: false, shouldReadyToVerifyNudge: false, shouldFailureNudge: false, shouldCompletionNudge: false, shouldTestCoverageNudge: false, shouldWeakTestCoverageNudge: false, shouldPackageMetadataNudge: false, shouldParallelSurfaceNudge: false, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldTerminalCompletionNudge, shouldPostTerminalDriftNudge, shouldPreMutationVerificationNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldLocatorLoopNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, docsOnlyMutation: inlineDocsOnlyMutation() });
+    if (options.isError) return inlineWorkAdapter({ shouldProgressNudge: false, shouldReadyToVerifyNudge: false, shouldFailureNudge: false, shouldCompletionNudge: false, shouldTestCoverageNudge: false, shouldWeakTestCoverageNudge: false, shouldPackageMetadataNudge: false, shouldParallelSurfaceNudge: false, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldTerminalCompletionNudge, shouldPostTerminalDriftNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldLocatorLoopNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, docsOnlyMutation: inlineDocsOnlyMutation() });
     justMutated = true;
     const recoveringFromVerificationFailure = inlineWork.failedVerificationNudgeSent && !inlineWork.verificationObserved;
     inlineWork.mutationObserved = true;
@@ -308,6 +341,7 @@ export function recordInlineToolCompletion(options: { toolName: string; isError?
       inlineWork.sourceAndTestReadyNudgeSent = false;
       inlineWork.postFailureEvidenceToolCount = 0;
       inlineWork.postFailureEvidenceNudgeSent = false;
+      inlineWork.postMutationCustomEvidenceObserved = false;
       inlineWork.verificationAttemptCount = 0;
       inlineWork.weakTestCoverageNudgeSent = false;
       inlineWork.packageMetadataNudgeSent = false;
@@ -336,16 +370,6 @@ export function recordInlineToolCompletion(options: { toolName: string; isError?
     shouldWorkspaceBoundaryNudge = true;
     inlineWork.outOfWorkspaceMutationNudgeSent = true;
   }
-  if (
-    options.toolName === "bash"
-    && !inlineWork.mutationObserved
-    && inlineWork.promptCodePaths.size > 0
-    && isVerificationCommand(options.command)
-    && !inlineWork.preMutationVerificationNudgeSent
-  ) {
-    shouldPreMutationVerificationNudge = true;
-    inlineWork.preMutationVerificationNudgeSent = true;
-  }
   if (options.toolName === "read" && options.path && inlineWork.testCoverageNudgeSent && isCoverageReviewPath(options.path) && !options.isError) {
     inlineWork.testCoverageReviewObserved = true;
   }
@@ -369,7 +393,7 @@ export function recordInlineToolCompletion(options: { toolName: string; isError?
   } else if (options.toolName === "bash" && docsOnlyMutation) {
     inlineWork.verificationObserved = false;
     inlineWork.verificationCommand = undefined;
-  } else if (options.toolName === "bash" && inlineWork.mutationObserved && isVerificationCommand(options.command)) {
+  } else if (options.toolName === "bash" && inlineWork.mutationObserved && hasPostMutationCommandEvidence(options.command)) {
     inlineWork.verificationCommand = options.command?.trim();
     inlineWork.verificationAttemptCount += 1;
     if (verificationLeftWorkspace) {
@@ -396,7 +420,7 @@ export function recordInlineToolCompletion(options: { toolName: string; isError?
     shouldFailureNudge = !inlineWork.failedVerificationNudgeSent;
     if (shouldFailureNudge) inlineWork.failedVerificationNudgeSent = true;
   } else if (options.isError) {
-    return inlineWorkAdapter({ shouldProgressNudge, shouldReadyToVerifyNudge: false, shouldFailureNudge: false, shouldCompletionNudge: false, shouldTestCoverageNudge: false, shouldWeakTestCoverageNudge: false, shouldPackageMetadataNudge: false, shouldParallelSurfaceNudge: false, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldTerminalCompletionNudge, shouldPostTerminalDriftNudge, shouldPreMutationVerificationNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldLocatorLoopNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, verificationCommand: inlineWork.verificationCommand, docsOnlyMutation });
+    return inlineWorkAdapter({ shouldProgressNudge, shouldReadyToVerifyNudge: false, shouldFailureNudge: false, shouldCompletionNudge: false, shouldTestCoverageNudge: false, shouldWeakTestCoverageNudge: false, shouldPackageMetadataNudge: false, shouldParallelSurfaceNudge: false, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldTerminalCompletionNudge, shouldPostTerminalDriftNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldLocatorLoopNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, verificationCommand: inlineWork.verificationCommand, docsOnlyMutation });
   }
   if (options.toolName === "bash" && !options.isError && isTerminalExternalActionCommand(options.command)) {
     inlineWork.terminalActionObserved = true;
@@ -414,15 +438,16 @@ export function recordInlineToolCompletion(options: { toolName: string; isError?
     && !options.isError
   ) {
     inlineWork.postFailureEvidenceToolCount += 1;
-    if (!inlineWork.postFailureEvidenceNudgeSent && inlineWork.postFailureEvidenceToolCount >= 2) {
+    if (!inlineWork.postFailureEvidenceNudgeSent) {
       shouldPostFailureEvidenceNudge = true;
       inlineWork.postFailureEvidenceNudgeSent = true;
     }
   }
+  const readyToVerifyCandidateTool = options.toolName !== "bash";
   const shouldReadyToVerifyNudge = inlineWork.mutationObserved
     && !inlineWork.verificationObserved
     && !inlineWork.readyToVerifyNudgeSent
-    && options.toolName !== "bash"
+    && readyToVerifyCandidateTool
     && !shouldSourceAndTestReadyNudge
     && (docsOnlyMutation || staleVerificationReset || (!justMutated && !shouldFailureNudge && !options.isError));
   if (shouldReadyToVerifyNudge) inlineWork.readyToVerifyNudgeSent = true;
@@ -485,7 +510,7 @@ export function recordInlineToolCompletion(options: { toolName: string; isError?
     inlineWork.readbackStopNudgeSent = true;
   }
   if (shouldCompletionNudge) inlineWork.nudgeSent = true;
-  return inlineWorkAdapter({ shouldProgressNudge, shouldReadyToVerifyNudge, shouldFailureNudge, shouldCompletionNudge, shouldTestCoverageNudge, shouldWeakTestCoverageNudge, shouldPackageMetadataNudge, shouldParallelSurfaceNudge, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldTerminalCompletionNudge, shouldPostTerminalDriftNudge, shouldPreMutationVerificationNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldLocatorLoopNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, verificationCommand: inlineWork.verificationCommand, docsOnlyMutation });
+  return inlineWorkAdapter({ shouldProgressNudge, shouldReadyToVerifyNudge, shouldFailureNudge, shouldCompletionNudge, shouldTestCoverageNudge, shouldWeakTestCoverageNudge, shouldPackageMetadataNudge, shouldParallelSurfaceNudge, shouldWorkspaceBoundaryNudge, shouldDocsShellNudge, shouldTerminalCompletionNudge, shouldPostTerminalDriftNudge, shouldPostVerificationShellNudge, shouldPostVerificationExplorationNudge, shouldLocatorLoopNudge, shouldExistingFileRewriteNudge, shouldMutationLoopNudge, shouldSourceAndTestReadyNudge, shouldVerificationLoopNudge, shouldPostFailureEvidenceNudge, verificationCommand: inlineWork.verificationCommand, docsOnlyMutation });
 }
 
 function inlineWorkAdapter(raw: InlineNudgeSelectorInput): InlineToolCompletionAdapter {
@@ -543,18 +568,18 @@ function semanticPolicyJudgeReasons(judge: PolicyJudgeDecision, input: InlineNud
   }
   if (input.shouldDocsShellNudge) reasons.push("decide whether docs-only work really needs no shell command now, or whether the command provided necessary evidence");
   if (input.shouldLocatorLoopNudge) reasons.push("decide whether search/read activity is genuinely stuck before mutation or still gathering necessary target evidence");
-  if (input.shouldSourceAndTestReadyNudge) reasons.push("decide whether source and tests are ready for verification or whether a required artifact/source/test is still missing");
+  if (input.shouldSourceAndTestReadyNudge) reasons.push("decide whether source and tests are ready for repo evidence or whether a required artifact/source/test is still missing");
   if (input.shouldReadyToVerifyNudge) reasons.push("decide whether the next safe action is verification, a focused repair, a clarification, or no steer");
   if (input.shouldWeakTestCoverageNudge) reasons.push("judge whether changed tests substantively cover the user-requested behavior and at least one meaningful boundary/preservation path");
   if (input.shouldPackageMetadataNudge) reasons.push("judge whether package metadata is actually incoherent with delivered entrypoints/module shape or the signal is a false positive");
   if (input.shouldParallelSurfaceNudge) reasons.push("judge whether the changed files bypassed the prompt/starter surface or whether the alternate surface is legitimate for this repo");
-  if (input.shouldVerificationLoopNudge) reasons.push("decide whether repeated verification needs a repair before another command");
-  if (input.shouldPostFailureEvidenceNudge) reasons.push("decide whether post-failure evidence gathering should stop and convert into a focused repair");
-  if (input.shouldPostVerificationShellNudge || input.shouldPostVerificationExplorationNudge) reasons.push("decide whether verification already proved the latest mutation and finalization is safer than more tool use");
+  if (input.shouldVerificationLoopNudge) reasons.push("decide whether repeated evidence attempts need a repair before another command");
+  if (input.shouldPostFailureEvidenceNudge) reasons.push("decide whether later evidence clears the same failed or user-facing acceptance surface, or whether evidence debt still requires repair/further evidence");
+  if (input.shouldPostVerificationShellNudge || input.shouldPostVerificationExplorationNudge) reasons.push("decide whether post-mutation evidence already proves the latest mutation and finalization is safer than more tool use");
   if (input.shouldCompletionNudge && inlineWork.sourceMutationObserved && !inlineWork.testMutationObserved) {
     reasons.push("completion was reached after source mutation without observed permanent test mutation; decide if existing/inline tests are still sufficient");
   } else if (input.shouldCompletionNudge) {
-    reasons.push("completion was reached; audit whether finalization is supported by the latest mutation and verification evidence");
+    reasons.push("completion was reached; audit whether finalization is supported by the latest mutation and evidence");
   }
   return reasons;
 }
@@ -572,13 +597,34 @@ export function getInlineCriticalGuardContextMessage(): string | undefined {
     return [
       "pi-chalin critical inline-work guard.",
       `Hard stop: the user's external workflow already completed${command}.${drift}`,
-      "Your next assistant action must be the final answer in the user's language with the resulting PR/action, verification already performed, and compact notes.",
+      "Your next assistant action must be the final answer in the user's language with the resulting PR/action, evidence already performed, and compact notes.",
       "Do not call more tools, rewrite PR body files, rerun support commands, or keep polishing local artifacts after the external action succeeded.",
     ].join("\n");
   }
-  if (!inlineWork.verificationObserved && !inlineWork.outOfWorkspaceMutationObserved) return undefined;
+  const openEvidenceDebt = inlineWork.failedVerificationNudgeSent
+    && !inlineWork.verificationObserved
+    && !inlineWork.postMutationCustomEvidenceObserved;
+  const sourceMutationNeedsAcceptedEvidence = inlineWork.sourceMutationObserved
+    && !inlineWork.verificationObserved
+    && !inlineDocsOnlyMutation()
+    && !inlineWork.outOfWorkspaceMutationObserved
+    && !openEvidenceDebt
+    && !inlineWork.postMutationCustomEvidenceObserved;
+  if (
+    !inlineWork.verificationObserved
+    && !inlineWork.outOfWorkspaceMutationObserved
+    && !openEvidenceDebt
+    && !sourceMutationNeedsAcceptedEvidence
+  ) return undefined;
   const reasons: string[] = [];
   const parallelSurfaceGap = promptCanonicalSurfaceBypassed() ?? pythonRootDuplicateTestSurface();
+  if (openEvidenceDebt) {
+    const command = inlineWork.verificationCommand ? ` (${inlineWork.verificationCommand})` : "";
+    reasons.push(`a post-mutation evidence command or shell check failed${command}, and no later evidence has cleared the same user-facing acceptance surface`);
+  }
+  if (sourceMutationNeedsAcceptedEvidence) {
+    reasons.push("source files changed, but no accepted evidence has proven the requested behavior after the latest mutation");
+  }
   if (inlineWork.outOfWorkspaceMutationObserved) {
     const path = inlineWork.outOfWorkspaceMutationPath ? ` (${inlineWork.outOfWorkspaceMutationPath})` : "";
     reasons.push(`a mutation or verification targeted a path outside the current workspace root${path}`);
@@ -604,9 +650,9 @@ export function getInlineCriticalGuardContextMessage(): string | undefined {
     const command = inlineWork.verificationCommand ? ` with \`${inlineWork.verificationCommand}\`` : "";
     return [
       "pi-chalin critical inline-work guard.",
-      `Hard stop: verification already passed${command} after the latest mutation, and later tool use did not include a new edit.`,
+      `Hard stop: post-mutation evidence already ran${command} after the latest mutation, and later tool use did not include a new edit.`,
       "Your next assistant action must be the final answer in the user's language with changed files, verification, and compact notes.",
-      "Do not call more tools, rerun tests, or read files just to summarize. If a later tool exposed a concrete defect, patch only that root cause and rerun the nearest verification once before final.",
+      "Do not call more tools, rerun commands, or read files just to summarize. If a later tool exposed a concrete defect, patch only that root cause and rerun the nearest meaningful evidence once before final.",
     ].join("\n");
   }
   if (reasons.length === 0) return undefined;
@@ -616,18 +662,26 @@ export function getInlineCriticalGuardContextMessage(): string | undefined {
     inlineWork.outOfWorkspaceMutationObserved
       ? "Your next assistant action must recreate or move the required artifacts under the current workspace root using relative paths, then rerun the nearest verification from that root."
       : parallelSurfaceGap
-      ? "Your next assistant action must consolidate the implementation and tests into the prompt/starter source and runner-discovered test paths, remove the parallel sibling files, then rerun the nearest verification once."
-      : "Your next assistant action must be a tool call that patches the smallest missing source/test/package evidence, then reruns the nearest verification once.",
-    "Do not claim completion, summarize, or explain intent until that corrective verification passes after the patch.",
+      ? "Your next assistant action must consolidate the implementation and tests into the prompt/starter source and runner-discovered test paths, remove the parallel sibling files, then rerun the nearest meaningful evidence once."
+      : openEvidenceDebt
+      ? "Your next assistant action must repair the smallest plausible root cause and run evidence that covers the failed or user-facing acceptance surface; if the environment blocks that evidence, state the unresolved blocker instead of completion."
+      : sourceMutationNeedsAcceptedEvidence
+      ? "Your next assistant action must run representative evidence for the requested user-facing behavior, patch any concrete gap, or report the real environment blocker; a narrower helper/static check is not completion evidence unless LLM judgment can tie it to the same acceptance surface."
+      : "Your next assistant action must be a tool call that patches the smallest missing source/test/package evidence, then reruns the nearest meaningful evidence once.",
+    openEvidenceDebt
+      ? "Do not claim completion from a narrower helper, parser, static, or diagnostic check unless LLM judgment proves it covers the same acceptance surface; otherwise keep working or report incomplete."
+      : sourceMutationNeedsAcceptedEvidence
+      ? "Do not claim completion until the latest source mutation is supported by evidence that covers the requested behavior, or until you explicitly report the unresolved blocker."
+      : "Do not claim completion, summarize, or explain intent until that corrective verification passes after the patch.",
   ].join("\n");
 }
 
 export function beginChalinRouteInvocation(options: { dryRun: boolean; route: RouteDecision }): { allowed: boolean; reason?: string; invocationId?: number } {
-  const committed = routeInvocations.find((call) => call.outcome === "complete" || call.outcome === "paused");
+  const committed = routeInvocations.find((call) => call.outcome === "complete");
   if (!options.dryRun && committed) {
     return {
       allowed: false,
-      reason: "chalin_route already executed for this user prompt. Synthesize the existing result instead of launching another chalin workflow. A second call is allowed only after dryRun, ask, block, or failed outcomes.",
+      reason: "chalin_route already completed for this user prompt. Synthesize the existing result instead of launching another chalin workflow. A second call is allowed only after dryRun, paused, ask, block, or failed outcomes.",
     };
   }
 
@@ -671,6 +725,7 @@ function freshInlineWorkState(turnId = 0): InlineWorkState {
   return {
     turnId,
     cwd: undefined,
+    prompt: undefined,
     toolEvents: [],
     mutationObserved: false,
     sourceMutationObserved: false,
@@ -686,7 +741,6 @@ function freshInlineWorkState(turnId = 0): InlineWorkState {
     searchToolCount: 0,
     readToolCount: 0,
     verificationAttemptCount: 0,
-    preMutationVerificationNudgeSent: false,
     terminalActionObserved: false,
     terminalActionCommand: undefined,
     terminalCompletionNudgeSent: false,
@@ -716,7 +770,17 @@ function freshInlineWorkState(turnId = 0): InlineWorkState {
     verificationLoopNudgeSent: false,
     postFailureEvidenceToolCount: 0,
     postFailureEvidenceNudgeSent: false,
+    postMutationCustomEvidenceObserved: false,
+    completionGateBlocks: [],
     nudgeSent: false,
+  };
+}
+
+function cloneCompletionGateDecision(decision: CompletionGateDecision): CompletionGateDecision {
+  return {
+    ...decision,
+    missingEvidence: [...decision.missingEvidence],
+    ...(decision.requiredEvidence ? { requiredEvidence: [...decision.requiredEvidence] } : {}),
   };
 }
 
@@ -839,7 +903,7 @@ function isGhExecutableToken(token: string): boolean {
 
 function isPostFailureEvidenceTool(toolName: string, command: string | undefined): boolean {
   if (["read", "grep", "find", "ls", "chalin_project_discovery"].includes(toolName)) return true;
-  return toolName === "bash" && !isVerificationCommand(command);
+  return toolName === "bash" && hasPostMutationCommandEvidence(command);
 }
 
 function recordPreMutationEvidenceTool(toolName: string): void {
@@ -1217,26 +1281,8 @@ function trimTokenPunctuation(token: string): string {
   return token.slice(start, end);
 }
 
-function isVerificationCommand(command: string | undefined): boolean {
-  if (!command) return false;
-  const tokens = shellWords(command).map((token) => token.toLowerCase());
-  const commandName = tokens[0];
-  if (!commandName) return false;
-  const args = tokens.slice(1);
-  if (["npm", "pnpm", "yarn"].includes(commandName)) {
-    if (args[0] === "test") return true;
-    if (args[0] === "run" && ["test", "typecheck", "lint", "check"].includes(args[1] ?? "")) return true;
-    if (args[0] === "exec" && ["vitest", "jest", "tsc", "eslint"].includes(args[1] ?? "")) return true;
-    return false;
-  }
-  if (commandName === "node") return args.includes("--test");
-  if ((commandName === "python" || commandName === "python3") && args[0] === "-m" && args[1] === "unittest") return true;
-  if (commandName === "go") return args[0] === "test";
-  if (commandName === "cargo") return args[0] === "test";
-  if (commandName === "make") return args.length === 0 || args.includes("test") || args.includes("check");
-  if (["pytest", "vitest", "jest", "eslint"].includes(commandName)) return true;
-  if (commandName === "tsc") return args.includes("--noemit");
-  return false;
+function hasPostMutationCommandEvidence(command: string | undefined): boolean {
+  return typeof command === "string" && command.trim().length > 0;
 }
 
 function shellWords(command: string): string[] {

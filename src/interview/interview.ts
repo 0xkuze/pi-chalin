@@ -104,14 +104,16 @@ export async function runChalinInterview(
   return result;
 }
 
-export function formatInterviewResult(result: InterviewResult): string {
+export function formatInterviewResult(result: InterviewResult, options: { resumeRunId?: string } = {}): string {
   const lines = [
     `chalin_interview ${result.status}`,
     `artifact: ${result.featureId}`,
     `reason: ${compactText(result.reason, 120)}`,
     result.answers.length ? `answers (${result.answers.length}):` : "answers: none",
     ...result.answers.map((answer) => `- ${answer.questionId}: ${compactText(answer.answer, 130)}${answer.custom ? " (custom)" : answer.recommended ? " (recommended)" : ""}`),
-    result.status === "answered" ? "next: continue with these answers as planning context." : "next: ask the user directly before running subagents.",
+    options.resumeRunId
+      ? `next: call chalin_resume with {"runId":"${options.resumeRunId}"} before doing inline work.`
+      : result.status === "answered" ? "next: continue with these answers as planning context." : "next: ask the user directly before running subagents.",
   ];
   return lines.join("\n");
 }

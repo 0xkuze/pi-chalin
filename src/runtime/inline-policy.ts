@@ -4,7 +4,6 @@ export type InlineNudgeKind =
   | "docs-shell"
   | "terminal-completion"
   | "post-terminal-drift"
-  | "pre-mutation-verification"
   | "post-verification-shell"
   | "post-verification-exploration"
   | "locator-loop"
@@ -29,6 +28,7 @@ export interface InlineToolEvent {
   command?: string;
   path?: string;
   argsText?: string;
+  observation?: string;
 }
 
 export interface InlineNudgePlan {
@@ -107,7 +107,6 @@ export interface InlineToolCompletionAdapter {
   shouldDocsShellNudge: boolean;
   shouldTerminalCompletionNudge: boolean;
   shouldPostTerminalDriftNudge: boolean;
-  shouldPreMutationVerificationNudge: boolean;
   shouldPostVerificationShellNudge: boolean;
   shouldPostVerificationExplorationNudge: boolean;
   shouldLocatorLoopNudge: boolean;
@@ -162,7 +161,6 @@ export const INLINE_NUDGE_FLAGS = [
   "shouldDocsShellNudge",
   "shouldTerminalCompletionNudge",
   "shouldPostTerminalDriftNudge",
-  "shouldPreMutationVerificationNudge",
   "shouldPostVerificationShellNudge",
   "shouldPostVerificationExplorationNudge",
   "shouldLocatorLoopNudge",
@@ -184,7 +182,6 @@ const INLINE_NUDGE_PRIORITY = [
   ["terminal-completion", "shouldTerminalCompletionNudge"],
   ["completion", "shouldCompletionNudge"],
   ["docs-shell", "shouldDocsShellNudge"],
-  ["pre-mutation-verification", "shouldPreMutationVerificationNudge"],
   ["post-verification-shell", "shouldPostVerificationShellNudge"],
   ["post-verification-exploration", "shouldPostVerificationExplorationNudge"],
   ["locator-loop", "shouldLocatorLoopNudge"],
@@ -243,30 +240,29 @@ export function isSemanticJudgeRelevantNudge(kind: InlineNudgeKind): boolean {
 }
 
 function policyJudgeForKind(kind: InlineNudgeKind, input: InlineNudgeSelectorInput): PolicyJudgeDecision {
-  const command = input.verificationCommand ? ` Latest verification: ${input.verificationCommand}.` : "";
+  const command = input.verificationCommand ? ` Latest evidence command: ${input.verificationCommand}.` : "";
   const docs = input.docsOnlyMutation ? " Docs-only mutation is active." : "";
   const reasonByKind: Record<InlineNudgeKind, string> = {
     "workspace-boundary": "A mutation or verification left the current workspace boundary.",
     "docs-shell": "Docs-only work needs readback evidence rather than shell activity.",
     "terminal-completion": "A terminal external action completed the user's external workflow.",
     "post-terminal-drift": "Tool use continued after a terminal external action already completed the user's external workflow.",
-    "pre-mutation-verification": "Verification ran before any mutation, so it cannot prove the requested change.",
-    "post-verification-shell": "Shell use continued after passing verification without a new mutation.",
-    "post-verification-exploration": "Exploration continued after passing verification without a new mutation.",
+    "post-verification-shell": "Shell use continued after post-mutation evidence without a new mutation.",
+    "post-verification-exploration": "Exploration continued after post-mutation evidence without a new mutation.",
     "locator-loop": "Locator/search activity is looping before mutation.",
     "existing-file-rewrite": "An existing file was rewritten through a write path after it had been read.",
-    "mutation-loop": "Several mutations happened without verification.",
-    "source-and-test-ready": "Source and test changes are both present; verification should happen next.",
-    "verification-loop": "Verification attempts are repeating without a stable repair result.",
-    "post-failure-evidence": "Evidence gathering continued after failed verification without a repair.",
+    "mutation-loop": "Several mutations happened without post-mutation evidence.",
+    "source-and-test-ready": "Source and test changes are both present; meaningful repo evidence should happen next.",
+    "verification-loop": "Evidence attempts are repeating without a stable repair result.",
+    "post-failure-evidence": "Evidence debt is open: a post-mutation failure has not been cleared by evidence covering the same acceptance surface.",
     "progress": "First mutation observed; keep the loop bounded and move toward verification.",
-    "ready-to-verify": "Mutation is present and verification is still missing.",
+    "ready-to-verify": "Mutation is present and post-mutation evidence is still missing.",
     "test-coverage": "Source changed without observed permanent test coverage review.",
     "weak-test-coverage": "Changed tests look too weak to prove the requested behavior.",
     "package-metadata": "Package metadata does not agree with delivered entrypoints or module shape.",
     "parallel-surface": "A parallel source/test surface bypassed the expected canonical path.",
-    "failure": "A verification or shell command failed after mutation.",
-    "completion": "Latest mutation has passing verification and no currently blocking runtime gap.",
+    "failure": "A shell or evidence command failed after mutation.",
+    "completion": "Latest mutation has post-mutation evidence and no currently blocking runtime gap.",
   };
   return {
     nextAction: nextActionForNudge(kind),
@@ -280,7 +276,7 @@ function policyJudgeForKind(kind: InlineNudgeKind, input: InlineNudgeSelectorInp
 
 function nextActionForNudge(kind: InlineNudgeKind): PolicyJudgeNextAction {
   if (kind === "completion" || kind === "terminal-completion") return "finalize";
-  if (kind === "ready-to-verify" || kind === "source-and-test-ready" || kind === "pre-mutation-verification") return "verify";
+  if (kind === "ready-to-verify" || kind === "source-and-test-ready") return "verify";
   if (kind === "failure" || kind === "post-failure-evidence" || kind === "verification-loop") return "repair";
   if (kind === "workspace-boundary" || kind === "parallel-surface") return "block";
   return "nudge";

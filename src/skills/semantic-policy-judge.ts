@@ -1,5 +1,5 @@
-import { complete, completeSimple, StringEnum, Type, type Api, type AssistantMessage, type Context, type Model, type ProviderStreamOptions, type Tool } from "@earendil-works/pi-ai";
-import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
+import { StringEnum, Type, type Api, type AssistantMessage, type Model } from "@earendil-works/pi-ai";
+import { createAgentSession, DefaultResourceLoader, defineTool, getAgentDir, SessionManager, type ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { InlineNudgeKind, PolicyJudgeDecision, PolicyJudgeNextAction, SemanticPolicyJudgeRequest, SemanticPolicyJudgeResult, SemanticPolicyJudgeTrace } from "../runtime/inline-policy.ts";
 import { compactString, parseJsonObject } from "../utils/json.ts";
 
@@ -19,35 +19,7 @@ export async function runSemanticPolicyJudge(input: SemanticPolicyJudgeInput): P
   const model = input.context.model;
   const registry = input.context.modelRegistry;
   if (!model || !registry) return undefined;
-  const auth = await registry.getApiKeyAndHeaders(model);
-  if (!auth.ok) return undefined;
-  const structuredOutputOptions = semanticPolicyJudgeStructuredOutputOptions(model.api);
-  const baseOptions = {
-    apiKey: auth.apiKey,
-    headers: auth.headers,
-    temperature: 0,
-    maxTokens: 420,
-    timeoutMs: semanticPolicyJudgeTimeoutMs(),
-    maxRetries: 0,
-    signal: input.context.signal,
-  };
-  try {
-    const context: Context = {
-      systemPrompt: semanticPolicyJudgeSystemPrompt(),
-      messages: [{
-        role: "user",
-        timestamp: Date.now(),
-        content: JSON.stringify(semanticPolicyJudgePayload(input), null, 2),
-      }],
-    };
-    if (structuredOutputOptions) context.tools = [SEMANTIC_POLICY_JUDGE_TOOL];
-    const response = structuredOutputOptions
-      ? await complete(model, context, { ...baseOptions, ...structuredOutputOptions })
-      : await completeSimple(model, context, { ...baseOptions, reasoning: "low" });
-    return parseSemanticPolicyJudgeResult(response);
-  } catch {
-    return undefined;
-  }
+  return runAgentSessionSemanticPolicyJudge(input);
 }
 
 export function shouldApplySemanticPolicyJudgeResult(deterministic: PolicyJudgeDecision, semantic: SemanticPolicyJudgeResult | undefined): semantic is SemanticPolicyJudgeResult {
@@ -107,14 +79,12 @@ function semanticPolicyJudgeSystemPrompt(): string {
   ].join("\n");
 }
 
-const SEMANTIC_POLICY_JUDGE_TIMEOUT_MS = 20_000;
 const SEMANTIC_POLICY_JUDGE_ACTIONS = ["continue", "nudge", "verify", "repair", "finalize", "block"] as const satisfies readonly PolicyJudgeNextAction[];
 const SEMANTIC_POLICY_JUDGE_NUDGE_KINDS = [
   "workspace-boundary",
   "docs-shell",
   "terminal-completion",
   "post-terminal-drift",
-  "pre-mutation-verification",
   "post-verification-shell",
   "post-verification-exploration",
   "locator-loop",
@@ -146,11 +116,6 @@ export const SEMANTIC_POLICY_JUDGE_RESULT_SCHEMA = Type.Object({
   }),
   steerMessage: Type.Optional(Type.String({ minLength: 1, maxLength: 1_200, description: "One concrete steer for the assistant to execute next." })),
 }, { additionalProperties: false });
-const SEMANTIC_POLICY_JUDGE_TOOL = {
-  name: SEMANTIC_POLICY_JUDGE_TOOL_NAME,
-  description: "Emit the final semantic policy judge decision.",
-  parameters: SEMANTIC_POLICY_JUDGE_RESULT_SCHEMA,
-} as const satisfies Tool;
 const POLICY_ACTION_STRICTNESS = {
   continue: 0,
   finalize: 0,
@@ -241,19 +206,6 @@ function semanticPolicyJudgeTrace(message: AssistantMessage, mode: SemanticPolic
   };
 }
 
-export function semanticPolicyJudgeStructuredOutputOptions(api: Api): ProviderStreamOptions | undefined {
-  if (api === "openai-completions" || api === "mistral-conversations") {
-    return { toolChoice: { type: "function", function: { name: SEMANTIC_POLICY_JUDGE_TOOL_NAME } } };
-  }
-  if (api === "anthropic-messages" || api === "bedrock-converse-stream") {
-    return { toolChoice: { type: "tool", name: SEMANTIC_POLICY_JUDGE_TOOL_NAME } };
-  }
-  if (api === "google-generative-ai" || api === "google-vertex") {
-    return { toolChoice: "any" };
-  }
-  return undefined;
-}
-
 function validateRequiredEvidence(values: unknown[]): string[] | undefined {
   const normalized: string[] = [];
   for (const value of values) {
@@ -276,6 +228,98 @@ function actionStrictness(action: PolicyJudgeNextAction): number {
   return POLICY_ACTION_STRICTNESS[action];
 }
 
-function semanticPolicyJudgeTimeoutMs(): number {
-  return SEMANTIC_POLICY_JUDGE_TIMEOUT_MS;
+async function runAgentSessionSemanticPolicyJudge(input: SemanticPolicyJudgeInput): Promise<SemanticPolicyJudgeResult | undefined> {
+  const model = input.context.model;
+  const registry = input.context.modelRegistry;
+  if (!model || !registry) return undefined;
+  const cwd = input.request.snapshot.cwd ?? process.cwd();
+  let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
+  try {
+    const resourceLoader = new DefaultResourceLoader({
+      cwd,
+      agentDir: getAgentDir(),
+      noExtensions: true,
+      noSkills: true,
+      noPromptTemplates: true,
+      noContextFiles: true,
+      systemPrompt: semanticPolicyJudgeSystemPrompt(),
+    });
+    await resourceLoader.reload();
+    created = await createAgentSession({
+      cwd,
+      model,
+      modelRegistry: registry,
+      sessionManager: SessionManager.inMemory(cwd),
+      resourceLoader,
+      noTools: "all",
+      tools: [SEMANTIC_POLICY_JUDGE_TOOL_NAME],
+      customTools: [createSemanticPolicyJudgeTool()],
+      sessionStartEvent: { type: "session_start", reason: "new" },
+    });
+    const abortJudge = () => { void created?.session.abort(); };
+    input.context.signal?.addEventListener("abort", abortJudge, { once: true });
+    try {
+      await created.session.prompt(semanticPolicyJudgeSessionPrompt(input), {
+        expandPromptTemplates: false,
+        source: "extension",
+      });
+    } finally {
+      input.context.signal?.removeEventListener("abort", abortJudge);
+    }
+    const messages = Array.isArray(created.session.state.messages) ? created.session.state.messages as unknown[] : [];
+    return parseSemanticPolicyJudgeSessionMessages(messages);
+  } catch {
+    return undefined;
+  } finally {
+    created?.session.dispose();
+  }
+}
+
+function createSemanticPolicyJudgeTool() {
+  return defineTool({
+    name: SEMANTIC_POLICY_JUDGE_TOOL_NAME,
+    label: "Semantic Policy Judge",
+    description: "Emit the final semantic policy judge decision.",
+    promptSnippet: "Emit the final semantic policy judge decision.",
+    promptGuidelines: [
+      `Call ${SEMANTIC_POLICY_JUDGE_TOOL_NAME} exactly once as the final action.`,
+      "Do not answer in prose when this tool is available.",
+    ],
+    parameters: SEMANTIC_POLICY_JUDGE_RESULT_SCHEMA,
+    async execute(_toolCallId, params) {
+      const result = validateSemanticPolicyJudgeResult(params as Record<string, unknown>);
+      return {
+        content: [{ type: "text", text: result ? `Accepted semantic policy decision: ${result.nextAction}` : "Rejected semantic policy decision: failed schema validation." }],
+        details: result ?? { rejected: true, params },
+        terminate: true,
+      };
+    },
+  });
+}
+
+function semanticPolicyJudgeSessionPrompt(input: SemanticPolicyJudgeInput): string {
+  return [
+    "Payload JSON:",
+    JSON.stringify(semanticPolicyJudgePayload(input), null, 2),
+  ].join("\n");
+}
+
+function parseSemanticPolicyJudgeSessionMessages(messages: unknown[]): SemanticPolicyJudgeResult | undefined {
+  for (const message of [...messages].reverse()) {
+    if (!message || typeof message !== "object" || Array.isArray(message)) continue;
+    const record = message as Record<string, unknown>;
+    if (record.details && typeof record.details === "object" && !Array.isArray(record.details)) {
+      const result = validateSemanticPolicyJudgeResult(record.details as Record<string, unknown>);
+      if (result) return result;
+    }
+    if (record.role !== "assistant" || !Array.isArray(record.content)) continue;
+    for (const block of record.content) {
+      if (!block || typeof block !== "object" || Array.isArray(block)) continue;
+      const item = block as Record<string, unknown>;
+      if (item.type !== "toolCall" || item.name !== SEMANTIC_POLICY_JUDGE_TOOL_NAME || !item.arguments || typeof item.arguments !== "object" || Array.isArray(item.arguments)) continue;
+      const result = validateSemanticPolicyJudgeResult(item.arguments as Record<string, unknown>);
+      if (result) return result;
+    }
+  }
+  return undefined;
 }

@@ -30,6 +30,9 @@ function validateRouteEffectCoverage(route: RouteDecision, requiresWorkspaceMuta
   if (!routeHasImplementationWriter(route, agents)) {
     return askUserRoute(`${route.reason} Invalid route plan: missing write-capable agent for expected workspace mutation. Ask the route planner for a repaired structured plan instead of adding agents in the harness.`);
   }
+  if (agents && !routeHasIndependentReviewer(route, agents)) {
+    return askUserRoute(`${route.reason} Invalid route plan: missing independent reviewer for expected workspace mutation. Ask the route planner for a repaired structured plan instead of adding agents in the harness.`);
+  }
   if (!routeHasVerificationCapability(route, agents)) {
     return askUserRoute(`${route.reason} Invalid route plan: expected verification but no validation-capable agent was selected. Ask the route planner for a repaired structured plan instead of adding agents in the harness.`);
   }
@@ -107,6 +110,12 @@ function routeHasVerificationCapability(route: RouteDecision, agents?: ReadonlyM
   return false;
 }
 
+function routeHasIndependentReviewer(route: RouteDecision, agents: ReadonlyMap<string, AgentDefinition>): boolean {
+  if (route.plan?.kind === "dag") return route.plan.stages.some((stage) => stage.tasks.some((step) => isReviewStep(step, agents)));
+  if (route.plan?.kind === "sequential") return route.plan.steps.some((step) => isReviewStep(step, agents));
+  return route.agents.some((ref) => agents.get(ref)?.concern === "review");
+}
+
 function isImplementationWriterStep(step: AgentStep, agents?: ReadonlyMap<string, AgentDefinition>): boolean {
   const agent = agents?.get(step.agent);
   if (agent) return agentCanMutateWorkspace(agent);
@@ -119,6 +128,10 @@ function isVerificationStep(step: AgentStep, agents?: ReadonlyMap<string, AgentD
   if (agent) return agentCanVerify(agent);
   if (agents) return false;
   return false;
+}
+
+function isReviewStep(step: AgentStep, agents: ReadonlyMap<string, AgentDefinition>): boolean {
+  return agents.get(step.agent)?.concern === "review";
 }
 
 function agentCanMutateWorkspace(agent: AgentDefinition): boolean {

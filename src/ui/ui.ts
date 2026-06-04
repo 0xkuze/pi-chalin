@@ -9,8 +9,8 @@ import {
 import { Container, Spacer, Text, type Component, type Focusable, type TUI } from "@earendil-works/pi-tui";
 import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ArtifactStore, FeatureArtifactState } from "../artifacts/artifacts.ts";
-import { getLatestRun, getLiveStepSession } from "../runtime/state.ts";
-import type { AgentDefinition, ApprovalDecision, BudgetCapHit, ChalinRuntimeState, MemoryRecord, RouteDecision, RunState, RunStepState, RunStepStatus } from "../domain/schemas.ts";
+import { getLatestRun, getLiveStepSession, type LiveStepSessionRef } from "../runtime/state.ts";
+import type { AgentDefinition, ApprovalDecision, BudgetCapHit, ChalinRuntimeState, MemoryRecord, NestedRunStepTrace, RouteDecision, RunState, RunStepState, RunStepStatus } from "../domain/schemas.ts";
 import { isUsableStepStatus } from "../runtime/status.ts";
 import { setChalinStatus } from "./ui-status.ts";
 import { errorMessage, isRecord } from "../utils/guards.ts";
@@ -1620,7 +1620,25 @@ async function openLiveStatusOverlay(ctx: ExtensionContext, run: RunState): Prom
 type LiveStatusTab = {
   id: string;
   title: string;
+  runId: string;
+  runStatus: RunState["status"];
+  runStartedAt?: string;
+  runEndedAt?: string;
+  routeLabel: string;
+  completedSteps: number;
+  totalSteps: number;
+  depth: number;
   step: RunStepState;
+};
+
+type LiveStatusBodyCache = {
+  key: string;
+  runId: string;
+  tabId: string;
+  stepId: string;
+  width: number;
+  toolsExpanded: boolean;
+  lines: string[];
 };
 
 class ChalinLiveStatusOverlay implements Component, Focusable {
@@ -1628,8 +1646,12 @@ class ChalinLiveStatusOverlay implements Component, Focusable {
   private selectedId: string | undefined;
   private scroll = 0;
   private followTail = true;
+  private userSelectedTab = false;
   private toolsExpanded = false;
   private timer: ReturnType<typeof setInterval>;
+  private renderTimer: ReturnType<typeof setTimeout> | undefined;
+  private bodyCache: LiveStatusBodyCache | undefined;
+  private lastRefreshKey = "";
 
   constructor(
     private readonly tui: TUI,
@@ -1638,7 +1660,7 @@ class ChalinLiveStatusOverlay implements Component, Focusable {
     private readonly cwd: string,
     private readonly done: () => void,
   ) {
-    this.timer = setInterval(() => this.tui.requestRender(), 650);
+    this.timer = setInterval(() => this.requestLiveRefresh(), 650);
     this.timer.unref?.();
   }
 
@@ -1658,41 +1680,42 @@ class ChalinLiveStatusOverlay implements Component, Focusable {
     if (matchesKey(data, "up")) {
       this.followTail = false;
       this.scroll = Math.max(0, this.scroll - 1);
-      this.tui.requestRender();
+      this.requestRender();
       return;
     }
     if (matchesKey(data, "down")) {
       this.followTail = false;
       this.scroll += 1;
-      this.tui.requestRender();
+      this.requestRender();
       return;
     }
     if (matchesKey(data, "pageUp")) {
       this.followTail = false;
       this.scroll = Math.max(0, this.scroll - 8);
-      this.tui.requestRender();
+      this.requestRender();
       return;
     }
     if (matchesKey(data, "pageDown")) {
       this.followTail = false;
       this.scroll += 8;
-      this.tui.requestRender();
+      this.requestRender();
       return;
     }
     if (matchesKey(data, "home")) {
       this.followTail = false;
       this.scroll = 0;
-      this.tui.requestRender();
+      this.requestRender();
       return;
     }
     if (matchesKey(data, "end")) {
       this.followTail = true;
-      this.tui.requestRender();
+      this.requestRender(true);
       return;
     }
     if (matchesKey(data, "ctrl+o")) {
       this.toolsExpanded = !this.toolsExpanded;
-      this.tui.requestRender();
+      this.bodyCache = undefined;
+      this.requestRender(true);
       return;
     }
   }
@@ -1705,11 +1728,12 @@ class ChalinLiveStatusOverlay implements Component, Focusable {
     const overlayWidth = Math.max(1, width);
     const innerWidth = Math.max(1, overlayWidth - 2);
     const bodyHeight = 24;
-    const body = selected ? liveStatusBody(run, selected.step, this.tui, this.theme, this.cwd, Math.max(1, innerWidth - 2), this.toolsExpanded) : [this.theme.fg("dim", "No active subagent step.")];
+    const body = selected ? this.liveBody(run, selected, Math.max(1, innerWidth - 2)) : [this.theme.fg("dim", "No active subagent step.")];
     const maxScroll = Math.max(0, body.length - bodyHeight);
     if (this.followTail) this.scroll = maxScroll;
     this.scroll = Math.min(this.scroll, maxScroll);
     if (this.scroll >= maxScroll) this.followTail = true;
+    this.lastRefreshKey = liveStatusRefreshKey(run, selected, this.followTail);
     const visibleBody = body.slice(this.scroll, this.scroll + bodyHeight);
     const border = (text: string) => this.theme.fg("border", text);
     const row = (content = "") => `${border("│")}${padAnsi(content, innerWidth)}${border("│")}`;
@@ -1727,23 +1751,36 @@ class ChalinLiveStatusOverlay implements Component, Focusable {
     return clampRenderedLines(lines, overlayWidth);
   }
 
-  invalidate(): void {}
+  invalidate(): void {
+    this.bodyCache = undefined;
+    this.lastRefreshKey = "";
+  }
 
   dispose(): void {
     clearInterval(this.timer);
+    if (this.renderTimer) clearTimeout(this.renderTimer);
   }
 
   private ensureSelectedTab(tabs: LiveStatusTab[]): void {
     if (tabs.length === 0) {
       this.selectedId = undefined;
+      this.userSelectedTab = false;
       return;
     }
-    if (this.selectedId && tabs.some((tab) => tab.id === this.selectedId)) return;
-    this.selectedId = tabs.find((tab) => tab.step.status === "running")?.id
-      ?? tabs.find((tab) => tab.step.status === "pending")?.id
-      ?? tabs.at(-1)?.id;
+    const preferred = liveStatusSelectedTab(tabs);
+    if (this.selectedId && tabs.some((tab) => tab.id === this.selectedId)) {
+      if (this.userSelectedTab || !preferred || preferred.id === this.selectedId) return;
+      this.selectedId = preferred.id;
+      this.scroll = 0;
+      this.followTail = true;
+      this.bodyCache = undefined;
+      return;
+    }
+    this.selectedId = preferred?.id;
+    this.userSelectedTab = false;
     this.scroll = 0;
     this.followTail = true;
+    this.bodyCache = undefined;
   }
 
   private moveTab(delta: number): void {
@@ -1753,18 +1790,105 @@ class ChalinLiveStatusOverlay implements Component, Focusable {
     const current = Math.max(0, tabs.findIndex((tab) => tab.id === this.selectedId));
     const next = (current + delta + tabs.length) % tabs.length;
     this.selectedId = tabs[next]?.id;
+    this.userSelectedTab = true;
     this.scroll = 0;
     this.followTail = true;
-    this.tui.requestRender();
+    this.bodyCache = undefined;
+    this.requestRender(true);
+  }
+
+  private liveBody(run: RunState, tab: LiveStatusTab, width: number): string[] {
+    const cached = this.bodyCache;
+    if (cached && this.canReuseDetachedBody(run, tab, width, cached)) return cached.lines;
+
+    const liveSession = getLiveStepSession(tab.runId, tab.step.id);
+    const messages = liveSession?.getMessages() ?? [];
+    const key = liveStatusBodyCacheKey(run, tab, liveSession, messages, width, this.toolsExpanded);
+    if (cached?.key === key) return cached.lines;
+
+    const lines = liveStatusBody(run, tab, liveSession, messages, this.tui, this.theme, this.cwd, width, this.toolsExpanded);
+    this.bodyCache = {
+      key,
+      runId: tab.runId,
+      tabId: tab.id,
+      stepId: tab.step.id,
+      width,
+      toolsExpanded: this.toolsExpanded,
+      lines,
+    };
+    return lines;
+  }
+
+  private canReuseDetachedBody(run: RunState, tab: LiveStatusTab, width: number, cached: LiveStatusBodyCache): boolean {
+    return !this.followTail
+      && run.status === "running"
+      && cached.runId === tab.runId
+      && cached.tabId === tab.id
+      && cached.stepId === tab.step.id
+      && cached.width === width
+      && cached.toolsExpanded === this.toolsExpanded;
+  }
+
+  private requestLiveRefresh(): void {
+    const run = this.runProvider();
+    const tabs = liveStatusTabs(run);
+    const selected = liveStatusSelectedTab(tabs, this.selectedId);
+    const key = liveStatusRefreshKey(run, selected, this.followTail);
+    if (key === this.lastRefreshKey) return;
+    this.requestRender();
+  }
+
+  private requestRender(immediate = false): void {
+    if (immediate) {
+      if (this.renderTimer) {
+        clearTimeout(this.renderTimer);
+        this.renderTimer = undefined;
+      }
+      this.tui.requestRender();
+      return;
+    }
+    if (this.renderTimer) return;
+    this.renderTimer = setTimeout(() => {
+      this.renderTimer = undefined;
+      this.tui.requestRender();
+    }, 16);
+    this.renderTimer.unref?.();
   }
 }
 
-function liveStatusTabs(run: RunState): LiveStatusTab[] {
-  return run.steps.map((step, index) => ({
-    id: step.id || `${step.agent}-${index}`,
-    title: `${statusIcon(step.status)} ${step.agent}`,
-    step,
-  }));
+export function liveStatusTabs(run: RunState): LiveStatusTab[] {
+  const completedSteps = run.steps.filter((item) => isUsableActivityStatus(item.status)).length;
+  return run.steps.flatMap((step, index) => {
+    const id = step.id || `${step.agent}-${index}`;
+    const parentTab: LiveStatusTab = {
+      id,
+      title: `${statusIcon(step.status)} ${step.agent}`,
+      runId: run.id,
+      runStatus: run.status,
+      runStartedAt: run.startedAt,
+      runEndedAt: run.endedAt,
+      routeLabel: `route: ${run.route.kind}`,
+      completedSteps,
+      totalSteps: run.steps.length,
+      depth: 0,
+      step,
+    };
+    const childTabs = (step.nestedRuns ?? []).flatMap((nestedRun) => {
+      const nestedCompleted = nestedRun.steps.filter((item) => isUsableActivityStatus(item.status)).length;
+      return nestedRun.steps.map((nestedStep, nestedIndex): LiveStatusTab => ({
+        id: `${id}/${nestedRun.id}/${nestedStep.id || `${nestedStep.agent}-${nestedIndex}`}`,
+        title: `${statusIcon(nestedStep.status ?? "pending")} >${nestedStep.agent}`,
+        runId: nestedRun.id,
+        runStatus: nestedRun.status,
+        routeLabel: `nested: ${nestedRun.id}`,
+        completedSteps: nestedCompleted,
+        totalSteps: nestedRun.steps.length,
+        depth: 1,
+        step: nestedStepTraceToRunStep(nestedStep),
+      }));
+    });
+    return [parentTab, ...childTabs];
+  });
 }
 
 function renderLiveTabs(tabs: LiveStatusTab[], selectedId: string | undefined, theme: Theme, width: number): string {
@@ -1778,11 +1902,44 @@ function renderLiveTabs(tabs: LiveStatusTab[], selectedId: string | undefined, t
   return truncateToWidth(parts.join(" "), width, "…", true);
 }
 
-function liveStatusBody(run: RunState, step: RunStepState, tui: TUI, theme: Theme, cwd: string, width: number, toolsExpanded = false): string[] {
-  const liveSession = getLiveStepSession(run.id, step.id);
-  const messages = liveSession?.getMessages() ?? [];
+function nestedStepTraceToRunStep(step: NestedRunStepTrace): RunStepState {
+  return {
+    id: step.id,
+    agent: step.agent,
+    task: step.task ?? step.id,
+    status: step.status ?? "pending",
+    workUnitId: step.workUnitId,
+    error: step.error,
+    skipReason: step.skipReason,
+  };
+}
+
+export function liveStatusSelectedTab(tabs: LiveStatusTab[], selectedId?: string): LiveStatusTab | undefined {
+  if (selectedId && tabs.some((tab) => tab.id === selectedId)) return tabs.find((tab) => tab.id === selectedId);
+  const running = tabs.filter((tab) => tab.step.status === "running");
+  return running.find((tab) => tab.depth > 0 && getLiveStepSession(tab.runId, tab.step.id))
+    ?? running.find((tab) => tab.depth > 0)
+    ?? running[0]
+    ?? tabs.find((tab) => tab.step.status === "pending" && tab.depth > 0)
+    ?? tabs.find((tab) => tab.step.status === "pending")
+    ?? tabs.at(-1);
+}
+
+function liveStatusBody(
+  run: RunState,
+  tab: LiveStatusTab,
+  liveSession: LiveStepSessionRef | undefined,
+  messages: readonly unknown[],
+  tui: TUI,
+  theme: Theme,
+  cwd: string,
+  width: number,
+  toolsExpanded = false,
+): string[] {
+  const step = tab.step;
+  const elapsedStart = tab.runStartedAt ?? liveSession?.startedAt ?? run.startedAt;
   const lines: string[] = [
-    theme.fg("dim", `route: ${run.route.kind} · progress: ${run.steps.filter((item) => isUsableActivityStatus(item.status)).length}/${run.steps.length} · elapsed: ${formatElapsed(run.startedAt, run.endedAt)}`),
+    theme.fg("dim", `${tab.routeLabel} · progress: ${tab.completedSteps}/${tab.totalSteps} · elapsed: ${formatElapsed(elapsedStart, tab.runEndedAt)}`),
     theme.fg("dim", `step: ${step.id} · ${step.agent} · ${step.status} · ${formatStepDuration(step)}${step.currentTool ? ` · tool: ${step.currentTool}` : ""}`),
     liveSession ? theme.fg("dim", `live session: in-memory · since ${formatElapsed(liveSession.startedAt, undefined)}`) : theme.fg("dim", "live session: not attached; showing persisted step summary"),
     "",
@@ -1792,6 +1949,118 @@ function liveStatusBody(run: RunState, step: RunStepState, tui: TUI, theme: Them
     : renderFallbackStepSummary(step, tui, cwd, theme, width, toolsExpanded)));
   if (step.modelResolution || step.metrics || step.error) lines.push(...renderStepDiagnostics(step, theme, width));
   return clampRenderedLines(lines.length > 4 ? lines : [...lines, theme.fg("dim", "No subagent history available yet.")], width);
+}
+
+function liveStatusRefreshKey(run: RunState, tab: LiveStatusTab | undefined, followTail: boolean): string {
+  if (!tab) return `${run.id}:${run.status}:none`;
+  const step = tab.step;
+  const liveSession = getLiveStepSession(tab.runId, step.id);
+  const messages = followTail ? liveSession?.getMessages() ?? [] : [];
+  return [
+    run.id,
+    run.status,
+    run.endedAt ?? "",
+    run.steps.length,
+    run.steps.map((item) => `${item.id}:${item.status}:${item.currentTool ?? ""}`).join(","),
+    tab.id,
+    tab.runId,
+    tab.runStatus,
+    tab.completedSteps,
+    tab.totalSteps,
+    step.id,
+    step.status,
+    step.currentTool ?? "",
+    followTail ? "tail" : "detached",
+    liveSession?.startedAt ?? "",
+    followTail ? liveStatusMessagesMarker(messages) : "",
+  ].join("|");
+}
+
+function liveStatusBodyCacheKey(
+  run: RunState,
+  tab: LiveStatusTab,
+  liveSession: LiveStepSessionRef | undefined,
+  messages: readonly unknown[],
+  width: number,
+  toolsExpanded: boolean,
+): string {
+  const step = tab.step;
+  return [
+    width,
+    toolsExpanded ? "expanded" : "compact",
+    run.id,
+    run.status,
+    run.route.kind,
+    run.startedAt,
+    run.endedAt ?? "",
+    run.steps.length,
+    run.steps.filter((item) => isUsableActivityStatus(item.status)).length,
+    tab.id,
+    tab.runId,
+    tab.runStatus,
+    tab.completedSteps,
+    tab.totalSteps,
+    step.id,
+    step.agent,
+    step.status,
+    step.currentTool ?? "",
+    step.model ?? "",
+    step.thinkingLevel ?? "",
+    step.modelResolution?.selected ?? "",
+    step.error ? textMarker(step.error) : "",
+    step.output?.raw ? textMarker(step.output.raw) : "",
+    step.output?.text ? textMarker(step.output.text) : "",
+    step.output?.handoff ? textMarker(step.output.handoff) : "",
+    step.output?.memoryCandidates.length ?? 0,
+    step.output?.warnings.length ?? 0,
+    step.metrics ? `${step.metrics.toolCalls}:${step.metrics.outputChars ?? 0}:${step.metrics.readBytes ?? 0}:${step.metrics.filesRead?.length ?? 0}:${step.metrics.policyViolations?.length ?? 0}:${step.metrics.budgetCapHits?.length ?? 0}` : "",
+    liveSession?.startedAt ?? "",
+    liveStatusMessagesMarker(messages),
+  ].join("|");
+}
+
+function liveStatusMessagesMarker(messages: readonly unknown[]): string {
+  return [
+    messages.length,
+    liveStatusMessageMarker(messages.at(-2)),
+    liveStatusMessageMarker(messages.at(-1)),
+  ].join(":");
+}
+
+function liveStatusMessageMarker(message: unknown): string {
+  if (message === undefined) return "";
+  if (!isRecord(message)) return textMarker(String(message));
+  return [
+    typeof message.role === "string" ? message.role : "",
+    typeof message.stopReason === "string" ? message.stopReason : "",
+    typeof message.toolCallId === "string" ? message.toolCallId : "",
+    typeof message.toolName === "string" ? message.toolName : "",
+    message.isError ? "error" : "",
+    message.errorMessage ? textMarker(String(message.errorMessage)) : "",
+    liveStatusContentMarker(message.content),
+  ].join("/");
+}
+
+function liveStatusContentMarker(content: unknown): string {
+  if (typeof content === "string") return textMarker(content);
+  if (!Array.isArray(content)) return content === undefined ? "" : textMarker(String(content));
+  return [
+    content.length,
+    ...content.slice(-3).map((part) => {
+      if (!isRecord(part)) return textMarker(String(part));
+      const text = typeof part.text === "string" ? part.text : typeof part.content === "string" ? part.content : "";
+      return [
+        typeof part.type === "string" ? part.type : "",
+        typeof part.id === "string" ? part.id : "",
+        typeof part.name === "string" ? part.name : "",
+        textMarker(text),
+      ].join(".");
+    }),
+  ].join(",");
+}
+
+function textMarker(text: string): string {
+  return `${text.length}:${text.slice(-160).replace(/\s+/g, " ")}`;
 }
 
 function renderPiLikeMessages(messages: unknown[], tui: TUI, cwd: string, theme: Theme, width: number, toolsExpanded = false): string[] {
@@ -1906,8 +2175,8 @@ function fallbackStepMessages(step: RunStepState): unknown[] {
     messages.push({
       role: "assistant",
       content: [{ type: "text", text }],
-      api: "openai-responses",
-      provider: "openai",
+      api: "pi-session",
+      provider: "pi",
       model: step.model ?? "unknown",
       usage: emptyUsage(),
       stopReason: step.error ? "error" : "stop",

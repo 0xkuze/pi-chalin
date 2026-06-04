@@ -536,7 +536,7 @@ export interface ModelResolutionLog {
   attempts: ModelResolutionAttempt[];
 }
 
-export type RunStepRepairKind = "implementation" | "review-evidence" | "scope-gap";
+export type RunStepRepairKind = "implementation" | "review-evidence";
 
 export interface RunStepState {
   id: string;
@@ -556,6 +556,7 @@ export interface RunStepState {
   endedAt?: string;
   model?: string;
   thinkingLevel?: AgentThinkingLevel;
+  childSessionFile?: string;
   output?: AgentOutput;
   error?: string;
   pauseReason?: RunStepPauseReason;
