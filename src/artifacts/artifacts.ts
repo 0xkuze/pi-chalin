@@ -1,8 +1,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { Context, Effect, Layer } from "effect";
+import { Effect } from "effect";
 import { resolveChalinPaths, type ChalinPathsOptions } from "../config/paths.ts";
 import type { RunState } from "../domain/schemas.ts";
+import { compactText } from "../utils/text.ts";
 
 export type ArtifactFeatureStatus = "active" | "complete" | "failed" | "paused";
 
@@ -64,6 +65,24 @@ export interface InterviewDecisionArtifact extends InterviewDecisionInput {
   createdAt: string;
 }
 
+export interface ApprovalDecisionInput {
+  requestId: string;
+  decision: "approved" | "rejected";
+  toolName: string;
+  reason: string;
+  risk: "medium" | "high" | "critical";
+  approvedAction: string;
+  retriedAction?: string;
+  equivalenceReason?: string;
+  subagentId: string;
+  paramsSummary?: string;
+}
+
+export interface ApprovalDecisionArtifact extends ApprovalDecisionInput {
+  id: string;
+  createdAt: string;
+}
+
 export interface FeatureArtifactState {
   featureId: string;
   goal: string;
@@ -74,6 +93,7 @@ export interface FeatureArtifactState {
   validationContracts: ValidationContractArtifact[];
   workerSkills: WorkerSkillArtifact[];
   interviewDecisions: InterviewDecisionArtifact[];
+  approvalDecisions: ApprovalDecisionArtifact[];
   updatedAt: string;
   createdAt: string;
 }
@@ -97,25 +117,8 @@ export interface RunArtifactSummary {
   createdAt: string;
 }
 
-interface ArtifactServiceShape {
-  readonly store: ArtifactStore;
-  readonly recordRun: (run: RunState) => Effect.Effect<RunArtifactSummary, unknown>;
-}
-
-class ArtifactService extends Context.Tag("pi-chalin/Artifacts")<ArtifactService, ArtifactServiceShape>() {}
-
-export function artifactStoreLayer(store: ArtifactStore): Layer.Layer<ArtifactService> {
-  return Layer.succeed(ArtifactService, {
-    store,
-    recordRun: (run) => Effect.tryPromise(() => store.recordRun(run)),
-  });
-}
-
 export function recordRunArtifactEffect(store: ArtifactStore, run: RunState): Effect.Effect<RunArtifactSummary, unknown> {
-  return Effect.gen(function* () {
-    const artifacts = yield* ArtifactService;
-    return yield* artifacts.recordRun(run);
-  }).pipe(Effect.provide(artifactStoreLayer(store)), Effect.withSpan("artifacts.recordRun"));
+  return Effect.tryPromise(() => store.recordRun(run)).pipe(Effect.withSpan("artifacts.recordRun"));
 }
 
 export class ArtifactStore {
@@ -147,6 +150,7 @@ export class ArtifactStore {
       validationContracts: [],
       workerSkills: [],
       interviewDecisions: [],
+      approvalDecisions: [],
       createdAt: now,
       updatedAt: now,
     };
@@ -196,6 +200,19 @@ export class ArtifactStore {
     return artifact;
   }
 
+  async appendApprovalDecision(featureId: string, input: ApprovalDecisionInput): Promise<ApprovalDecisionArtifact> {
+    const state = await this.ensureFeature(featureId);
+    const createdAt = new Date().toISOString();
+    const artifact: ApprovalDecisionArtifact = { ...input, id: `approval-${Date.now().toString(36)}`, createdAt };
+    state.approvalDecisions.push(artifact);
+    state.currentStep = input.decision === "approved" ? "Action approval captured" : "Action approval rejected";
+    state.status = input.decision === "rejected" ? "paused" : state.status === "complete" ? "complete" : "active";
+    state.updatedAt = createdAt;
+    appendJsonLine(this.featurePath(featureId, "approvals.jsonl"), artifact);
+    await this.writeFeatureState(state);
+    return artifact;
+  }
+
   async appendInterviewDecision(featureId: string, input: InterviewDecisionInput): Promise<InterviewDecisionArtifact> {
     const state = await this.ensureFeature(featureId);
     const createdAt = new Date().toISOString();
@@ -218,6 +235,11 @@ export class ArtifactStore {
       `- ${decision.status}: ${decision.reason}`,
       ...decision.answers.map((answer) => `  - ${answer.question}: ${answer.answer}`),
     ]);
+    const approvals = state.approvalDecisions.slice(-5).flatMap((decision) => [
+      `- ${decision.decision}: ${decision.approvedAction} (${decision.toolName}, ${decision.risk}, ${decision.subagentId})`,
+      decision.retriedAction ? `  - retry: ${decision.retriedAction}` : undefined,
+      decision.equivalenceReason ? `  - equivalence: ${decision.equivalenceReason}` : undefined,
+    ].filter((line): line is string => Boolean(line)));
     const skills = state.workerSkills.map((skill) => `- ${skill.name}: ${skill.summary}`);
     return [
       `Feature: ${state.featureId}`,
@@ -231,6 +253,8 @@ export class ArtifactStore {
       ...validations,
       interviews.length ? "Interview decisions:" : undefined,
       ...interviews,
+      approvals.length ? "Action approvals:" : undefined,
+      ...approvals,
       skills.length ? "Worker skills:" : undefined,
       ...skills,
     ].filter((line): line is string => Boolean(line)).join("\n");
@@ -249,7 +273,7 @@ export class ArtifactStore {
       handoffs: run.steps.map((step) => ({
         agent: step.agent,
         status: step.status,
-        summary: compact(step.output?.handoff || step.output?.text || step.error || "", 600),
+        summary: compactText(step.output?.handoff || step.output?.text || step.error || "", 600),
       })).filter((item) => item.summary.length > 0),
       workUnits: run.workUnits,
       recoveryState: run.recoveryState,
@@ -335,7 +359,6 @@ function formatWorkerSkill(skill: WorkerSkillArtifact): string {
     "capabilities:",
     "  - validate",
     "activation: manual",
-    "triggers: []",
     "risk: low",
     "allowedTools: []",
     "deniedTools: []",
@@ -356,10 +379,6 @@ function formatWorkerSkill(skill: WorkerSkillArtifact): string {
   ].join("\n");
 }
 
-function compact(text: string, max: number): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  return normalized.length <= max ? normalized : `${normalized.slice(0, max - 1)}…`;
-}
 
 function normalizeFeatureState(raw: Partial<FeatureArtifactState>): FeatureArtifactState {
   const now = new Date().toISOString();
@@ -373,6 +392,7 @@ function normalizeFeatureState(raw: Partial<FeatureArtifactState>): FeatureArtif
     validationContracts: raw.validationContracts ?? [],
     workerSkills: raw.workerSkills ?? [],
     interviewDecisions: raw.interviewDecisions ?? [],
+    approvalDecisions: raw.approvalDecisions ?? [],
     createdAt: raw.createdAt ?? now,
     updatedAt: raw.updatedAt ?? now,
   };

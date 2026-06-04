@@ -1,4 +1,3 @@
-import { Context, Effect, Layer, Ref } from "effect";
 import type { RouteDecision, RunState } from "../domain/schemas.ts";
 import {
   INLINE_NUDGE_FLAGS,
@@ -7,13 +6,10 @@ import {
   judgeInlineCompletionPolicy,
 } from "./inline-policy.ts";
 import type {
-  InlineNudgeKind,
-  InlineNudgePlan,
   InlineNudgeSelectorInput,
   InlinePolicySnapshot,
   InlineToolCompletionAdapter,
   InlineToolEvent,
-  InlineToolEventPhase,
   PolicyJudgeDecision,
   SemanticPolicyJudgeRequest,
   SemanticPolicyJudgeResult,
@@ -103,108 +99,24 @@ export interface LiveStepSessionRef {
   getMessages(): readonly unknown[];
 }
 
-interface RuntimeStateServiceShape {
-  readonly lastRun: Ref.Ref<RunState | undefined>;
-  readonly liveStepSessions: Ref.Ref<Map<string, LiveStepSessionRef>>;
-  readonly routeInvocations: Ref.Ref<ChalinRouteInvocation[]>;
-  readonly inlineWork: Ref.Ref<InlineWorkState>;
-  readonly skillOverrides: Ref.Ref<SkillOverrideState>;
-}
-
 interface SkillOverrideState {
   explicit: Set<string>;
   disabled: Set<string>;
 }
 
-class RuntimeStateService extends Context.Tag("pi-chalin/RuntimeState")<RuntimeStateService, RuntimeStateServiceShape>() {}
-
-const RuntimeStateLayer = Layer.effect(RuntimeStateService, Effect.gen(function* () {
-  return {
-    lastRun: yield* Ref.make<RunState | undefined>(undefined),
-    liveStepSessions: yield* Ref.make(new Map<string, LiveStepSessionRef>()),
-    routeInvocations: yield* Ref.make<ChalinRouteInvocation[]>([]),
-    inlineWork: yield* Ref.make(freshInlineWorkState()),
-    skillOverrides: yield* Ref.make<SkillOverrideState>(freshSkillOverrideState()),
-  };
-}));
-
-const runtimeState = Effect.runSync(Effect.gen(function* () {
-  return yield* RuntimeStateService;
-}).pipe(Effect.provide(RuntimeStateLayer)));
-
-const lastRunRef = runtimeState.lastRun;
-const liveStepSessions = refBackedMap(runtimeState.liveStepSessions);
-const routeInvocations = refBackedArray(runtimeState.routeInvocations);
-const inlineWork = refBackedObject(runtimeState.inlineWork);
-const skillOverridesRef = runtimeState.skillOverrides;
+let latestRun: RunState | undefined;
+const liveStepSessions = new Map<string, LiveStepSessionRef>();
+let routeInvocations: ChalinRouteInvocation[] = [];
+let inlineWork = freshInlineWorkState();
+let skillOverrides = freshSkillOverrideState();
 let inlineWorkTurnSequence = inlineWork.turnId;
 
-function getRef<T>(ref: Ref.Ref<T>): T {
-  return Effect.runSync(Ref.get(ref));
-}
-
-function setRef<T>(ref: Ref.Ref<T>, value: T): void {
-  Effect.runSync(Ref.set(ref, value));
-}
-
-function refBackedArray<T>(ref: Ref.Ref<T[]>): T[] {
-  return new Proxy([] as T[], {
-    get(_target, property) {
-      const value = Reflect.get(getRef(ref), property);
-      return typeof value === "function" ? value.bind(getRef(ref)) : value;
-    },
-    set(_target, property, value) {
-      const current = getRef(ref);
-      Reflect.set(current, property, value);
-      return true;
-    },
-    ownKeys() {
-      return Reflect.ownKeys(getRef(ref));
-    },
-    getOwnPropertyDescriptor(_target, property) {
-      return Reflect.getOwnPropertyDescriptor(getRef(ref), property);
-    },
-  });
-}
-
-function resetRefBackedArray<T>(array: T[]): void {
-  array.splice(0, array.length);
-}
-
-function refBackedMap<K, V>(ref: Ref.Ref<Map<K, V>>): Map<K, V> {
-  return new Proxy(new Map<K, V>(), {
-    get(_target, property) {
-      const value = Reflect.get(getRef(ref), property);
-      return typeof value === "function" ? value.bind(getRef(ref)) : value;
-    },
-  });
-}
-
-function refBackedObject<T extends object>(ref: Ref.Ref<T>): T {
-  return new Proxy({} as T, {
-    get(_target, property) {
-      return Reflect.get(getRef(ref), property);
-    },
-    set(_target, property, value) {
-      Reflect.set(getRef(ref), property, value);
-      return true;
-    },
-  });
-}
-
-function replaceRefBackedObject<T extends object>(target: T, next: T): void {
-  for (const key of Object.keys(target) as Array<keyof T>) {
-    delete target[key];
-  }
-  Object.assign(target, next);
-}
-
 export function setLatestRun(run: RunState | undefined): void {
-  setRef(lastRunRef, run);
+  latestRun = run;
 }
 
 export function getLatestRun(): RunState | undefined {
-  return getRef(lastRunRef);
+  return latestRun;
 }
 
 export function getActiveRun(): RunState | undefined {
@@ -227,34 +139,28 @@ export function clearLiveStepSession(runId: string, stepId: string, ref?: LiveSt
 }
 
 export function activateSkillForTurn(reference: string): SkillOverrideState {
-  const current = getRef(skillOverridesRef);
-  const next: SkillOverrideState = { explicit: new Set(current.explicit), disabled: new Set(current.disabled) };
-  next.explicit.add(reference);
-  next.disabled.delete(reference);
-  setRef(skillOverridesRef, next);
-  return cloneSkillOverrideState(next);
+  skillOverrides.explicit.add(reference);
+  skillOverrides.disabled.delete(reference);
+  return cloneSkillOverrideState(skillOverrides);
 }
 
 export function disableSkillForTurn(reference: string): SkillOverrideState {
-  const current = getRef(skillOverridesRef);
-  const next: SkillOverrideState = { explicit: new Set(current.explicit), disabled: new Set(current.disabled) };
-  next.explicit.delete(reference);
-  next.disabled.add(reference);
-  setRef(skillOverridesRef, next);
-  return cloneSkillOverrideState(next);
+  skillOverrides.explicit.delete(reference);
+  skillOverrides.disabled.add(reference);
+  return cloneSkillOverrideState(skillOverrides);
 }
 
 export function getSkillOverridesForTurn(): SkillOverrideState {
-  return cloneSkillOverrideState(getRef(skillOverridesRef));
+  return cloneSkillOverrideState(skillOverrides);
 }
 
 export function clearSkillOverridesForTurn(): void {
-  setRef(skillOverridesRef, freshSkillOverrideState());
+  skillOverrides = freshSkillOverrideState();
 }
 
 export function beginChalinTurn(options: { prompt?: string; cwd?: string } = {}): void {
-  resetRefBackedArray(routeInvocations);
-  replaceRefBackedObject(inlineWork, freshInlineWorkState(nextInlineWorkTurnId()));
+  routeInvocations = [];
+  inlineWork = freshInlineWorkState(nextInlineWorkTurnId());
   clearSkillOverridesForTurn();
   inlineWork.cwd = options.cwd;
   inlineWork.promptCodePaths = new Set(promptPathTokens(options.prompt ?? "").filter(isCodeLikePath).map(normalizeWorkflowPath));
@@ -747,8 +653,8 @@ export function getChalinRouteInvocations(): readonly ChalinRouteInvocation[] {
 export function resetRuntimeState(): void {
   setLatestRun(undefined);
   liveStepSessions.clear();
-  resetRefBackedArray(routeInvocations);
-  replaceRefBackedObject(inlineWork, freshInlineWorkState(nextInlineWorkTurnId()));
+  routeInvocations = [];
+  inlineWork = freshInlineWorkState(nextInlineWorkTurnId());
   clearSkillOverridesForTurn();
 }
 

@@ -10,11 +10,6 @@ capabilities:
   - inspect-files
   - validate
 activation: auto
-triggers:
-  - skill audit
-  - untrusted skill
-  - SKILL.md
-  - promote skill
 risk: medium
 maxActiveWith:
   - review-final-gate

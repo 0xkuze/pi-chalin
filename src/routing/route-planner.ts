@@ -3,6 +3,8 @@ import { createAgentSession, defineTool, SessionManager, type ModelRegistry } fr
 import type { AgentCatalog } from "../agents/agents.ts";
 import type { AgentDefinition, RouteDecision, RouteExpectedEffect, RouteRisk, RouteWorkUnitStrategy } from "../domain/schemas.ts";
 import { routeFromPlan, type StrictRoutePlanInput } from "../kernel/kernel.ts";
+import { errorMessage, isRecord } from "../utils/guards.ts";
+import { compactString, parseJsonObject } from "../utils/json.ts";
 
 export type ChalinRouteTopologyInput = "auto" | "sequential" | "dag";
 
@@ -10,8 +12,8 @@ export type ChalinDelegationStep = {
   id?: string;
   agent: string;
   task: string;
-  budget?: "small" | "medium" | "large" | "tight" | "normal" | "deep" | "extended";
   files?: string[];
+  expectedEffects?: RouteExpectedEffect[];
 };
 
 export type ChalinRoutePlannerInput = {
@@ -29,7 +31,7 @@ export type ChalinRoutePlannerInput = {
   reason?: string;
 };
 
-export type ChalinRoutePlanningSource = "explicit" | "llm" | "failed";
+export type ChalinRoutePlanningSource = "llm" | "failed";
 
 export type ChalinRoutePlanningResult = {
   route: RouteDecision;
@@ -71,7 +73,6 @@ const ROUTE_TOPOLOGIES = ["sequential", "dag"] as const;
 const ROUTE_RISKS = ["low", "medium", "high", "critical"] as const;
 const ROUTE_EFFECTS = ["read", "write", "verify"] as const satisfies readonly RouteExpectedEffect[];
 const ROUTE_WORK_UNIT_STRATEGIES = ["none", "planned", "discover"] as const satisfies readonly RouteWorkUnitStrategy[];
-const ROUTE_BUDGETS = ["tight", "normal", "deep", "extended"] as const;
 const ROUTE_PLANNER_RESULT_KEYS = new Set([
   "topology",
   "steps",
@@ -85,13 +86,15 @@ const ROUTE_PLANNER_RESULT_KEYS = new Set([
   "requiresWorkspaceMutation",
   "reason",
 ]);
+const ROUTE_PLANNER_STEP_KEYS = new Set(["id", "agent", "task", "files", "expectedEffects"]);
+const ROUTE_PLANNER_STAGE_KEYS = new Set(["id", "tasks"]);
 
 const ROUTE_PLANNER_STEP_SCHEMA = Type.Object({
   id: Type.Optional(Type.String({ minLength: 1, maxLength: 80, description: "Stable short step id." })),
   agent: Type.String({ minLength: 1, maxLength: 120, description: "Agent reference from the available roster." }),
   task: Type.String({ minLength: 12, maxLength: 1_200, description: "Concrete responsibility, evidence expectations, and boundaries for this subagent." }),
-  budget: Type.Optional(StringEnum(ROUTE_BUDGETS, { description: "Execution budget for this step." })),
   files: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 240 }), { maxItems: 40, description: "Optional authoritative mutable file scope when already known." })),
+  expectedEffects: Type.Optional(Type.Array(StringEnum(ROUTE_EFFECTS), { minItems: 1, maxItems: 3, uniqueItems: true, description: "Effects this step is responsible for covering." })),
 }, { additionalProperties: false });
 
 const ROUTE_PLANNER_STAGE_SCHEMA = Type.Object({
@@ -123,11 +126,6 @@ export async function planChalinRoute(
   input: ChalinRoutePlannerInput,
   context: ChalinRoutePlanningContext,
 ): Promise<ChalinRoutePlanningResult> {
-  const explicit = explicitRoutePlanFromInput(input);
-  if (explicit) {
-    return { route: routeFromPlan(explicit), source: "explicit", diagnostics: [] };
-  }
-
   const attempt = context.planner
     ? await context.planner(input, context)
     : await runStructuredRoutePlanner(input, context);
@@ -155,34 +153,6 @@ export async function planChalinRoute(
     diagnostics: attempt.diagnostics,
     requiresWorkspaceMutation: attempt.output.requiresWorkspaceMutation,
   };
-}
-
-export function explicitRoutePlanFromInput(input: ChalinRoutePlannerInput): StrictRoutePlanInput | undefined {
-  const expectedEffects = validateExpectedEffects(input.expectedEffects);
-  if (!expectedEffects) return undefined;
-
-  const common = {
-    risk: input.risk,
-    needsMemory: input.needsMemory,
-    needsArtifacts: input.needsArtifacts,
-    expectedEffects,
-    workUnitStrategy: input.workUnitStrategy,
-    fanoutAuthorized: input.fanoutAuthorized,
-    reason: input.reason,
-  };
-
-  if (input.topology === "dag" && input.stages?.length) {
-    return { topology: "dag", stages: input.stages, ...common };
-  }
-  if (input.topology === "sequential" && input.steps?.length) {
-    return { topology: "sequential", steps: input.steps, ...common };
-  }
-  if (input.topology === "auto" || input.topology === undefined) {
-    if (input.stages?.length && !input.steps?.length) return { topology: "dag", stages: input.stages, ...common };
-    if (input.steps?.length) return { topology: "sequential", steps: input.steps, ...common };
-  }
-
-  return undefined;
 }
 
 export async function runStructuredRoutePlanner(
@@ -265,6 +235,7 @@ export function validateChalinRoutePlannerOutput(parsed: Record<string, unknown>
 
   const expectedEffects = validateExpectedEffects(parsed.expectedEffects);
   if (!expectedEffects) return undefined;
+  if (expectedEffects.includes("write") && (!expectedEffects.includes("read") || !expectedEffects.includes("verify"))) return undefined;
 
   const risk = isOneOf(parsed.risk, ROUTE_RISKS) ? parsed.risk : undefined;
   if (!risk) return undefined;
@@ -512,8 +483,9 @@ function routePlannerSystemPrompt(): string {
     "Select only agents from availableAgents. Prefer the smallest route that can gather evidence, execute required effects, and verify the outcome.",
     "Use sequential when steps depend on earlier evidence or implementation. Use dag only when stages contain genuinely independent work that can safely run in parallel.",
     "If writes are expected, expectedEffects must include read, write, and verify, and requiresWorkspaceMutation must be true.",
-    "Use reviewer when independent validation materially lowers risk. Use worker only for mutation. Use researcher only when fresh or external non-repo evidence is part of the delegated task.",
-    "Use context-builder only when broad discovered evidence or WorkUnits need packaging before implementation; do not add it as generic ceremony.",
+    "Select agents by their declared concerns, capabilities, tools, and descriptions; do not assign or exclude an agent merely because its name appears to match a task type.",
+    "Independent validation, mutation, fresh external evidence, and evidence packaging are responsibilities to cover through the roster, not fixed agent-name recipes.",
+    "Set each step's expectedEffects when its responsibility is known; the harness will use those effects as the contract instead of inferring responsibility from agent names.",
     "Step tasks must be concrete, bounded, and mention the evidence, mutation, or verification responsibility of that agent.",
     `When the ${ROUTE_PLANNER_TOOL_NAME} tool is available, call it exactly once with the final route. Otherwise return JSON only with the same fields.`,
   ].join("\n");
@@ -536,6 +508,7 @@ function validatePlannerStages(values: unknown, agentRefs: Set<string> | undefin
   const seen = new Set<string>();
   for (const [index, value] of values.entries()) {
     if (!isRecord(value)) return undefined;
+    if (Object.keys(value).some((key) => !ROUTE_PLANNER_STAGE_KEYS.has(key))) return undefined;
     const id = compactString(value.id, 80) ?? `stage-${index + 1}`;
     if (seen.has(id)) return undefined;
     seen.add(id);
@@ -548,6 +521,7 @@ function validatePlannerStages(values: unknown, agentRefs: Set<string> | undefin
 
 function validatePlannerStep(value: unknown, agentRefs: Set<string> | undefined): PlannerStepInput | undefined {
   if (!isRecord(value)) return undefined;
+  if (Object.keys(value).some((key) => !ROUTE_PLANNER_STEP_KEYS.has(key))) return undefined;
   const id = value.id === undefined ? undefined : compactString(value.id, 80);
   if (value.id !== undefined && !id) return undefined;
   const agent = compactString(value.agent, 120);
@@ -555,20 +529,16 @@ function validatePlannerStep(value: unknown, agentRefs: Set<string> | undefined)
   if (agentRefs && !agentRefs.has(agent)) return undefined;
   const task = compactString(value.task, 1_200);
   if (!task) return undefined;
-  const budget = value.budget === undefined
-    ? undefined
-    : isOneOf(value.budget, ROUTE_BUDGETS)
-      ? value.budget
-      : undefined;
-  if (value.budget !== undefined && !budget) return undefined;
   const files = value.files === undefined ? undefined : validateFiles(value.files);
   if (value.files !== undefined && !files) return undefined;
+  const expectedEffects = value.expectedEffects === undefined ? undefined : validateExpectedEffects(value.expectedEffects);
+  if (value.expectedEffects !== undefined && !expectedEffects) return undefined;
   return {
     ...(id ? { id } : {}),
     agent,
     task,
-    ...(budget ? { budget } : {}),
     ...(files ? { files } : {}),
+    ...(expectedEffects ? { expectedEffects } : {}),
   };
 }
 
@@ -619,83 +589,11 @@ function routePlannerBlockedRoute(reason: string): RouteDecision {
   };
 }
 
-function parseJsonObject(text: string): Record<string, unknown> | undefined {
-  const trimmed = extractJsonObjectText(text);
-  if (!trimmed) return undefined;
-  try {
-    const parsed = JSON.parse(trimmed) as unknown;
-    return isRecord(parsed) ? parsed : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function extractJsonObjectText(text: string): string | undefined {
-  const trimmed = stripMarkdownJsonFence(text);
-  if (trimmed.startsWith("{") && trimmed.endsWith("}")) return trimmed;
-  return firstBalancedJsonObject(trimmed);
-}
-
-function stripMarkdownJsonFence(text: string): string {
-  const trimmed = text.trim();
-  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  return (fenced?.[1] ?? trimmed).trim();
-}
-
-function firstBalancedJsonObject(text: string): string | undefined {
-  let start = -1;
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let index = 0; index < text.length; index += 1) {
-    const char = text[index];
-    if (start < 0) {
-      if (char === "{") {
-        start = index;
-        depth = 1;
-      }
-      continue;
-    }
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (char === "\"") {
-        inString = false;
-      }
-      continue;
-    }
-    if (char === "\"") inString = true;
-    else if (char === "{") depth += 1;
-    else if (char === "}") {
-      depth -= 1;
-      if (depth === 0) return text.slice(start, index + 1);
-    }
-  }
-  return undefined;
-}
-
-function compactString(value: unknown, maxLength: number): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const normalized = value.trim().replace(/\s+/g, " ");
-  if (!normalized || normalized.length > maxLength) return undefined;
-  return normalized;
-}
-
 function truncate(value: string, maxLength: number): string {
   const normalized = value.trim().replace(/\s+/g, " ");
   return normalized.length <= maxLength ? normalized : `${normalized.slice(0, maxLength - 3)}...`;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
 function isOneOf<const TValue extends string>(value: unknown, values: readonly TValue[]): value is TValue {
   return typeof value === "string" && values.includes(value as TValue);
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

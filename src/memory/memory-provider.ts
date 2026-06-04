@@ -4,6 +4,8 @@ import * as path from "node:path";
 import { DEFAULT_CONFIG, loadEffectiveConfig, type ChalinConfig, type MemoryProvider } from "../config/config.ts";
 import type { ChalinPathsOptions } from "../config/paths.ts";
 import type { MemoryAuditEvent, MemoryCandidate, MemoryRecord } from "../domain/schemas.ts";
+import { isRecord } from "../utils/guards.ts";
+import { compactText } from "../utils/text.ts";
 import {
   MemoryStore,
   prepareMemoryRecords,
@@ -658,10 +660,6 @@ function removeUndefined(value: unknown): unknown {
   return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
 function spawnDetached(command: string, args: readonly string[], cwd: string): Promise<boolean> {
   return new Promise((resolve) => {
     try {
@@ -745,7 +743,7 @@ function importanceForEngramType(type: string): number {
 
 function engramTitle(record: MemoryRecord): string {
   const prefix = record.topicKey ? record.topicKey.split("/").at(-1) ?? record.topicKey : record.category;
-  return truncateText(`${prefix}: ${record.content}`, 90);
+  return compactText(`${prefix}: ${record.content}`, 90);
 }
 
 function engramContent(content: string, evidence?: string): string {
@@ -786,18 +784,12 @@ function formatEngramLine(record: MemoryRecord, includeEvidence: boolean): strin
     record.topicKey ? `topic=${record.topicKey}` : undefined,
     record.revisionCount > 1 ? `rev=${record.revisionCount}` : undefined,
   ].filter(Boolean).join(" · ");
-  const evidence = includeEvidence && record.evidence ? ` evidence=${truncateText(record.evidence, 120)}` : "";
-  return `[${meta}] ${truncateText(record.content, 260)}${evidence}`;
+  const evidence = includeEvidence && record.evidence ? ` evidence=${compactText(record.evidence, 120)}` : "";
+  return `[${meta}] ${compactText(record.content, 260)}${evidence}`;
 }
 
 function estimateTokens(text: string): number {
   return Math.max(1, Math.ceil(text.length / 4));
-}
-
-function truncateText(text: string, maxChars: number): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  if (normalized.length <= maxChars) return normalized;
-  return `${normalized.slice(0, Math.max(0, maxChars - 1)).trimEnd()}...`;
 }
 
 function stableHash(input: string): string {

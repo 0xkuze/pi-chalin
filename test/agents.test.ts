@@ -61,7 +61,7 @@ test("built-in worker can coordinate nested decomposition below depth limit", ()
   const worker = AgentCatalog.load({ cwd }).resolve("worker").agent;
 
   assert.ok(worker);
-  assert.ok(childToolNames(worker, "Implementa un scope que excede un limite de ownership confiable.", true, false, {
+  assert.ok(childToolNames(worker, true, false, {
     delegationDepth: 1,
     maxDelegationDepth: 2,
   }).includes("chalin_delegate"));
@@ -72,7 +72,7 @@ test("scout receives native bash for branch and PR reconnaissance", () => {
   const scout = AgentCatalog.load({ cwd }).resolve("scout").agent;
 
   assert.ok(scout);
-  assert.ok(childToolNames(scout, "Review PR comments and map relevant branch context.").includes("bash"));
+  assert.ok(childToolNames(scout).includes("bash"));
 });
 
 test("read-only built-in agent prompts do not mention unavailable edit tooling", () => {

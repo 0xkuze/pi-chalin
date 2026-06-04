@@ -1,4 +1,5 @@
 import type { MemoryRecord } from "../domain/schemas.ts";
+import { compactText } from "../utils/text.ts";
 
 export function clampInteger(value: number, min: number, max: number): number {
   const parsed = Math.floor(Number(value));
@@ -44,9 +45,7 @@ export function formatMemoryInventory(
 }
 
 export function truncateForTool(text: string, maxChars: number): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  if (normalized.length <= maxChars) return normalized;
-  return `${normalized.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+  return compactText(text, maxChars);
 }
 
 export function textResult(text: string, details: unknown) {
@@ -76,8 +75,12 @@ function formatMemoryInventoryLine(record: MemoryRecord, includeEvidence: boolea
   return `[${meta}] ${truncateForTool(record.content, 260)}${evidence}`;
 }
 
+export function shouldScheduleFinalToolShutdown(ctx: { hasUI: boolean; shutdown?: () => void }): boolean {
+  return !ctx.hasUI && typeof ctx.shutdown === "function" && process.env.PI_CHALIN_NONINTERACTIVE_SHUTDOWN === "1";
+}
+
 function scheduleNonInteractiveShutdown(ctx: { hasUI: boolean; abort(): void; shutdown(): void }): void {
-  if (ctx.hasUI || process.env.PI_CHALIN_NONINTERACTIVE_SHUTDOWN === "0") return;
+  if (!shouldScheduleFinalToolShutdown(ctx)) return;
   const configuredDelay = Number(process.env.PI_CHALIN_NONINTERACTIVE_SHUTDOWN_DELAY_MS);
   const delayMs = Number.isFinite(configuredDelay) && configuredDelay >= 0 ? configuredDelay : 0;
   const timer = setTimeout(() => {

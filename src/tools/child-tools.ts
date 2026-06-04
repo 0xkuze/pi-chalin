@@ -11,17 +11,21 @@ import {
   createWriteToolDefinition,
   defineTool,
   type ToolDefinition,
+  type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { Effect } from "effect";
 import { Type } from "typebox";
-import { ArtifactStore, type ArtifactFeatureStatus } from "../artifacts/artifacts.ts";
+import { ArtifactStore, type ApprovalDecisionInput, type ArtifactFeatureStatus } from "../artifacts/artifacts.ts";
 import type { BudgetPolicy } from "../budget/budget.ts";
 import { buildProjectDiscoveryIndex, formatProjectDiscoveryIndex } from "../project/discovery.ts";
 import { createMemoryCandidate } from "../memory/memory.ts";
 import { createConfiguredMemoryStore } from "../memory/memory-provider.ts";
 import { loadEffectiveConfig } from "../config/config.ts";
-import type { BudgetCapHit, BudgetCapName, BudgetCapSeverity } from "../domain/schemas.ts";
-import { SkillCatalog, auditSkill, formatSkillList, formatSkillSearch, formatSkillShow } from "../skills/skills.ts";
+import type { BudgetCapHit, BudgetCapName, BudgetCapSeverity, RouteExpectedEffect, ToolApprovalDecision, ToolApprovalRequest } from "../domain/schemas.ts";
+import { formatInterviewResult, runChalinInterview } from "../interview/interview.ts";
+import { SkillCatalog, auditSkill, formatSkillList, formatSkillShow } from "../skills/skills.ts";
+import { isRecord } from "../utils/guards.ts";
+import { normalizeMetricFilePath } from "../utils/paths.ts";
+import { compactText } from "../utils/text.ts";
 import { fetchWebUrls, formatWebBundle, searchWeb } from "../webfetch/webfetch.ts";
 
 const ChildSkillParams = Type.Object({
@@ -100,37 +104,38 @@ const ChalinMemoryReviseParams = Type.Object({
   reason: Type.Optional(Type.String({ description: "Why the old memory is stale, wrong, or less useful." })),
 });
 
-const DelegateStepParams = Type.Object({
-  id: Type.Optional(Type.String({ description: "Stable step id." })),
-  agent: Type.String({ description: "Available pi-chalin agent name for the delegated subtask." }),
-  task: Type.String({ description: "Concrete delegated outcome, evidence to inspect, files to modify if any, and success criteria." }),
-  budget: Type.Optional(Type.Union([
-    Type.Literal("small"),
-    Type.Literal("medium"),
-    Type.Literal("large"),
-    Type.Literal("tight"),
-    Type.Literal("normal"),
-    Type.Literal("deep"),
-    Type.Literal("extended"),
-  ], { description: "Optional budget hint. Human aliases are accepted: small=tight, medium=normal, large=deep." })),
-});
-
-const DelegateStageParams = Type.Object({
-  id: Type.Optional(Type.String({ description: "Stable stage id." })),
-  name: Type.Optional(Type.String({ description: "Human-readable stage name." })),
-  tasks: Type.Array(DelegateStepParams),
-});
-
 const ChalinDelegateParams = Type.Object({
   task: Type.String({ description: "Bounded objective for the nested subagent chain. Include current evidence and exact success criteria." }),
-  topology: Type.Union([
-    Type.Literal("sequential"),
-    Type.Literal("dag"),
-  ], { description: "Small nested workflow only. Use sequential with steps or dag with stages." }),
-  steps: Type.Optional(Type.Array(DelegateStepParams)),
-  stages: Type.Optional(Type.Array(DelegateStageParams)),
   reason: Type.String({ description: "Why this rare nested delegation is necessary instead of finishing in the current agent." }),
-  requiresWorkspaceMutation: Type.Optional(Type.Boolean()),
+  expectedEffects: Type.Optional(Type.Array(Type.Union([Type.Literal("read"), Type.Literal("write"), Type.Literal("verify")]), { minItems: 1, maxItems: 3, uniqueItems: true, description: "Optional effect contract for the nested objective. Omit when the planner should infer it from task intent." })),
+  requiresWorkspaceMutation: Type.Optional(Type.Boolean({ description: "True when the nested objective is expected to edit/write workspace files." })),
+});
+
+const ChalinInterviewChoiceParams = Type.Object({
+  label: Type.String(),
+  value: Type.Optional(Type.String()),
+  recommended: Type.Optional(Type.Boolean()),
+});
+const ChalinInterviewQuestionParams = Type.Object({
+  id: Type.Optional(Type.String()),
+  question: Type.String(),
+  choices: Type.Array(ChalinInterviewChoiceParams),
+  allowCustom: Type.Optional(Type.Boolean()),
+});
+const ChalinInterviewParams = Type.Object({
+  featureId: Type.Optional(Type.String()),
+  task: Type.String(),
+  reason: Type.String(),
+  questions: Type.Array(ChalinInterviewQuestionParams),
+  batchSize: Type.Optional(Type.Number()),
+});
+const ChalinApprovalRequestParams = Type.Object({
+  targetToolName: Type.String({ description: "Tool that would perform the action after approval, e.g. bash, edit, write, read." }),
+  reason: Type.String({ description: "Why the current subagent judges this exact action needs human approval before execution." }),
+  risk: Type.Union([Type.Literal("medium"), Type.Literal("high"), Type.Literal("critical")]),
+  command: Type.Optional(Type.String({ description: "Exact bash command to approve when targetToolName is bash." })),
+  path: Type.Optional(Type.String({ description: "Exact path to approve when targetToolName is a path-based tool." })),
+  actionDescription: Type.Optional(Type.String({ description: "Short user-facing description of the intended action." })),
 });
 
 type ChalinMemorySearchParamsShape = {
@@ -157,18 +162,24 @@ type ChalinMemoryReviseParamsShape = {
   reason?: string;
 };
 
+type ChalinApprovalRequestParamsShape = {
+  targetToolName: string;
+  reason: string;
+  risk: ChildToolApprovalRequest["risk"];
+  command?: string;
+  path?: string;
+  actionDescription?: string;
+};
+
 export type ChalinDelegateParamsShape = {
   task: string;
-  topology: "sequential" | "dag";
-  steps?: Array<{ id?: string; agent: string; task: string; budget?: "small" | "medium" | "large" | "tight" | "normal" | "deep" | "extended" }>;
-  stages?: Array<{ id?: string; name?: string; tasks: Array<{ id?: string; agent: string; task: string; budget?: "small" | "medium" | "large" | "tight" | "normal" | "deep" | "extended" }> }>;
   reason: string;
+  expectedEffects?: RouteExpectedEffect[];
   requiresWorkspaceMutation?: boolean;
 };
 
 export interface ChildToolPolicyOptions {
   cwd: string;
-  maxToolCalls: number;
   budgetPolicy?: BudgetPolicy;
   agentName?: string;
   allowedTools?: string[];
@@ -190,17 +201,25 @@ export interface ChildToolPolicyOptions {
 
 export interface ChildToolActivity {
   toolName: string;
-  phase: "start" | "end" | "blocked";
+  phase: "start" | "end" | "blocked" | "approval";
   at: number;
   reason?: string;
   paramsSummary?: string;
 }
 
+export type ChildToolApprovalRequest = ToolApprovalRequest;
+export type ChildToolApprovalDecision = ToolApprovalDecision;
+
+type ChildToolGate =
+  | { allowed: true }
+  | { allowed: false; reason: string; approvalRequired?: ChildToolApprovalRequest };
+
 export interface ChildToolPolicyMetrics {
   toolCalls: number;
   toolCallsByName: Record<string, number>;
   policyViolations: string[];
-  budgetStopCount: number;
+  approvalRequests: ChildToolApprovalRequest[];
+  approvalDecisions: ChildToolApprovalDecision[];
   budgetCapHits: BudgetCapHit[];
   duplicateReadCount: number;
   filesRead: string[];
@@ -217,12 +236,15 @@ export interface ChildToolPolicyMetrics {
 
 export interface ChildToolPolicy {
   cwd: string;
-  maxToolCalls: number;
   agentName?: string;
   allowedTools: Set<string>;
   subagentDelegation?: ChildToolPolicyOptions["subagentDelegation"];
-  beforeTool(toolName: string, params: Record<string, unknown>): { allowed: true } | { allowed: false; reason: string };
+  beforeTool(toolName: string, params: Record<string, unknown>): ChildToolGate;
   afterTool(toolName: string, result: unknown): unknown;
+  pendingApproval(): ChildToolApprovalRequest | undefined;
+  requestApproval(input: ChalinApprovalRequestParamsShape): ChildToolApprovalRequest | undefined;
+  approveAction(input: Omit<ChildToolApprovalDecision, "decision" | "decidedAt" | "consumed">): ChildToolApprovalDecision | undefined;
+  rejectAction(input: Omit<ChildToolApprovalDecision, "decision" | "decidedAt" | "consumed">): ChildToolApprovalDecision | undefined;
   metrics(): ChildToolPolicyMetrics;
 }
 
@@ -235,14 +257,17 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
   const filesTouched: string[] = [];
   const shellCommands: string[] = [];
   const pendingShellCommands: Array<{ command?: string; afterMutation: boolean; dirtyBaseline?: string[] }> = [];
+  const approvalRequests: ChildToolApprovalRequest[] = [];
+  const approvalDecisions: ChildToolApprovalDecision[] = [];
   const retriesByTool: Record<string, number> = {};
   const readCallsBySignature: Record<string, number> = {};
   const allowedTools = new Set(options.allowedTools ?? []);
+  allowedTools.add("chalin_interview");
+  allowedTools.add("chalin_request_approval");
   const priorFilesRead = new Set((options.priorFilesRead ?? []).map((item) => normalizeMetricPath(item, options.cwd)));
   const workUnitScope = normalizeWorkUnitScope(options.workUnitScope, options.cwd);
   const maxCrossStepDuplicateReads = options.maxCrossStepDuplicateReads ?? Number.POSITIVE_INFINITY;
   const hasExplicitAllowlist = options.allowedTools !== undefined;
-  let budgetStopCount = 0;
   let toolCalls = 0;
   let readBytes = 0;
   let outputChars = 0;
@@ -253,9 +278,7 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
   let postMutationShellCommands = 0;
   let successfulPostMutationShellCommands = 0;
   let terminalPolicyViolation: string | undefined;
-  const startedAt = Date.now();
   const caps = options.budgetPolicy?.caps ?? {
-    maxToolCalls: options.maxToolCalls,
     maxSeconds: Number.POSITIVE_INFINITY,
     maxUsd: Number.POSITIVE_INFINITY,
     maxTurns: Number.POSITIVE_INFINITY,
@@ -265,15 +288,78 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
     maxRetriesPerTool: 2,
   };
 
-  function violation(reason: string): { allowed: false; reason: string } {
+  function violation(reason: string): ChildToolGate {
     policyViolations.push(reason);
     if (isTerminalToolPolicyViolation(reason)) terminalPolicyViolation ??= reason;
     return { allowed: false, reason };
   }
 
-  function recordViolation(reason: string): void {
-    policyViolations.push(reason);
-    if (isTerminalToolPolicyViolation(reason)) terminalPolicyViolation ??= reason;
+  function approvalRequired(toolName: string, reason: string, params: Record<string, unknown>, risk: ChildToolApprovalRequest["risk"] = "high"): ChildToolGate {
+    const request = makeApprovalRequest(toolName, reason, params, risk, options.cwd);
+    approvalRequests.push(request);
+    const approvalReason = `approval_required:${reason}`;
+    policyViolations.push(approvalReason);
+    activity(toolName, "approval", approvalReason, params);
+    return { allowed: false, reason: approvalReason, approvalRequired: request };
+  }
+
+  function requestApproval(input: ChalinApprovalRequestParamsShape): ChildToolApprovalRequest | undefined {
+    const targetToolName = input.targetToolName.trim();
+    const reason = compactApprovalReason(input.reason);
+    if (!targetToolName || !reason) return undefined;
+    const params = approvalTargetParams(input);
+    const request = makeApprovalRequest(targetToolName, `llm_declared_risky_action:${reason}`, params, input.risk, options.cwd, input.actionDescription);
+    approvalRequests.push(request);
+    const approvalReason = `approval_required:${request.reason}`;
+    policyViolations.push(approvalReason);
+    activity(targetToolName, "approval", approvalReason, params);
+    return request;
+  }
+
+  function decideAction(input: Omit<ChildToolApprovalDecision, "decision" | "decidedAt" | "consumed">, decision: ChildToolApprovalDecision["decision"]): ChildToolApprovalDecision | undefined {
+    const request = approvalRequests.find((item) => item.id === input.requestId);
+    if (!request) return undefined;
+    const record: ChildToolApprovalDecision = {
+      ...input,
+      decision,
+      decidedAt: new Date().toISOString(),
+      consumed: false,
+    };
+    approvalDecisions.push(record);
+    return record;
+  }
+
+  function consumeApprovedAction(toolName: string, params: Record<string, unknown>): boolean {
+    const fingerprint = actionFingerprint(toolName, params, options.cwd);
+    const declared = isRecord(params.piChalinApproval) ? params.piChalinApproval : undefined;
+    for (const decision of approvalDecisions) {
+      if (decision.decision !== "approved" || decision.consumed) continue;
+      const request = approvalRequests.find((item) => item.id === decision.requestId);
+      if (!request) continue;
+      const exact = request.paramsFingerprint === fingerprint;
+      const declaredEquivalent = declared
+        && declared.requestId === decision.requestId
+        && typeof declared.equivalenceReason === "string"
+        && declared.equivalenceReason.trim().length > 0;
+      if (!exact && !declaredEquivalent) continue;
+      decision.consumed = true;
+      if (declaredEquivalent) decision.equivalenceReason = String(declared.equivalenceReason);
+      return true;
+    }
+    return false;
+  }
+
+  function latestPendingApproval(): ChildToolApprovalRequest | undefined {
+    return [...approvalRequests].reverse().find((request) => !approvalDecisions.some((decision) => decision.requestId === request.id));
+  }
+
+  function priorDeclaredApprovalForAction(toolName: string, params: Record<string, unknown>): ChildToolApprovalRequest | undefined {
+    const fingerprint = actionFingerprint(toolName, params, options.cwd);
+    return [...approvalRequests]
+      .reverse()
+      .find((request) => request.toolName === toolName
+        && request.paramsFingerprint === fingerprint
+        && request.reason.startsWith("llm_declared_risky_action:"));
   }
 
   function recordBudgetCapHit(input: {
@@ -339,12 +425,39 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
 
   return {
     cwd: options.cwd,
-    maxToolCalls: caps.maxToolCalls,
     agentName: options.agentName,
     allowedTools,
     subagentDelegation: options.subagentDelegation,
+    pendingApproval() {
+      return latestPendingApproval();
+    },
+    requestApproval(input) {
+      return requestApproval(input);
+    },
+    approveAction(input) {
+      return decideAction(input, "approved");
+    },
+    rejectAction(input) {
+      return decideAction(input, "rejected");
+    },
     beforeTool(toolName, params) {
       normalizeSafeToolParams(toolName, params, options.cwd);
+      const secretRead = secretReadIntentViolation(toolName, params, options.cwd);
+      if (secretRead) {
+        activity(toolName, "blocked", secretRead, params);
+        return violation(secretRead);
+      }
+      if (consumeApprovedAction(toolName, params)) return record(toolName, params);
+      const pendingApproval = latestPendingApproval();
+      if (pendingApproval && toolName !== "chalin_interview") {
+        const reason = `approval_required:${pendingApproval.reason}`;
+        activity(toolName, "approval", reason, params);
+        return { allowed: false, reason, approvalRequired: pendingApproval };
+      }
+      const declaredApproval = priorDeclaredApprovalForAction(toolName, params);
+      if (declaredApproval) {
+        return approvalRequired(toolName, declaredApproval.reason, params, declaredApproval.risk);
+      }
       if (terminalPolicyViolation) {
         const reason = `policy_stopped_after_scope_violation:${terminalPolicyViolation}`;
         activity(toolName, "blocked", reason, params);
@@ -355,9 +468,6 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
         activity(toolName, "blocked", reason, params);
         return violation(reason);
       }
-      if (toolCalls >= caps.maxToolCalls) {
-        budgetWarn(toolName, "max_tool_calls", toolCalls, caps.maxToolCalls, "pre-tool", "soft tool-call budget reached; continuing");
-      }
       if (isInspectionTool(toolName) && readBytes >= caps.maxReadBytes) {
         budgetWarn(toolName, "max_read_bytes", readBytes, caps.maxReadBytes, "pre-tool", "soft read budget reached; continuing");
       }
@@ -367,26 +477,14 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
 
       const workspacePathViolation = childWorkspacePathViolation(toolName, params, options.cwd);
       if (workspacePathViolation) {
+        if (isApprovalEligibleViolation(workspacePathViolation)) return approvalRequired(toolName, workspacePathViolation, params, riskForApprovalReason(workspacePathViolation));
         activity(toolName, "blocked", workspacePathViolation, params);
         return violation(workspacePathViolation);
       }
 
-      const mutatingGitViolation = mutatingGitCommandViolation(toolName, params);
-      if (mutatingGitViolation) {
-        activity(toolName, "blocked", mutatingGitViolation, params);
-        return violation(mutatingGitViolation);
-      }
-
-      const destructiveCommand = destructiveShellCommandViolation(toolName, params);
-      if (destructiveCommand) {
-        activity(toolName, "blocked", destructiveCommand, params);
-        return violation(destructiveCommand);
-      }
-
       const workUnitScopeViolation = mutationOutsideWorkUnitScopeViolation(toolName, params, options.cwd, workUnitScope);
       if (workUnitScopeViolation) {
-        activity(toolName, "blocked", workUnitScopeViolation, params);
-        return violation(workUnitScopeViolation);
+        return approvalRequired(toolName, workUnitScopeViolation, params, "medium");
       }
 
       if (toolName === "write") {
@@ -460,9 +558,12 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
           const scopeViolations = dirtyEntriesOutsideWorkUnitScope(workspaceDirtyEntries(options.cwd), pending.dirtyBaseline, workUnitScope, options.cwd);
           if (scopeViolations.length > 0) {
             const reason = `outside_work_unit_scope:${scopeViolations.slice(0, 8).join(",")}${scopeViolations.length > 8 ? `,+${scopeViolations.length - 8}` : ""}`;
-            recordViolation(reason);
-            activity(toolName, "blocked", reason, pending.command ? { command: pending.command } : {});
-            nextResult = appendToolResultPolicyWarning(nextResult, reason);
+            const request = makeApprovalRequest(toolName, reason, pending.command ? { command: pending.command } : {}, "medium", options.cwd);
+            approvalRequests.push(request);
+            const approvalReason = `approval_required:${reason}`;
+            policyViolations.push(approvalReason);
+            activity(toolName, "approval", approvalReason, pending.command ? { command: pending.command } : {});
+            nextResult = appendToolResultApprovalRequired(nextResult, request);
           }
         }
         if (pending?.afterMutation) {
@@ -484,7 +585,8 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
         toolCalls,
         toolCallsByName: { ...toolCallsByName },
         policyViolations: [...policyViolations],
-        budgetStopCount,
+        approvalRequests: [...approvalRequests],
+        approvalDecisions: approvalDecisions.map((decision) => ({ ...decision })),
         budgetCapHits: budgetCapHits.slice(0, 30),
         duplicateReadCount: filesRead.length - new Set(filesRead).size,
         filesRead: [...new Set(filesRead)].slice(0, 50),
@@ -502,7 +604,6 @@ export function createChildToolPolicy(options: ChildToolPolicyOptions): ChildToo
   };
 
   function recordPostToolBudgetWarnings(toolName: string): void {
-    if (toolCalls >= caps.maxToolCalls) budgetWarn(toolName, "max_tool_calls", toolCalls, caps.maxToolCalls, "post-tool");
     if (outputChars >= caps.maxOutputChars) budgetWarn(toolName, "max_output_chars", outputChars, caps.maxOutputChars, "post-tool");
     if (readBytes >= caps.maxReadBytes) budgetWarn(toolName, "max_read_bytes", readBytes, caps.maxReadBytes, "post-tool");
     if (filesTouched.length >= caps.maxFilesTouched) budgetWarn(toolName, "max_files_touched", filesTouched.length, caps.maxFilesTouched, "post-tool");
@@ -523,6 +624,8 @@ export function createChildTools(policy: ChildToolPolicy): ToolDefinition[] {
     ["chalin_project_discovery", createProjectDiscoveryTool(policy)],
     ["bash", guardTool(createBashToolDefinition(policy.cwd), "bash", policy)],
     ["chalin_web_search", createChalinWebSearchTool(policy)],
+    ["chalin_request_approval", createChalinApprovalRequestTool(policy)],
+    ["chalin_interview", createChalinInterviewTool(policy)],
     ["chalin_artifact_write", createChalinArtifactWriteTool(policy)],
     ["chalin_delegate", createChalinDelegateTool(policy)],
     ["chalin_memory_search", createChalinMemorySearchTool(policy)],
@@ -530,11 +633,82 @@ export function createChildTools(policy: ChildToolPolicy): ToolDefinition[] {
     ["chalin_memory_revise", createChalinMemoryReviseTool(policy)],
     ["chalin_skill", createChalinSkillTool(policy)],
   ];
-  return Effect.runSync(Effect.forEach(
-    tools.filter(([name]) => policy.allowedTools.has(name)),
-    ([, tool]) => Effect.succeed(tool),
-    { concurrency: 4 },
-  ).pipe(Effect.withSpan("child-tools.create")));
+  return tools
+    .filter(([name]) => policy.allowedTools.has(name))
+    .map(([, tool]) => tool);
+}
+
+function createChalinApprovalRequestTool(policy: ChildToolPolicy): ToolDefinition {
+  return defineTool<typeof ChalinApprovalRequestParams, unknown>({
+    name: "chalin_request_approval",
+    label: "Chalin Approval Request",
+    description: "Declare that the current subagent judges a concrete next tool action unsafe to run without a one-shot human approval.",
+    promptSnippet: "chalin_request_approval: before empirical or externally risky actions, declare the exact next action and then ask via chalin_interview.",
+    promptGuidelines: [
+      "Use when your semantic judgment says the next action may affect external services, irreversible state, credentials, history, data, or broad project files.",
+      "Do not wait for the harness to classify command names. You own the judgment; the harness only records and gates the one-shot approval.",
+      "After this returns approval_required, immediately call chalin_interview with approve/reject choices in the user's language.",
+      "If approved, retry only the exact declared target action once. If rejected, stop the WorkUnit as blocked by human decision.",
+    ],
+    parameters: ChalinApprovalRequestParams,
+    async execute(_toolCallId, params) {
+      const input = isRecord(params) ? params : {};
+      const gate = policy.beforeTool("chalin_request_approval", input);
+      if (!gate.allowed) return blockedToolResult(gate.reason);
+      const request = policy.requestApproval(params);
+      if (!request) return blockedToolResult("approval_request_invalid");
+      return blockedToolResult(`approval_required:${request.reason}`);
+    },
+  });
+}
+
+function createChalinInterviewTool(policy: ChildToolPolicy): ToolDefinition {
+  return defineTool<typeof ChalinInterviewParams, unknown>({
+    name: "chalin_interview",
+    label: "Chalin Interview",
+    description: "Ask the user a blocking approval or clarification question from inside the current subagent. Always available for one-shot risky-action approvals.",
+    promptSnippet: "chalin_interview: ask one minimal approval question when pi-chalin returns approval_required; approve/reject is one-shot for that exact action.",
+    promptGuidelines: [
+      "Use immediately when a tool returns approval_required.",
+      "Ask one minimal question: action, risk, affected file/service, approve or reject.",
+      "Write the question and labels in the user's language; keep approval choice values exactly approve or reject.",
+      "If rejected, stop the WorkUnit as blocked by human decision; do not workaround.",
+    ],
+    parameters: ChalinInterviewParams,
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const input = isRecord(params) ? params : {};
+      const gate = policy.beforeTool("chalin_interview", input);
+      if (!gate.allowed) return blockedToolResult(gate.reason);
+      const store = new ArtifactStore({ cwd: policy.cwd });
+      const pending = policy.pendingApproval();
+      const request = pending ? approvalInterviewInput(params, pending) : params;
+      const result = await runChalinInterview(ctx as ExtensionContext, store, request);
+      if (pending && result.status === "answered") {
+        const approved = result.answers.some((answer) => answer.answer.toLowerCase() === "approve");
+        const rejected = result.answers.some((answer) => answer.answer.toLowerCase() === "reject");
+        let decision: ChildToolApprovalDecision | undefined;
+        if (approved) {
+          decision = policy.approveAction({
+            requestId: pending.id,
+            approvedAction: pending.actionDescription,
+            retriedAction: pending.actionDescription,
+            equivalenceReason: "user approved the pending action through chalin_interview",
+            decidedBy: policy.agentName ?? "subagent",
+          });
+        } else if (rejected) {
+          decision = policy.rejectAction({
+            requestId: pending.id,
+            approvedAction: pending.actionDescription,
+            retriedAction: pending.actionDescription,
+            equivalenceReason: "user rejected the pending action through chalin_interview",
+            decidedBy: policy.agentName ?? "subagent",
+          });
+        }
+        if (decision) await store.appendApprovalDecision(result.featureId, approvalDecisionArtifactInput(pending, decision, policy.agentName));
+      }
+      return policy.afterTool("chalin_interview", { content: [{ type: "text" as const, text: formatInterviewResult(result) }], details: { interview: result, approval: pending } }) as never;
+    },
+  });
 }
 
 function createChalinSkillTool(policy: ChildToolPolicy): ToolDefinition {
@@ -561,8 +735,11 @@ function createChalinSkillTool(policy: ChildToolPolicy): ToolDefinition {
         const task = typeof input.task === "string" ? input.task : typeof input.name === "string" ? input.name : "";
         if (!task.trim()) result = artifactToolResult("chalin_skill search requires task or name.", { error: "missing-task" });
         else {
-          const search = catalog.search(task, { config: loaded.config });
-          result = artifactToolResult(formatSkillSearch(task, search), search);
+          result = artifactToolResult([
+            `Skill inventory for: ${task}`,
+            "Semantic skill selection runs in the parent runtime with structured model output; child search is read-only inventory.",
+            formatSkillList(catalog),
+          ].join("\n"), { skills: catalog.list(), diagnostics: catalog.diagnostics });
         }
       } else if (action === "show" || action === "audit") {
         const reference = typeof input.name === "string" ? input.name : "";
@@ -671,14 +848,14 @@ export function createChalinDelegateTool(policy: ChildToolPolicy): ToolDefinitio
   return defineTool<typeof ChalinDelegateParams, unknown>({
     name: "chalin_delegate",
     label: "Chalin Delegate",
-    description: "Rare nested pi-chalin delegation for a coordinating worker/subagent that discovers the assigned scope exceeds one worker's reliable ownership boundary. Maximum two subagent levels below the primary orchestrator.",
-    promptSnippet: "chalin_delegate: split overlarge subagent work into small worker-owned child units when current evidence proves one agent would reduce quality.",
+    description: "Rare nested pi-chalin delegation for a coordinating subagent that discovers the assigned scope exceeds one reliable ownership boundary. Only one visible nested level is allowed; deeper needs return to the parent orchestrator as compact handoff.",
+    promptSnippet: "chalin_delegate: delegate an overlarge nested objective by intent when current evidence proves one agent would reduce quality.",
     promptGuidelines: [
       "This is exceptional, not a normal path. Prefer finishing the current task yourself when the scope is bounded.",
       "Use only after current evidence shows the scope is independently splittable, under-specified for safe continuation, or review/isolation-heavy enough that one worker would lower quality.",
-      "Keep the nested plan tiny and concrete. Pass current evidence, exact files/surfaces, ownership boundaries, and success criteria in the task.",
+      "Pass current evidence, exact files/surfaces, ownership boundaries, effects, and success criteria in the task. Do not choose topology, agents, steps, stages, or budgets.",
       "Do not use it to avoid ordinary implementation work, repeat broad discovery, or create another planning layer without a clear output contract.",
-      "Nested delegation stops at two subagent levels; if blocked by depth, return a compact handoff and ask the parent orchestrator to continue.",
+      "Nested delegation stops after one child level under the current parent; if blocked by depth, return a compact handoff and ask the parent orchestrator to continue.",
     ],
     parameters: ChalinDelegateParams,
     async execute(_toolCallId, params: ChalinDelegateParamsShape) {
@@ -729,7 +906,7 @@ export function createChalinMemoryWriteTool(policy: ChildToolPolicy): ToolDefini
         topicKey: params.topicKey,
       })]);
       const text = record
-        ? `memory ${record.status}: ${record.id} · ${record.category} · ${truncateForTool(record.content, 220)}`
+        ? `memory ${record.status}: ${record.id} · ${record.category} · ${compactText(record.content, 220)}`
         : "memory rejected: no candidate was persisted.";
       return policy.afterTool("chalin_memory_write", { content: [{ type: "text" as const, text }], details: { record } }) as never;
     },
@@ -764,7 +941,7 @@ export function createChalinMemoryReviseTool(policy: ChildToolPolicy): ToolDefin
         sourceAgent: policy.agentName ?? "subagent",
       });
       const text = record
-        ? `memory revised: ${record.id} · ${record.status} · rev=${record.revisionCount} · ${truncateForTool(record.content, 220)}`
+        ? `memory revised: ${record.id} · ${record.status} · rev=${record.revisionCount} · ${compactText(record.content, 220)}`
         : `memory revise skipped: '${params.id}' was not found or cannot be revised.`;
       return policy.afterTool("chalin_memory_revise", { content: [{ type: "text" as const, text }], details: { record } }) as never;
     },
@@ -829,7 +1006,6 @@ function validateArtifactParams(params: ChalinArtifactWriteParamsShape): { allow
   if (!params.featureId || params.featureId.length > 96) return { allowed: false, reason: "artifact_feature_id_invalid" };
   const text = [params.title, params.summary, ...(params.successCriteria ?? []), ...(params.rules ?? [])].filter(Boolean).join("\n");
   if (text.length > 3000) return { allowed: false, reason: "artifact_payload_too_large" };
-  if (/\b(stdout|stderr|traceback|stack trace|returncode|subprocess|os\.environ|sys\.exit)\b/i.test(text)) return { allowed: false, reason: "artifact_raw_runtime_noise" };
   if (params.kind === "checkpoint" && !params.summary) return { allowed: false, reason: "checkpoint_summary_required" };
   if (params.kind === "validation-contract" && (!params.successCriteria?.length || !params.commands?.length)) return { allowed: false, reason: "validation_contract_requires_commands_and_success_criteria" };
   if (params.kind === "worker-skill" && (!params.summary || !params.rules?.length)) return { allowed: false, reason: "worker_skill_requires_summary_and_rules" };
@@ -841,7 +1017,6 @@ function validateMemoryWriteParams(params: ChalinMemoryWriteParamsShape): { allo
   if (!params.category || params.category.length > 40) return { allowed: false, reason: "memory_category_invalid" };
   if (!params.content || params.content.length < 48 || params.content.length > 600) return { allowed: false, reason: "memory_content_must_be_48_to_600_chars" };
   if (text.length > 1200) return { allowed: false, reason: "memory_payload_too_large" };
-  if (containsRawRuntimeNoise(text)) return { allowed: false, reason: "memory_raw_runtime_noise" };
   return { allowed: true };
 }
 
@@ -850,12 +1025,7 @@ function validateMemoryRevisionParams(params: ChalinMemoryReviseParamsShape): { 
   if (!params.id || params.id.length > 120) return { allowed: false, reason: "memory_revision_id_invalid" };
   if (!params.content || params.content.length < 48 || params.content.length > 600) return { allowed: false, reason: "memory_revision_content_must_be_48_to_600_chars" };
   if (text.length > 1400) return { allowed: false, reason: "memory_revision_payload_too_large" };
-  if (containsRawRuntimeNoise(text)) return { allowed: false, reason: "memory_revision_raw_runtime_noise" };
   return { allowed: true };
-}
-
-function containsRawRuntimeNoise(text: string): boolean {
-  return /\b(stdout|stderr|traceback|stack trace|returncode|subprocess|os\.environ|sys\.exit|TimeoutExpired|print\(|cmd\s*=)\b/i.test(text);
 }
 
 function artifactToolResult(text: string, details: unknown) {
@@ -869,7 +1039,7 @@ function guardTool(base: ToolDefinition<any, any, any>, toolName: string, policy
     promptGuidelines: [
       ...(base.promptGuidelines ?? []),
       toolName === "write" ? "Use only for paths that do not exist yet. Existing paths are blocked; use edit for existing files, including full-content replacements." : undefined,
-      "Stay within the pi-chalin child tool budget.",
+      "Treat the pi-chalin child tool budget as advisory telemetry; continue when the next action has clear expected value and emit recoverable handoff state when pressure rises.",
       "Prefer targeted inspection over broad crawls.",
     ].filter((item): item is string => Boolean(item)),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
@@ -883,12 +1053,22 @@ function guardTool(base: ToolDefinition<any, any, any>, toolName: string, policy
 }
 
 function blockedToolResult(reason: string) {
+  if (reason.startsWith("approval_required:")) {
+    return {
+      content: [{
+        type: "text" as const,
+        text: [
+          `pi-chalin approval required: ${reason.slice("approval_required:".length)}`,
+          "Call chalin_interview now with one minimal approve/reject question. If approved, retry the same action once. If rejected, stop this WorkUnit as blocked by human decision.",
+        ].join("\n"),
+      }],
+      details: { approvalRequired: true, reason },
+    };
+  }
   const guidance = reason.startsWith("work_unit_scope_gap:")
     ? "Report the missing WorkUnit scope/dependency in ## Agent Handoff and stop instead of editing outside the unit."
     : reason.startsWith("policy_stopped_after_scope_violation:")
       ? "A prior scope violation made this step terminal. Return ## Agent Handoff with the exact missing scope/dependency; do not call more tools."
-    : reason.startsWith("mutating_git_command:")
-      ? "Git mutation is forbidden in child agents. Do not retry with git checkout/restore/switch/reset/add/commit/clean. If rollback is required, use edit only on in-scope files; otherwise report the exact blocker and stop."
     : "Stop if you have enough evidence; otherwise use fewer, more targeted Pi-native tools.";
   return {
     content: [{ type: "text" as const, text: `Blocked by pi-chalin child policy: ${reason}\n${guidance}` }],
@@ -897,32 +1077,171 @@ function blockedToolResult(reason: string) {
   };
 }
 
-function isTerminalToolPolicyViolation(reason: string): boolean {
-  return reason.startsWith("work_unit_scope_gap:")
+function approvalInterviewInput(params: {
+  featureId?: string;
+  task: string;
+  reason: string;
+  questions: Array<{ id?: string; question: string; choices: Array<{ label: string; value?: string; recommended?: boolean }>; allowCustom?: boolean }>;
+  batchSize?: number;
+}, request: ChildToolApprovalRequest) {
+  const providedQuestion = params.questions.find((question) => (
+    question.choices.some((choice) => choice.value === "approve")
+    && question.choices.some((choice) => choice.value === "reject")
+  ));
+  const approveChoice = providedQuestion?.choices.find((choice) => choice.value === "approve");
+  const rejectChoice = providedQuestion?.choices.find((choice) => choice.value === "reject");
+  return {
+    featureId: params.featureId ?? `approval-${request.id}`,
+    task: params.task || `Approve ${request.toolName} action`,
+    reason: params.reason || request.semanticDescription,
+    batchSize: 1,
+    questions: [{
+      id: "approval",
+      question: providedQuestion?.question.trim() || `${request.semanticDescription}. Risk: ${request.risk}.`,
+      allowCustom: false,
+      choices: [
+        { label: approveChoice?.label ?? "Approve once", value: "approve", recommended: approveChoice?.recommended ?? true },
+        { label: rejectChoice?.label ?? "Reject", value: "reject", recommended: rejectChoice?.recommended },
+      ],
+    }],
+  };
+}
+
+function approvalDecisionArtifactInput(request: ChildToolApprovalRequest, decision: ChildToolApprovalDecision, fallbackAgent?: string): ApprovalDecisionInput {
+  return {
+    requestId: request.id,
+    decision: decision.decision,
+    toolName: request.toolName,
+    reason: request.reason,
+    risk: request.risk,
+    approvedAction: decision.approvedAction,
+    retriedAction: decision.retriedAction,
+    equivalenceReason: decision.equivalenceReason,
+    subagentId: decision.decidedBy ?? fallbackAgent ?? "subagent",
+    paramsSummary: request.paramsSummary,
+  };
+}
+
+function makeApprovalRequest(toolName: string, reason: string, params: Record<string, unknown>, risk: ChildToolApprovalRequest["risk"], cwd: string, actionOverride?: string): ChildToolApprovalRequest {
+  const paramsSummary = summarizeBlockedToolParams(toolName, params);
+  const description = compactText(actionOverride ?? "", 180) || actionDescription(toolName, params, reason, cwd);
+  return {
+    id: `approval-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    toolName,
+    reason,
+    risk,
+    actionDescription: description,
+    semanticDescription: description,
+    paramsSummary,
+    paramsFingerprint: actionFingerprint(toolName, params, cwd),
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function actionDescription(toolName: string, params: Record<string, unknown>, reason: string, cwd: string): string {
+  const command = getCommandParam(params);
+  if (command) return `${toolName}: ${compactText(command, 180)}`;
+  const target = getPathParam(params);
+  if (target) return `${toolName}: ${normalizeMetricPath(target, cwd)} (${reason})`;
+  return `${toolName}: ${compactText(reason, 180)}`;
+}
+
+function actionFingerprint(toolName: string, params: Record<string, unknown>, cwd: string): string {
+  const normalized = normalizeActionParams(toolName, params, cwd);
+  return JSON.stringify(sortJson(normalized));
+}
+
+function normalizeActionParams(toolName: string, params: Record<string, unknown>, cwd: string): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(params)) {
+    if (key === "piChalinApproval") continue;
+    if ((key === "path" || key === "file_path") && typeof value === "string") result[key] = normalizeMetricPath(value, cwd);
+    else if (key === "command" && typeof value === "string") result[key] = value.replace(/\s+/g, " ").trim();
+    else result[key] = value;
+  }
+  return { toolName, params: result };
+}
+
+function approvalTargetParams(input: ChalinApprovalRequestParamsShape): Record<string, unknown> {
+  const params: Record<string, unknown> = {};
+  if (typeof input.command === "string" && input.command.trim()) params.command = input.command;
+  if (typeof input.path === "string" && input.path.trim()) params.path = input.path;
+  if (Object.keys(params).length === 0 && typeof input.actionDescription === "string" && input.actionDescription.trim()) {
+    params.actionDescription = input.actionDescription;
+  }
+  return params;
+}
+
+function compactApprovalReason(reason: string): string {
+  return compactText(reason, 180).replace(/:/g, " -");
+}
+
+function sortJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortJson);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortJson(value[key])]));
+}
+
+function isApprovalEligibleViolation(reason: string): boolean {
+  return reason.startsWith("outside_workspace_path:")
+    || reason.startsWith("internal_harness_path:")
+    || reason.startsWith("work_unit_scope_gap:")
     || reason.startsWith("outside_work_unit_scope:")
-    || reason.startsWith("mutating_git_command:")
     || reason === "bash_denied_for_work_unit_scope";
 }
 
-function appendToolResultPolicyWarning(result: unknown, reason: string): unknown {
+function riskForApprovalReason(reason: string): ChildToolApprovalRequest["risk"] {
+  if (reason.startsWith("outside_workspace_path:") || reason.startsWith("internal_harness_path:")) return "high";
+  return "medium";
+}
+
+function secretReadIntentViolation(toolName: string, params: Record<string, unknown>, cwd: string): string | undefined {
+  if (toolName === "read") {
+    const target = getPathParam(params);
+    if (target && isSecretPath(target, cwd)) return `secret_read_intent:${normalizeMetricPath(target, cwd)}`;
+  }
+  if (toolName !== "bash") return undefined;
+  const command = getCommandParam(params);
+  if (!command) return undefined;
+  for (const word of shellWords(command)) {
+    if (isSecretPath(word, cwd)) return "secret_read_intent:shell";
+  }
+  return undefined;
+}
+
+function isSecretPath(target: string, cwd: string): boolean {
+  const normalized = normalizeMetricPath(target.replace(/^['"]|['"]$/g, ""), cwd).replaceAll("\\", "/");
+  const base = normalized.split("/").filter(Boolean).at(-1)?.toLowerCase() ?? normalized.toLowerCase();
+  return base === ".env"
+    || base.startsWith(".env.")
+    || base.endsWith(".pem")
+    || base.endsWith(".key")
+    || normalized.toLowerCase().includes("/.ssh/");
+}
+
+function isTerminalToolPolicyViolation(reason: string): boolean {
+  return reason.startsWith("work_unit_scope_gap:")
+    || reason.startsWith("outside_work_unit_scope:")
+    || reason === "bash_denied_for_work_unit_scope";
+}
+
+function appendToolResultApprovalRequired(result: unknown, request: ChildToolApprovalRequest): unknown {
   const text = [
-    `pi-chalin policy warning: ${reason}`,
-    "This command changed files outside the active WorkUnit mutation allowlist. Stop and report the missing scope/dependency in ## Agent Handoff instead of continuing with more mutations.",
-    "Do not try to revert with git checkout/restore/reset/switch. Use only in-scope edit/write, or stop with the exact scope gap.",
+    `pi-chalin approval required: ${request.reason}`,
+    `Action: ${request.actionDescription}`,
+    "Call chalin_interview now. If approved, retry this action once; if rejected, stop this WorkUnit as blocked by human decision.",
   ].join("\n");
   if (!isRecord(result) || !Array.isArray(result.content)) {
     return {
       content: [{ type: "text" as const, text }],
-      details: { piChalinPolicyWarning: reason },
-      isError: true,
+      details: { approvalRequired: request },
     };
   }
   const details = isRecord(result.details) ? result.details : {};
   return {
     ...result,
     content: [...result.content, { type: "text" as const, text }],
-    details: { ...details, piChalinPolicyWarning: reason },
-    isError: true,
+    details: { ...details, approvalRequired: request },
   };
 }
 
@@ -935,9 +1254,19 @@ function getCommandParam(params: Record<string, unknown>): string | undefined {
 }
 
 function normalizeSafeToolParams(toolName: string, params: Record<string, unknown>, cwd: string): void {
-  if (toolName !== "bash" || typeof params.command !== "string") return;
-  const normalized = stripLeadingCurrentWorkspaceCd(params.command, cwd);
-  if (normalized !== params.command) params.command = normalized;
+  if (toolName === "bash" && typeof params.command === "string") {
+    const normalized = stripLeadingCurrentWorkspaceCd(params.command, cwd);
+    if (normalized !== params.command) params.command = normalized;
+    return;
+  }
+  normalizeWorkspacePathParam(params, "path", cwd);
+  normalizeWorkspacePathParam(params, "file_path", cwd);
+}
+
+function normalizeWorkspacePathParam(params: Record<string, unknown>, key: string, cwd: string): void {
+  const target = params[key];
+  if (typeof target !== "string" || !path.isAbsolute(target) || isOutsideWorkspacePath(target, cwd)) return;
+  params[key] = normalizeMetricPath(target, cwd);
 }
 
 function stripLeadingCurrentWorkspaceCd(command: string, cwd: string): string {
@@ -1053,10 +1382,6 @@ function unquoteGitStatusPath(filePath: string): string {
   return trimmed;
 }
 
-function normalizeMetricFilePath(filePath: string): string {
-  return filePath.replace(/\\/g, "/").replace(/^\.\//, "").trim();
-}
-
 function isUntrackedBinaryOutput(cwd: string, entry: { status: string; path: string }): boolean {
   if (entry.status !== "??") return false;
   const fullPath = resolveProjectPath(entry.path, cwd);
@@ -1097,219 +1422,8 @@ function childWorkspacePathViolation(toolName: string, params: Record<string, un
   const normalized = normalizeMetricPath(target, cwd);
   if (isInternalHarnessPath(normalized)) return `internal_harness_path:${normalized}`;
   if (isOutsideWorkspacePath(target, cwd)) return `outside_workspace_path:${normalized}`;
-  if (path.isAbsolute(target)) return `absolute_workspace_path:${normalized}`;
   return undefined;
 }
-
-function mutatingGitCommandViolation(toolName: string, params: Record<string, unknown>): string | undefined {
-  if (toolName !== "bash") return undefined;
-  const command = getCommandParam(params);
-  if (!command) return undefined;
-  const mutation = commandSegments(command).map(gitMutationFromSegment).find((value): value is string => Boolean(value));
-  return mutation ? `mutating_git_command:${mutation}` : undefined;
-}
-
-function destructiveShellCommandViolation(toolName: string, params: Record<string, unknown>): string | undefined {
-  if (toolName !== "bash") return undefined;
-  const command = getCommandParam(params);
-  if (!command) return undefined;
-  for (const segment of commandSegments(command)) {
-    const words = shellWords(segment);
-    if (words.length === 0) continue;
-    const rmIndex = words.findIndex((word) => word === "rm");
-    if (rmIndex >= 0) {
-      const args = words.slice(rmIndex + 1);
-      if (args.some(isRecursiveOrForceRmFlag) || args.some(isProtectedDestructiveTarget)) return "destructive_command:rm";
-    }
-    const unlinkIndex = words.findIndex((word) => word === "unlink");
-    if (unlinkIndex >= 0 && words.slice(unlinkIndex + 1).some(isProtectedDestructiveTarget)) return "destructive_command:unlink";
-    const truncateIndex = words.findIndex((word) => word === "truncate");
-    if (truncateIndex >= 0 && words.slice(truncateIndex + 1).some(isProtectedDestructiveTarget)) return "destructive_command:truncate";
-    if (words.some((word) => word === "shred" || word === "srm")) return "destructive_command:secure-delete";
-  }
-  return undefined;
-}
-
-function isRecursiveOrForceRmFlag(word: string): boolean {
-  return /^-[A-Za-z]*[rf][A-Za-z]*$/.test(word) || word === "--recursive" || word === "--force";
-}
-
-function isProtectedDestructiveTarget(word: string): boolean {
-  const normalized = word.replace(/^['"]|['"]$/g, "").replaceAll("\\", "/");
-  const base = normalized.split("/").filter(Boolean).at(-1) ?? normalized;
-  return PROTECTED_DESTRUCTIVE_TARGETS.has(base) || normalized === ".git" || normalized.endsWith("/.git") || normalized === ".env" || normalized.endsWith("/.env");
-}
-
-const PROTECTED_DESTRUCTIVE_TARGETS = new Set([
-  ".env",
-  ".git",
-  "Cargo.lock",
-  "uv.lock",
-  "package-lock.json",
-  "pnpm-lock.yaml",
-  "yarn.lock",
-  "bun.lock",
-  "bun.lockb",
-  "Cargo.toml",
-  "package.json",
-  "pyproject.toml",
-]);
-
-function commandSegments(command: string): string[] {
-  return command
-    .split(/&&|\|\||[|;\n]/)
-    .map((segment) => segment.trim())
-    .filter(Boolean);
-}
-
-function gitMutationFromSegment(segment: string): string | undefined {
-  const words = shellWords(segment);
-  const gitIndex = words.findIndex((word) => word === "git");
-  if (gitIndex < 0) return undefined;
-  const subcommand = words[gitIndex + 1];
-  if (!subcommand) return undefined;
-  if (MUTATING_GIT_SUBCOMMANDS.has(subcommand)) return `git ${subcommand}`;
-  if (subcommand === "branch" && !isReadOnlyGitBranchCommand(words.slice(gitIndex + 2))) return "git branch";
-  return undefined;
-}
-
-function isReadOnlyGitBranchCommand(args: string[]): boolean {
-  if (args.length === 0) return true;
-  let allowPatterns = false;
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index]!;
-    if (!arg) continue;
-    if (isShellRedirectionToken(arg)) {
-      if (isStandaloneShellRedirectionOperator(arg)) index += 1;
-      continue;
-    }
-    if (isMutatingGitBranchArg(arg)) return false;
-    if (arg === "--") {
-      return allowPatterns && args.slice(index + 1).every((value) => value.trim().length > 0);
-    }
-    if (isReadOnlyGitBranchFlag(arg)) {
-      if (arg === "--list" || arg === "-l") allowPatterns = true;
-      continue;
-    }
-    if (isReadOnlyGitBranchFlagWithOptionalValue(arg)) {
-      if (!arg.includes("=")) index += 1;
-      continue;
-    }
-    if (allowPatterns && !arg.startsWith("-")) continue;
-    return false;
-  }
-  return true;
-}
-
-function isShellRedirectionToken(arg: string): boolean {
-  return isStandaloneShellRedirectionOperator(arg) || /^[0-9]?(?:>>?|<<?|<>|&>|>&|<&)/.test(arg);
-}
-
-function isStandaloneShellRedirectionOperator(arg: string): boolean {
-  return /^(?:[0-9]?(?:>>?|<<?|<>)|&>|[0-9]?>&|[0-9]?<&)$/.test(arg);
-}
-
-function isMutatingGitBranchArg(arg: string): boolean {
-  if (MUTATING_GIT_BRANCH_ARGS.has(arg)) return true;
-  if (arg.startsWith("--delete") || arg.startsWith("--move") || arg.startsWith("--copy") || arg.startsWith("--set-upstream-to")) return true;
-  if (!arg.startsWith("-") || arg.startsWith("--")) return false;
-  return [...arg.slice(1)].some((flag) => MUTATING_GIT_BRANCH_SHORT_FLAGS.has(flag));
-}
-
-function isReadOnlyGitBranchFlag(arg: string): boolean {
-  if (READ_ONLY_GIT_BRANCH_ARGS.has(arg)) return true;
-  if (arg.startsWith("--format=") || arg.startsWith("--sort=") || arg.startsWith("--color=") || arg.startsWith("--column=") || arg.startsWith("--abbrev=")) return true;
-  if (!arg.startsWith("-") || arg.startsWith("--")) return false;
-  return [...arg.slice(1)].every((flag) => READ_ONLY_GIT_BRANCH_SHORT_FLAGS.has(flag));
-}
-
-function isReadOnlyGitBranchFlagWithOptionalValue(arg: string): boolean {
-  return READ_ONLY_GIT_BRANCH_VALUE_ARGS.has(arg)
-    || arg.startsWith("--contains=")
-    || arg.startsWith("--no-contains=")
-    || arg.startsWith("--merged=")
-    || arg.startsWith("--no-merged=")
-    || arg.startsWith("--points-at=")
-    || arg.startsWith("--format=")
-    || arg.startsWith("--sort=");
-}
-
-const READ_ONLY_GIT_BRANCH_ARGS = new Set([
-  "-a",
-  "--all",
-  "-r",
-  "--remotes",
-  "-l",
-  "--list",
-  "-v",
-  "-vv",
-  "--verbose",
-  "--show-current",
-  "--ignore-case",
-  "-i",
-  "--omit-empty",
-]);
-
-const READ_ONLY_GIT_BRANCH_VALUE_ARGS = new Set([
-  "--contains",
-  "--no-contains",
-  "--merged",
-  "--no-merged",
-  "--points-at",
-  "--format",
-  "--sort",
-  "--color",
-  "--column",
-  "--abbrev",
-]);
-
-const READ_ONLY_GIT_BRANCH_SHORT_FLAGS = new Set(["a", "r", "l", "v"]);
-const MUTATING_GIT_BRANCH_SHORT_FLAGS = new Set(["d", "D", "m", "M", "c", "C", "f", "t", "u"]);
-
-const MUTATING_GIT_BRANCH_ARGS = new Set([
-  "-d",
-  "-D",
-  "--delete",
-  "-m",
-  "-M",
-  "--move",
-  "-c",
-  "-C",
-  "--copy",
-  "-f",
-  "--force",
-  "-t",
-  "--track",
-  "-u",
-  "--set-upstream-to",
-  "--unset-upstream",
-  "--edit-description",
-  "--create-reflog",
-  "--recurse-submodules",
-]);
-
-const MUTATING_GIT_SUBCOMMANDS = new Set([
-  "add",
-  "am",
-  "apply",
-  "bisect",
-  "checkout",
-  "cherry-pick",
-  "clean",
-  "commit",
-  "merge",
-  "mv",
-  "pull",
-  "push",
-  "rebase",
-  "reset",
-  "restore",
-  "revert",
-  "rm",
-  "stash",
-  "switch",
-  "tag",
-]);
 
 function shellWords(segment: string): string[] {
   return segment.match(/(?:[^\s"'`\\]+|"(?:\\.|[^"])*"|'[^']*')+/g)?.map((word) => word.replace(/^['"]|['"]$/g, "")) ?? [];
@@ -1321,7 +1435,6 @@ function firstShellWorkspacePathViolation(command: string, cwd: string): string 
   for (const token of dangerousAbsolutePathTokens(command)) {
     if (isAllowedExternalShellPath(token)) continue;
     if (isOutsideWorkspacePath(token, cwd)) return `outside_workspace_path:${token}`;
-    return `absolute_workspace_path:${normalizeMetricPath(token, cwd)}`;
   }
   return undefined;
 }
@@ -1579,9 +1692,9 @@ function trimCommandPathToken(token: string): string {
 
 function summarizeBlockedToolParams(toolName: string, params: Record<string, unknown>): string {
   const primary = toolName === "bash" ? getCommandParam(params) : getPathParam(params);
-  if (primary) return truncateForTool(primary, 300);
+  if (primary) return compactText(primary, 300);
   try {
-    return truncateForTool(JSON.stringify(params), 300);
+    return compactText(JSON.stringify(params), 300);
   } catch {
     return "[unserializable params]";
   }
@@ -1594,16 +1707,6 @@ function isCommandPathSuffix(char: string): boolean {
 function roundMetric(value: number): number {
   if (!Number.isFinite(value)) return value;
   return Math.round(value * 1000) / 1000;
-}
-
-function truncateForTool(text: string, maxChars: number): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  if (normalized.length <= maxChars) return normalized;
-  return `${normalized.slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function compressToolResult(result: unknown, toolName: string, maxChars: number): { result: unknown; outputChars: number; truncated: boolean } {

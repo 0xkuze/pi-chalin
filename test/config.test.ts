@@ -64,7 +64,6 @@ test("config supports explicit no-approval threshold", () => {
   const loaded = loadEffectiveConfig({ cwd });
 
   assert.equal(loaded.config.safety.approvalRiskThreshold, "none");
-  assert.equal(loaded.config.safety.blockCritical, true);
 });
 
 test("config persists and validates per-agent thinking overrides", () => {
@@ -117,21 +116,19 @@ test("config validates memory provider and engram settings", () => {
   assert.match(loaded.diagnostics.join("\n"), /Invalid memory\.provider/);
 });
 
-test("config validates inline and per-step skill activation caps", () => {
+test("config validates skill policy toggles and stale window", () => {
   const cwd = tempDir("pi-chalin-cwd-");
   writeJson(path.join(cwd, ".pi-chalin", "config.json"), {
     skills: {
-      maxActiveInline: 3.8,
-      maxActivePerStep: 9,
+      staleAfterDays: 400,
       autoActivation: "yes",
     },
   });
 
   const loaded = loadEffectiveConfig({ cwd });
 
-  assert.equal(loaded.config.skills.maxActiveInline, 3);
-  assert.equal(loaded.config.skills.maxActivePerStep, 2);
+  assert.equal(loaded.config.skills.staleAfterDays, 30);
   assert.equal(loaded.config.skills.autoActivation, true);
-  assert.match(loaded.diagnostics.join("\n"), /Invalid skills\.maxActivePerStep/);
+  assert.match(loaded.diagnostics.join("\n"), /Invalid skills\.staleAfterDays/);
   assert.match(loaded.diagnostics.join("\n"), /Invalid skills\.autoActivation/);
 });

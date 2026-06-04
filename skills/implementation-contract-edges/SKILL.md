@@ -12,29 +12,6 @@ capabilities:
   - edit-files
   - validate
 activation: auto
-triggers:
-  - parser
-  - scanner
-  - tokenizer
-  - lexer
-  - grammar
-  - state machine
-  - delimiter
-  - normalization
-  - normalize
-  - canonical
-  - sorting
-  - sort
-  - trim
-  - cache
-  - retry
-  - timeout
-  - ttl
-  - scaffold
-  - package.json
-  - cli
-  - entrypoint
-  - public api
 risk: medium
 maxActiveWith:
   - bugfix-tight-loop

@@ -63,7 +63,7 @@ function markDependentsSkipped(run: RunState, blocker: RunStepState, options: { 
     step.status = "skipped";
     step.skipReason = options.reason;
     step.endedAt = new Date().toISOString();
-    if (step.agent === "reviewer") reviewersNotRun.push(step.id);
+    if (stepRequiresVerification(run, step)) reviewersNotRun.push(step.id);
     skipped += 1;
   }
   if (options.recovery === "human-input") {
@@ -93,6 +93,27 @@ function stepDependsOn(run: RunState, step: RunStepState, dependencyId: string, 
     if (dependency && stepDependsOn(run, dependency, dependencyId, visited)) return true;
   }
   return false;
+}
+
+function stepRequiresVerification(run: RunState, step: RunStepState): boolean {
+  const unit = step.workUnitId ? run.workUnits?.find((candidate) => candidate.id === step.workUnitId) : undefined;
+  if (unit?.expectedEffects.includes("verify")) return true;
+  const routeStep = findRouteStep(run, step);
+  return Boolean(routeStep?.expectedEffects?.includes("verify"));
+}
+
+function findRouteStep(run: RunState, step: RunStepState): { id?: string; agent: string; task: string; expectedEffects?: string[] } | undefined {
+  const plan = run.route.plan;
+  if (!plan) return undefined;
+  if (plan.kind === "sequential") {
+    return plan.steps.find((candidate, index) => candidate.agent === step.agent && (candidate.id === step.id || `step-${index + 1}` === step.id));
+  }
+  for (const stage of plan.stages) {
+    if (!step.id.startsWith(`${stage.id}:`)) continue;
+    const localId = step.id.split(":").at(-1);
+    return stage.tasks.find((candidate, index) => candidate.agent === step.agent && (candidate.id === localId || `step-${index + 1}` === localId));
+  }
+  return undefined;
 }
 
 export function updateRecoveryState(run: RunState, failedStep?: RunStepState, reviewersNotRun: string[] = []): RunRecoveryState {
@@ -149,9 +170,18 @@ export function repairOptionsFor(run: RunState, failedStep?: RunStepState): stri
       "Retry the failed work unit only after the mutation allowlist covers every required source, test, docs, config, generated, and verification-support file.",
     ];
   }
-  if (failedStep.agent === "worker") return ["Run a repair route from the failed worker step.", "Retry the failed work unit after fixing the handoff contract."];
-  if (failedStep.agent === "reviewer") return ["Run an implementation repair route from the reviewer findings.", "Retry review after adding missing verification evidence."];
+  const effects = expectedEffectsForStep(run, failedStep);
+  if (effects.includes("write")) return ["Run a mutation repair route from the failed step.", "Retry the failed work unit after fixing the handoff contract."];
+  if (effects.includes("verify")) return ["Run an implementation repair route from the verification findings.", "Retry verification after adding missing evidence."];
   return ["Retry the failed step with a narrower work unit.", "Rerun the workflow from the last usable handoff."];
+}
+
+function expectedEffectsForStep(run: RunState, step: RunStepState): string[] {
+  const unit = step.workUnitId ? run.workUnits?.find((candidate) => candidate.id === step.workUnitId) : undefined;
+  if (unit?.expectedEffects.length) return unit.expectedEffects;
+  const routeStep = findRouteStep(run, step);
+  if (routeStep?.expectedEffects?.length) return routeStep.expectedEffects;
+  return run.route.expectedEffects ?? ["read"];
 }
 
 function isWorkUnitScopeContractViolation(reason: string): boolean {

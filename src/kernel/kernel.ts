@@ -1,4 +1,4 @@
-import { Context, Effect, Layer } from "effect";
+import { Effect } from "effect";
 import { AgentCatalog } from "../agents/agents.ts";
 import { ArtifactStore, recordRunArtifactEffect } from "../artifacts/artifacts.ts";
 import { DEFAULT_CONFIG, approvalDecision, type ChalinConfig } from "../config/config.ts";
@@ -26,24 +26,6 @@ export interface ChalinHandleResult {
   run?: RunState;
   memories: MemoryRecord[];
   diagnostics: string[];
-}
-
-interface KernelServiceShape {
-  readonly kernel: ChalinKernel;
-  readonly handleRoute: (route: RouteDecision, prompt: string, context?: Omit<WorkerRunnerContext, "agents" | "modelOverrides">, approvalOverride?: ApprovalDecision) => Effect.Effect<ChalinHandleResult, unknown>;
-}
-
-class KernelService extends Context.Tag("pi-chalin/Kernel")<KernelService, KernelServiceShape>() {}
-
-export function kernelLayer(kernel: ChalinKernel): Layer.Layer<KernelService> {
-  return Layer.succeed(KernelService, {
-    kernel,
-    handleRoute: (route, prompt, context, approvalOverride) => Effect.tryPromise(() => kernel.handleRoute(route, prompt, context, approvalOverride)),
-  });
-}
-
-export function createKernelLayer(options?: ChalinKernelOptions): Layer.Layer<KernelService> {
-  return kernelLayer(new ChalinKernel(options));
 }
 
 function recordRunSkillMetricsEffect(cwd: string, run: RunState): Effect.Effect<void, unknown> {
@@ -93,7 +75,7 @@ export class ChalinKernel {
     return Effect.gen(function* () {
       const approval = approvalOverride ?? approvalDecision(self.config, route);
       const diagnostics = [...self.catalog.diagnostics.warnings, ...self.catalog.diagnostics.errors];
-      const memories = route.needsMemory && !memoryDisabled() ? yield* Effect.tryPromise(() => self.retrieveRouteMemories(route, prompt)) : [];
+      const memories = route.needsMemory && !memoryDisabled() ? yield* Effect.tryPromise(() => self.retrieveRouteMemories(prompt)) : [];
       if (approval.action !== "allow" || !route.plan) return { route, approval, memories, diagnostics };
 
       const agents = self.resolvePlanAgents(route);
@@ -145,7 +127,7 @@ export class ChalinKernel {
     return approvalDecision(this.config, route);
   }
 
-  private async retrieveRouteMemories(route: RouteDecision, prompt: string): Promise<MemoryRecord[]> {
+  private async retrieveRouteMemories(prompt: string): Promise<MemoryRecord[]> {
     return (await this.memory.retrieve({ query: prompt, sourceAgent: "primary-pi", limit: 5, tokenBudget: 900 })).results.map((result) => result.record);
   }
 
@@ -212,16 +194,15 @@ export function routeFromPlan(input: StrictRoutePlanInput): RouteDecision {
     const stages = sanitizeStages(input.stages ?? []);
     if (stages.length === 0) return askUser("Routed dag topology requires at least one stage with agent tasks.");
     const agents = stages.flatMap((stage) => stage.tasks.map((step) => step.agent));
-    const allSteps = stages.flatMap((stage) => stage.tasks);
     const expectedEffects = expectedEffectsFromInput(input.expectedEffects);
     if (!expectedEffects) return expectedEffectsRequiredRoute();
     return {
       kind: "multi-agent-dag",
       agents,
-      risk: input.risk ?? riskFromPlan(allSteps),
+      risk: input.risk ?? "low",
       ambiguity: "low",
       needsMemory: routeNeedsMemory(input.needsMemory),
-      needsArtifacts: input.needsArtifacts ?? allSteps.some((step) => ["scout", "planner", "worker", "reviewer", "context-builder"].includes(step.agent)),
+      needsArtifacts: input.needsArtifacts ?? input.expectedEffects.includes("write"),
       expectedEffects,
       workUnitStrategy: sanitizeWorkUnitStrategy(input.workUnitStrategy),
       ...(typeof input.fanoutAuthorized === "boolean" ? { fanoutAuthorized: input.fanoutAuthorized } : {}),
@@ -237,10 +218,10 @@ export function routeFromPlan(input: StrictRoutePlanInput): RouteDecision {
   return {
     kind: "multi-agent-sequential",
     agents,
-    risk: input.risk ?? riskFromPlan(steps),
+    risk: input.risk ?? "low",
     ambiguity: "low",
     needsMemory: routeNeedsMemory(input.needsMemory),
-    needsArtifacts: input.needsArtifacts ?? steps.some((step) => ["scout", "planner", "worker", "reviewer", "context-builder"].includes(step.agent)),
+    needsArtifacts: input.needsArtifacts ?? input.expectedEffects.includes("write"),
     expectedEffects,
     workUnitStrategy: sanitizeWorkUnitStrategy(input.workUnitStrategy),
     ...(typeof input.fanoutAuthorized === "boolean" ? { fanoutAuthorized: input.fanoutAuthorized } : {}),
@@ -265,12 +246,14 @@ function sanitizeSteps(steps: RouteStepInput[]): AgentStep[] {
   return steps
     .map((step) => {
       const files = sanitizeStepFiles(step.files);
+      const expectedEffects = step.expectedEffects ? sanitizeExpectedEffects(step.expectedEffects) : undefined;
       return {
         id: step.id?.trim(),
         agent: step.agent.trim(),
         task: step.task.trim(),
         budget: sanitizeBudget(step.budget),
         ...(files ? { files } : {}),
+        ...(expectedEffects ? { expectedEffects } : {}),
       };
     })
     .filter((step) => step.agent.length > 0 && step.task.length > 0)
@@ -321,9 +304,4 @@ function sanitizeExpectedEffects(effects: RouteExpectedEffect[]): RouteExpectedE
   const normalized = effects.filter((effect): effect is RouteExpectedEffect => valid.has(effect));
   const unique = [...new Set(normalized)];
   return unique.length > 0 ? unique : undefined;
-}
-
-function riskFromPlan(steps: Array<{ agent: string }>): RouteDecision["risk"] {
-  if (steps.some((step) => step.agent === "worker")) return "medium";
-  return "low";
 }

@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Effect, Schedule } from "effect";
 import { resolveChalinPaths, type ChalinPathsOptions } from "../config/paths.ts";
+import { compactText as truncate } from "../utils/text.ts";
 
 const EXA_MCP_URL = "https://mcp.exa.ai/mcp?tools=web_search_exa,web_fetch_exa";
 const SEARCH_TTL_MS = 6 * 60 * 60 * 1000;
@@ -335,10 +336,6 @@ function cacheKey(kind: string, payload: unknown): string {
 
 function normalizeContent(text: string): string {
   return text.replace(/\s+/g, " ").trim();
-}
-
-function truncate(text: string, max: number): string {
-  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
 
 function freshnessIcon(freshness: WebFetchAuditFreshness): string {

@@ -258,7 +258,7 @@ export function buildRunLifecycleSpans(run: Pick<RunState, "id" | "route" | "roo
         attributes: { agent: step.agent, status: step.status, checkpointed: isCheckpointStepStatus(step.status) },
       }));
     }
-    if (step.agent === "reviewer") {
+    if (step.output?.reviewerVerdict) {
       spans.push(createStructuredSpan({
         id: `${run.id}:${step.id}:review`,
         parentId: `${run.id}:${step.id}:step`,
@@ -280,15 +280,15 @@ export function buildRunLifecycleSpans(run: Pick<RunState, "id" | "route" | "roo
         attributes: { agent: step.agent, status: step.status },
       }));
     }
-    if (isCheckpointStepStatus(step.status) || step.metrics?.budgetStopCount) {
+    if (isCheckpointStepStatus(step.status)) {
       spans.push(createStructuredSpan({
         id: `${run.id}:${step.id}:checkpoint`,
         parentId: `${run.id}:${step.id}:step`,
-        name: "budget checkpoint",
+        name: "runtime checkpoint",
         kind: "checkpoint",
         startedAt: stepEndedAt,
         endedAt: stepEndedAt,
-        attributes: { budgetStopCount: step.metrics?.budgetStopCount ?? 0 },
+        attributes: { status: step.status },
       }));
     }
     if ((step.metrics?.toolCallsByName.chalin_web_search ?? 0) > 0) {
@@ -316,11 +316,6 @@ export function buildRunLifecycleSpans(run: Pick<RunState, "id" | "route" | "roo
   }
   const existingSpans = run.steps.flatMap((step) => step.metrics?.spans ?? []);
   return mergeTraceSpans(spans, existingSpans);
-}
-
-function estimateTokens(text: string): number {
-  if (!text.trim()) return 0;
-  return Math.max(1, Math.ceil(text.length / 4));
 }
 
 function promptPhaseChars(text: string | undefined): number {

@@ -9,12 +9,6 @@ concerns:
 capabilities:
   - validate
 activation: auto
-triggers:
-  - run verify
-  - verify project
-  - verification command
-  - smoke check
-  - test command
 risk: medium
 maxActiveWith:
   - bugfix-tight-loop

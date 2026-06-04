@@ -11,6 +11,7 @@ import { resolveChalinPaths } from "../config/paths.ts";
 import { activateSkillForTurn, disableSkillForTurn, getActiveRun, getLatestRun } from "../runtime/state.ts";
 import type { AgentDefinition, RunState } from "../domain/schemas.ts";
 import { SkillCatalog, SkillMetricsStore, auditSkill, formatSkillList, formatSkillSearch, formatSkillShow, promoteSkill, reconcileSkillLifecyclesEffect, retireSkill, summarizeSkillMetrics } from "../skills/skills.ts";
+import { runStructuredSkillSelector } from "../skills/skill-selector.ts";
 import { openAgentManager, openSkillManager } from "../ui/ui-agents.ts";
 import {
   openMemoryReviewWithLoading,
@@ -264,10 +265,9 @@ function loadPersistedRun(cwd: string, runId: string): RunState | undefined {
 
 function formatCommandBudgetSummary(metrics: RunState["metrics"] | undefined): string {
   const hits = metrics?.budgetCapHits ?? [];
-  const stops = metrics?.budgetStopCount ?? 0;
   const soft = hits.filter((hit) => hit.severity === "soft").length;
-  const hard = hits.filter((hit) => hit.severity === "hard").length || stops;
-  return `${soft} budget warnings · ${hard} budget stops`;
+  const hard = hits.filter((hit) => hit.severity === "hard").length;
+  return `${soft} budget warnings · ${hard} budget checkpoints`;
 }
 
 async function handleSkillsCommand(ctx: ExtensionContext, catalog: SkillCatalog, args: string[]): Promise<void> {
@@ -306,7 +306,19 @@ async function handleSkillsCommand(ctx: ExtensionContext, catalog: SkillCatalog,
       ctx.ui.notify(`skill activated for this turn: ${resolved.skill.qualifiedName}\n\n${formatSkillSearch(task, catalog.search(task, { explicitSkills: [resolved.skill.qualifiedName] }))}`, "info");
       return;
     }
-    ctx.ui.notify(formatSkillSearch(task, catalog.search(task)), "info");
+    const loaded = loadEffectiveConfig({ cwd: ctx.cwd });
+    const selection = await runStructuredSkillSelector({
+      catalog,
+      config: loaded.config,
+      task,
+      context: {
+        model: ctx.model,
+        modelRegistry: ctx.modelRegistry,
+        signal: ctx.signal,
+      },
+    });
+    const result = catalog.search(task, { config: loaded.config, selectedSkills: selection.selectedSkills });
+    ctx.ui.notify(`${formatSkillSearch(task, result)}${selection.diagnostics.length ? `\n\n${selection.diagnostics.join("\n")}` : ""}`, "info");
     return;
   }
   const reference = rest[0];
@@ -602,8 +614,6 @@ function formatSkillPolicySummary(config: ChalinConfig): string {
     "Skill policy",
     `feature: ${enabledLabel(config.skills.enabled)}`,
     `auto activation: ${enabledLabel(config.skills.autoActivation)}`,
-    `max active inline: ${config.skills.maxActiveInline}`,
-    `max active per step: ${config.skills.maxActivePerStep}`,
     `project skills: ${enabledLabel(config.skills.allowProjectSkills)}`,
     `user skills: ${enabledLabel(config.skills.allowUserSkills)}`,
     `on-demand skills: ${enabledLabel(config.skills.allowOnDemandSkills)}`,
@@ -621,7 +631,7 @@ function formatSafetyGuardStatus(config: ChalinConfig): string {
     `recursion guard: ${enabledLabel(config.safety.recursionGuard)} locked`,
     `single-writer guard: ${enabledLabel(config.safety.singleWriterGuard)} locked`,
     `mutation expectation guard: ${enabledLabel(config.safety.mutationExpectationGuard)} locked`,
-    `critical route blocking: ${enabledLabel(config.safety.blockCritical)} locked`,
+    `critical route approval: required`,
   ].join("\n");
 }
 

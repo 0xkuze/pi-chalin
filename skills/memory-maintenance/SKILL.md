@@ -15,11 +15,6 @@ capabilities:
   - memory-read
   - memory-write
 activation: auto
-triggers:
-  - memory hygiene
-  - stale memory
-  - revise memory
-  - durable knowledge
 risk: low
 maxActiveWith: []
 allowedTools:

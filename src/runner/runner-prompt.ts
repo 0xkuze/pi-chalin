@@ -33,7 +33,7 @@ export function buildSdkPrompt(
   task: string,
   cwd: string,
   previous?: string,
-  budget: ReturnType<typeof policyForStep> | number = toolBudgetForAgent(agent),
+  budget?: ReturnType<typeof policyForStep>,
   budgetProfile: ToolBudgetProfile = "normal",
   options: SdkPromptOptions = {},
 ): string {
@@ -51,11 +51,8 @@ export function buildSdkPrompt(
   const verifyExpected = expectedEffects.has("verify");
   const writeDiscoveryAuthorityRelevant = options.workUnitStrategy === "discover" && writeExpected;
   const fanoutAuthorized = options.fanoutAuthorized === true;
-  const budgetPolicy = typeof budget === "number"
-    ? policyForStep(agent, { agent: agent?.name ?? "agent", task, budget: budgetProfile }, "multi-agent-sequential")
-    : budget;
-  const maxTools = typeof budget === "number" ? budget : budget.caps.maxToolCalls;
-  const profile = typeof budget === "number" ? budgetProfile : budget.profile;
+  const policy = budget ?? policyForStep(agent, { agent: agent?.name ?? "subagent", task, budget: budgetProfile });
+  const profile = policy.profile;
   const discoveryIndex = previous
     ? "Discovery index omitted because Previous Handoff is available. Call chalin_project_discovery only if the handoff lacks required repo facts."
     : formatProjectDiscoveryIndex(buildProjectDiscoveryIndex(cwd, { maxEntries: 220 }), { maxEntries: promptDiscoveryEntryLimit(profile) });
@@ -71,16 +68,16 @@ export function buildSdkPrompt(
     "- Tools follow capabilities; do not assume another agent's tools.",
     "",
     "## pi-chalin child tool policy",
-    "- Inspect read/find/grep/ls/read-only git. Use `edit` for existing files, including full-content replacements; `write` only after evidence path is new; scratch in cwd. No git mutate: checkout/restore/switch/reset/add/commit/clean or mutating branch; rollback = in-scope edit or scope gap.",
+    "- Inspect read/find/grep/ls and repository status with read-only intent. Use `edit` for existing files, including full-content replacements; `write` only after evidence path is new; scratch in cwd.",
+    "- If your semantic judgment says the next action may affect external services, irreversible state, credentials, repository history/state, data, or broad project files, call `chalin_request_approval` before that action, then `chalin_interview`. Do not wait for command-name classification by the harness.",
     "- Use repo-relative tool paths; for cwd omit `path` or use `.`. Do not pass absolute cwd.",
     "- Discovery/snapshot: inventory/git history only; not run mutations. Read exact evidence before claims.",
     "- Bash is role-scoped full shell; use purposeful commands.",
     "",
     formatActiveSkillsForPrompt(options.activeSkills ?? []),
     options.activeSkills?.length ? "" : undefined,
-    "## pi-chalin runtime budget",
-    `- Profile: ${profile}. Max tools: ${maxTools}.`,
-    `- Caps: ${budgetPolicy.caps.maxSeconds}s, $${budgetPolicy.caps.maxUsd}, ${budgetPolicy.caps.maxTurns} turns, ${budgetPolicy.caps.maxFilesTouched} files, ${budgetPolicy.caps.maxRetriesPerTool} retries/tool.`,
+    "## pi-chalin runtime guidance",
+    `- Profile: ${profile}. Runtime pressure is advisory telemetry, not task authority.`,
     "- Stay bounded; avoid exhaustive crawls unless explicitly required.",
     agent?.concern === "recon" || deepProjectAnalysis
       ? "- AGENTS/JIT-first: when the discovery index lists AGENTS.md, CONTEXT.md, ADRs, or package instruction files, read the root instructions first and then only the package instruction files relevant to the task before broad source reads."
@@ -135,16 +132,15 @@ export function buildSdkPrompt(
     implementationReviewRelevant && verifyExpected ? "- Review-only/no-mutation still allows running existing repo verification commands; a user ban on temporary scripts/files is not a ban on safe existing commands. PASS requires at least one Reviewer Verdict evidence record {kind:\"verification\", command:\"...\", status:\"pass\", result:\"observed output\"}. If you only inspected config or skipped required verification, use verdict:\"gap\" with missingCoverage/requiredRepair instead of PASS." : undefined,
     !mutationRelevant ? "- For project analysis, cite full relative paths from the repo root, not only basenames, and preserve exact runnable commands discovered in README, package manifests, Makefiles, CI, or test files; do not replace them with generic labels like tests exist." : undefined,
     !mutationRelevant ? "- When package scripts are present, report them as runnable invocations using the detected package manager, such as `pnpm test`, `npm run build`, or `yarn test`." : undefined,
-    `- Treat ${maxTools} tool calls as the soft planning budget. Continue only when the next tool has clear expected value; stop with partial findings plus uncertainty once marginal value drops.`,
-    "- Hard budget stop: checkpoint partial handoff, uncertainty, next split/continue. Soft warning: finish the current evidence thread and stop cleanly.",
+    "- Continue while the next action has clear expected value. When runtime pressure rises, produce a recoverable checkpoint or compact handoff with completed evidence, uncertainty, and the next continuation option before deciding whether more tools are worth it.",
     agent && hasAnyCapability(agent, ["coordinate"])
-      ? "- Nested delegation is rare but required when evidence proves scope exceeds one worker's reliable ownership boundary. Split into worker-owned child units with evidence, dependencies for shared surfaces, success criteria, and fan-in review; stop at the two-level subagent depth limit."
+      ? "- Nested delegation is rare but required when evidence proves scope exceeds one agent's reliable ownership boundary. Pass the bounded objective, evidence, effects, dependencies, and success criteria to chalin_delegate; do not choose topology, agents, steps, stages, or budgets yourself."
       : undefined,
     options.rootTask?.trim() ? "- The Original User Goal below is the contract. Step tasks and handoffs may be partial; preserve the user's exact failure trigger, constraints, requested output fields, and no-code/no-mutation boundaries over any narrower subtask wording." : undefined,
     "- No web unless this role needs fresh external context.",
     deepProjectAnalysis
-      ? "- Output budget for deep analysis: `## Findings` max 10 evidence-backed bullets, `## Handoff` max 14 bullets or 2600 characters, `## Memory Candidates` max 3 bullets. Accuracy beats brevity; do not pad."
-      : "- Output budget: `## Findings` max 5 bullets, `## Handoff` max 8 bullets or 1200 characters, `## Memory Candidates` max 3 bullets.",
+      ? "- Output style for deep analysis: keep `## Findings`, `## Handoff`, and `## Memory Candidates` compact and evidence-backed. Accuracy and recoverability beat brevity; do not pad."
+      : "- Output style: keep `## Findings`, `## Handoff`, and `## Memory Candidates` compact and evidence-backed. Brevity never overrides requested completeness.",
     "- Use chalin_artifact_write only for long-running feature-state, checkpoints, validation contracts, or reusable worker skills.",
     memoryPolicyForAgent(agent),
     "- Do not paste raw command output or long code snippets; cite paths and line evidence when useful.",
@@ -224,7 +220,7 @@ function promptDiscoveryEntryLimit(profile: ToolBudgetProfile): number {
 
 function workUnitDiscoveryContract(writeExpected: boolean, fanoutAuthorized = false): string {
   return [
-    "- Discovery contract: workUnits=[{id,title,scope:{files,purpose},dependencies,expectedEffects,acceptanceCriteria}] for bounded execution/review ownership only. expectedEffects is per unit, using read/write/verify; only units that must mutate the workspace should include write.",
+    "- Discovery contract: workUnits=[{id,title,scope:{files,purpose},dependencies,expectedEffects,acceptanceCriteria}] for bounded work surfaces only. Do not assign agents, topology, stages, or budgets; the planner decides the executable route from these units. expectedEffects is per unit, using read/write/verify; only units that must mutate the workspace should include write.",
     writeExpected && fanoutAuthorized ? "Authorized fanout: the user already authorized working discovered independent targets. Emit safe WorkUnits for bounded surfaces that can proceed; omit surfaces needing extra scope/API/security/arch/tooling decisions and report them as risks/nextActions instead of blocking the whole fanout." : undefined,
     writeExpected && !fanoutAuthorized ? "Discovered write units need user authority: if units are alternative owners for the same requested behavior and the user did not authorize all targets, set requiresHumanInput=true, humanInputQuestions=[...], workUnits=[] instead of fanout." : undefined,
     "scope.files is the only mutation authority for write units: include every expected source, test, docs, config, manifest, lock, generated, or verification-support file the unit may edit/create; do not write acceptance criteria that authorize files missing from scope.files. If needed files are uncertain, mark a scope gap instead of omitting them.",
@@ -241,7 +237,7 @@ function claimLedgerOutputContract(agent: AgentDefinition | undefined): string |
   return "## Claim Ledger\n- Optional JSON for auditable claims: `{kind,subject,summary,evidence,evidenceKind,confidence}`; kinds include `transient-status`, `negative-claim`, `unknown`, `contradiction`.";
 }
 
-export function childToolNames(agent: AgentDefinition | undefined, task = "", needsArtifacts = false, hasPrevious = false, options: ChildToolOptions = {}): string[] {
+export function childToolNames(agent: AgentDefinition | undefined, needsArtifacts = false, hasPrevious = false, options: ChildToolOptions = {}): string[] {
   const deepHandoff = options.budgetProfile === "deep" || options.budgetProfile === "extended";
   if (hasPrevious && shouldUseHandoffOnlyMode(agent, deepHandoff, Boolean(options.previousClaimsNeedAudit))) return [];
   if (!agent?.capabilities.length) {
@@ -262,7 +258,7 @@ export function childToolNames(agent: AgentDefinition | undefined, task = "", ne
   if (hasAnyCapability(agent, ["edit-files"])) names.add("edit");
   if (hasAnyCapability(agent, ["write-new-files"])) names.add("write");
   if (hasAnyCapability(agent, ["external-context"]) && taskNeedsExternalContext(agent)) names.add("chalin_web_search");
-  if (hasAnyCapability(agent, ["inspect-files", "validate"]) && taskNeedsSkillInspection(task)) names.add("chalin_skill");
+  if (hasAnyCapability(agent, ["inspect-files", "validate"])) names.add("chalin_skill");
   if (shouldExposeArtifactWrite(agent, needsArtifacts, options)) names.add("chalin_artifact_write");
   const memoryEnabled = options.memoryEnabled ?? true;
   if (memoryEnabled && agent?.memory.read !== false && hasAnyCapability(agent, ["memory-read"])) names.add("chalin_memory_search");
@@ -279,10 +275,6 @@ export function childToolNames(agent: AgentDefinition | undefined, task = "", ne
   return [...names];
 }
 
-function taskNeedsSkillInspection(task: string): boolean {
-  return /\b(SKILL\.md|skill governance|skill audit|promote skill|untrusted skill|generated skill|reusable procedure)\b/i.test(task);
-}
-
 function shouldExposeArtifactWrite(agent: AgentDefinition, needsArtifacts: boolean, options: ChildToolOptions): boolean {
   if (!needsArtifacts) return false;
   if (!hasAnyCapability(agent, ["memory-write", "coordinate", "validate", "edit-files"])) return false;
@@ -291,31 +283,13 @@ function shouldExposeArtifactWrite(agent: AgentDefinition, needsArtifacts: boole
   return false;
 }
 
-export function toolBudgetForStep(agent: AgentDefinition | undefined, step: Pick<RunStepState, "agent" | "task" | "budget">, routeKind: RouteKind = "multi-agent-sequential"): number {
-  const env = Number(process.env.PI_CHALIN_CHILD_TOOL_BUDGET);
-  if (Number.isFinite(env) && env > 0) return Math.floor(env);
-  return policyForStep(agent, step, routeKind).caps.maxToolCalls;
-}
-
-export function resolveStepCompletionStatus(step: Pick<RunStepState, "metrics" | "output" | "error">): RunStepState["status"] {
+export function resolveStepCompletionStatus(step: Pick<RunStepState, "error">): RunStepState["status"] {
   if (step.error) return "failed";
-  if (!step.metrics?.budgetStopCount) return "complete";
-  if (hasUsableHandoff(step)) return "complete";
-  return "checkpointed";
+  return "complete";
 }
 
 export function isHandoffGapReadMode(agent: AgentDefinition | undefined, previous?: string, deepProjectAnalysis = false): boolean {
   return isSynthesisGapReadMode(agent, previous, deepProjectAnalysis) || isReviewGapReadMode(agent, previous);
-}
-
-export function synthesisToolCallLimit(): number {
-  const parsed = Number(process.env.PI_CHALIN_SYNTHESIS_TOOL_LIMIT);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 35;
-}
-
-export function handoffReviewToolCallLimit(): number {
-  const parsed = Number(process.env.PI_CHALIN_REVIEW_TOOL_LIMIT);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 12;
 }
 
 export function synthesisGapReadLimit(): number {
@@ -402,59 +376,6 @@ function taskNeedsBash(agent: AgentDefinition): boolean {
   if (agent.concern === "implementation") return true;
   if (agent.capabilities.includes("run-safe-bash")) return true;
   return agent.capabilities.includes("validate");
-}
-
-function toolBudgetForAgent(agent: AgentDefinition | undefined, fallbackName?: string): number {
-  const env = Number(process.env.PI_CHALIN_CHILD_TOOL_BUDGET);
-  if (Number.isFinite(env) && env > 0) return Math.floor(env);
-  return baseToolBudget(agent, fallbackName);
-}
-
-function hasUsableHandoff(step: Pick<RunStepState, "output" | "error">): boolean {
-  const text = [step.output?.handoff, step.output?.text].filter(Boolean).join("\n").trim();
-  if (text.length < 80) return false;
-  if (isPlaceholderHandoff(text)) return false;
-  return hasMarkdownSection(text, "Handoff") || hasMarkdownSection(text, "Findings") || countBullets(text) >= 2 || text.includes("/");
-}
-
-function isPlaceholderHandoff(text: string): boolean {
-  const normalized = text.trim().toLowerCase();
-  const withoutTerminalPeriod = normalized.endsWith(".") ? normalized.slice(0, -1) : normalized;
-  return ["done", "complete", "ok", "no output"].includes(withoutTerminalPeriod);
-}
-
-function hasMarkdownSection(text: string, title: string): boolean {
-  const heading = `## ${title.toLowerCase()}`;
-  return text
-    .split("\n")
-    .some((line) => line.trim().toLowerCase() === heading);
-}
-
-function countBullets(text: string): number {
-  return text
-    .split("\n")
-    .filter((line) => {
-      const trimmed = line.trimStart();
-      return trimmed.startsWith("- ") || trimmed.startsWith("* ");
-    })
-    .length;
-}
-
-function baseToolBudget(agent: AgentDefinition | undefined, fallbackName?: string): number {
-  if (agent?.concern === "recon") return 40;
-  if (agent?.concern === "context-building") return 60;
-  if (agent?.concern === "planning") return 25;
-  if (agent?.concern === "review") return 50;
-  if (agent?.concern === "implementation") return 80;
-  if (agent?.concern === "research") return 60;
-  if (agent?.concern === "decision-consistency") return 8;
-  if (agent?.concern === "conflict-resolution") return 16;
-  if (fallbackName === "scout") return 40;
-  if (fallbackName === "context-builder") return 60;
-  if (fallbackName === "planner") return 25;
-  if (fallbackName === "reviewer") return 50;
-  if (fallbackName === "worker") return 80;
-  return 40;
 }
 
 function stopConditionsForAgent(agent: AgentDefinition | undefined, deepProjectAnalysis = false): string {

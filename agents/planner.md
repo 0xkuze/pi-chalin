@@ -5,7 +5,6 @@ concern: planning
 capabilities: inspect-files, search-files, memory-read, memory-write, coordinate
 model: inherit
 thinking: high
-budget-tool-calls: 25
 tools: read, grep, find, ls
 memory-read: true
 memory-write: candidate

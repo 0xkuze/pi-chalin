@@ -68,55 +68,8 @@ export function expandWorkUnitsFromHandoff(run: RunState, sourceStep: RunStepSta
     blockDiscoveredWriteFanoutForHumanInput(run, sourceStep, fanoutUnits);
     return false;
   }
-  const aggregateStageId = `fanout-${safeId(sourceStep.id)}-aggregate`;
-  const finalStageId = `fanout-${safeId(sourceStep.id)}-final-review`;
   const unitRefs = compileFanoutUnitRefs(sourceStep, fanoutUnits)
     .map((unitRef) => enrichFanoutUnitRef(unitRef, routeEffects));
-  const primaryStages: Extract<RoutePlan, { kind: "dag" }>["stages"] = [];
-  const reviewerStages: Extract<RoutePlan, { kind: "dag" }>["stages"] = [];
-  const primarySteps: RunStepState[] = [];
-  const reviewerSteps: RunStepState[] = [];
-  const unitRefById = new Map(unitRefs.map((unitRef) => [unitRef.id, unitRef]));
-  for (const level of fanoutLevels(unitRefs)) {
-    const primaryStageId = `fanout-${safeId(sourceStep.id)}-${stageAgentLabel(level.refs)}-${level.level}`;
-    const levelPrimarySteps = level.refs.map((unitRef): RunStepState => {
-      unitRef.workerStepId = `${primaryStageId}:step-${unitRef.index + 1}`;
-      unitRef.dependencyStepIds = unitRef.dependencyUnitIds
-        .map((id) => unitRefById.get(id)?.reviewerStepId ?? unitRefById.get(id)?.workerStepId)
-        .filter((id): id is string => Boolean(id));
-      return {
-        id: unitRef.workerStepId,
-        agent: unitRef.agent,
-        task: unitTaskForEffects(unitRef.input, unitRef.expectedEffects),
-        status: "pending",
-        stageId: primaryStageId,
-        workUnitId: unitRef.id,
-        dependencies: [sourceStep.id, ...unitRef.dependencyStepIds],
-        budget: "normal",
-      };
-    });
-    primarySteps.push(...levelPrimarySteps);
-    primaryStages.push({ id: primaryStageId, tasks: levelPrimarySteps.map(toAgentStep) });
-    const refsNeedingReview = level.refs.filter((unitRef) => unitRef.requiresReviewer);
-    if (refsNeedingReview.length > 0) {
-      const reviewStageId = `fanout-${safeId(sourceStep.id)}-reviewers-${level.level}`;
-      const levelReviewerSteps = refsNeedingReview.map((unitRef): RunStepState => {
-        unitRef.reviewerStepId = `${reviewStageId}:step-${unitRef.index + 1}`;
-        return {
-          id: unitRef.reviewerStepId,
-          agent: "reviewer",
-          task: reviewUnitTask(unitRef.input),
-          status: "pending",
-          stageId: reviewStageId,
-          workUnitId: unitRef.id,
-          dependencies: [unitRef.workerStepId],
-          budget: "normal",
-        };
-      });
-      reviewerSteps.push(...levelReviewerSteps);
-      reviewerStages.push({ id: reviewStageId, tasks: levelReviewerSteps.map(toAgentStep) });
-    }
-  }
   const workUnits: WorkUnit[] = unitRefs.map((unitRef) => {
     const fanoutUnit = unitRef.input;
     const scope = fanoutUnit.scope.length ? fanoutUnit.scope : [fanoutUnit.title];
@@ -131,68 +84,39 @@ export function expandWorkUnitsFromHandoff(run: RunState, sourceStep: RunStepSta
       dependencies: [sourceStep.workUnitId ?? sourceStep.id, ...unitRef.dependencyUnitIds],
       expectedEffects: unitRef.expectedEffects,
       acceptanceCriteria,
-      workerStepId: unitRef.workerStepId,
-      ...(unitRef.requiresReviewer ? { reviewerStepId: unitRef.reviewerStepId } : {}),
       sourceStepId: sourceStep.id,
       createdFrom: "fanout",
     };
   });
-  const aggregatorId = `${aggregateStageId}:step-1`;
-  const finalReviewId = `${finalStageId}:step-1`;
-  const aggregatorUnit: WorkUnit = {
-    id: `${aggregateStageId}-unit`,
-    title: "Aggregate fanout results",
-    kind: "synthesis",
+  const planningStageId = `fanout-${safeId(sourceStep.id)}-route-plan`;
+  const planningStepId = `${planningStageId}:step-1`;
+  const planningUnit: WorkUnit = {
+    id: `${planningStageId}-unit`,
+    title: "Plan discovered WorkUnit execution",
+    kind: "planning",
     status: "pending",
     scope: workUnits.map((unit) => unit.title),
-    dependencies: unitRefs.map((unitRef) => unitRef.reviewerStepId ?? unitRef.workerStepId),
+    dependencies: [sourceStep.workUnitId ?? sourceStep.id, ...unitRefs.flatMap((unitRef) => unitRef.dependencyUnitIds)],
     expectedEffects: ["read"],
-    acceptanceCriteria: ["Summarize per-unit outcomes and unresolved gaps without hiding failed or skipped units."],
-    workerStepId: aggregatorId,
+    acceptanceCriteria: ["Choose the executable route, agent responsibilities, dependencies, and verification coverage for discovered WorkUnits without mutating files."],
+    workerStepId: planningStepId,
     sourceStepId: sourceStep.id,
     createdFrom: "fanout",
   };
-  const finalUnit: WorkUnit = {
-    id: `${finalStageId}-unit`,
-    title: "Final integration review",
-    kind: "review",
+  const plannerStep: RunStepState = {
+    id: planningStepId,
+    agent: "planner",
+    task: planDiscoveredWorkUnitsTask(sourceStep, workUnits, routeEffects),
     status: "pending",
-    scope: workUnits.map((unit) => unit.title),
-    dependencies: [aggregatorId],
-    expectedEffects: ["read", "verify"],
-    acceptanceCriteria: ["Confirm all unit reviewers passed or explicitly report blockers."],
-    finalReviewerStepId: finalReviewId,
-    sourceStepId: sourceStep.id,
-    createdFrom: "fanout",
-  };
-  const aggregateStep: RunStepState = {
-    id: aggregatorId,
-    agent: "context-builder",
-    task: "Aggregate the WorkUnit handoffs into a compact summary. Do not claim completion for failed or skipped units.",
-    status: "pending",
-    stageId: aggregateStageId,
-    workUnitId: aggregatorUnit.id,
-    dependencies: aggregatorUnit.dependencies,
-    budget: "normal",
-  };
-  const finalReviewStep: RunStepState = {
-    id: finalReviewId,
-    agent: "reviewer",
-    task: "Final integration review for all fanout units. Verify coverage, skipped reviewers, failed units, and remaining repair options.",
-    status: "pending",
-    stageId: finalStageId,
-    workUnitId: finalUnit.id,
-    dependencies: [aggregatorId],
+    stageId: planningStageId,
+    workUnitId: planningUnit.id,
+    dependencies: [sourceStep.id],
     budget: "normal",
   };
 
-  run.workUnits = [...(run.workUnits ?? []), ...workUnits, aggregatorUnit, finalUnit];
-  run.steps.push(...primarySteps, ...reviewerSteps, aggregateStep, finalReviewStep);
-  appendDagStages(run, [
-    ...interleaveWorkerReviewerStages(primaryStages, reviewerStages),
-    { id: aggregateStageId, tasks: [toAgentStep(aggregateStep)] },
-    { id: finalStageId, tasks: [toAgentStep(finalReviewStep)] },
-  ], sourceStep.stageId);
+  run.workUnits = [...(run.workUnits ?? []), ...workUnits, planningUnit];
+  run.steps.push(plannerStep);
+  appendDagStages(run, [{ id: planningStageId, tasks: [toAgentStep(plannerStep)] }], sourceStep.stageId);
   const unresolvedDependencies = unitRefs.flatMap((unitRef) => unitRef.unresolvedDependencies.map((dependency) => `${unitRef.input.title}: ${dependency}`));
   if (unresolvedDependencies.length) {
     run.warnings.push(`Ignored unresolved WorkUnit dependencies that did not match structured unit ids or exact titles: ${unresolvedDependencies.slice(0, 8).join("; ")}.`);
@@ -204,7 +128,7 @@ export function expandWorkUnitsFromHandoff(run: RunState, sourceStep: RunStepSta
   run.route.agents = run.steps.map((step) => step.agent);
   run.route.needsArtifacts = true;
   run.route.expectedEffects = [...new Set<RouteExpectedEffect>(routeEffects)];
-  run.warnings.push(`Expanded fanout/decomposition into ${workUnits.length} work unit(s) after ${sourceStep.agent}/${sourceStep.id}.`);
+  run.warnings.push(`Queued planner route selection for ${workUnits.length} discovered WorkUnit(s) after ${sourceStep.agent}/${sourceStep.id}.`);
   return true;
 }
 
@@ -243,7 +167,7 @@ function blockDiscoveredWriteFanoutForHumanInput(run: RunState, sourceStep: RunS
     step.skipReason = reason;
     step.endedAt = new Date().toISOString();
   }
-  run.warnings.push(`Human input required before discovered write fanout from ${sourceStep.agent}/${sourceStep.id}; no worker fanout was materialized.`);
+  run.warnings.push(`Human input required before discovered write fanout from ${sourceStep.agent}/${sourceStep.id}; no executor fanout was materialized.`);
 }
 
 interface FanoutUnitRef {
@@ -251,15 +175,10 @@ interface FanoutUnitRef {
   id: string;
   input: AgentHandoffWorkUnit;
   expectedEffects: RouteExpectedEffect[];
-  agent: string;
   kind: WorkUnitKind;
-  requiresReviewer: boolean;
   dependencyUnitIds: string[];
-  dependencyStepIds: string[];
   unresolvedDependencies: string[];
   autoDependencies: string[];
-  workerStepId: string;
-  reviewerStepId?: string;
 }
 
 function compileFanoutUnitRefs(sourceStep: RunStepState, fanoutUnits: AgentHandoffWorkUnit[]): FanoutUnitRef[] {
@@ -269,14 +188,10 @@ function compileFanoutUnitRefs(sourceStep: RunStepState, fanoutUnits: AgentHando
     id: `${sourcePrefix}-${index + 1}`,
     input: unit,
     expectedEffects: ["read"],
-    agent: "context-builder",
-    kind: "synthesis",
-    requiresReviewer: false,
+    kind: "planning",
     dependencyUnitIds: [],
-    dependencyStepIds: [],
     unresolvedDependencies: [],
     autoDependencies: [],
-    workerStepId: "",
   }));
   const lookup = buildFanoutDependencyLookup(refs);
   for (const ref of refs) {
@@ -298,9 +213,7 @@ function enrichFanoutUnitRef(unitRef: FanoutUnitRef, routeEffects: RouteExpected
   return {
     ...unitRef,
     expectedEffects,
-    agent: agentForExpectedEffects(expectedEffects),
     kind: kindForExpectedEffects(expectedEffects),
-    requiresReviewer: expectedEffects.includes("write"),
   };
 }
 
@@ -322,24 +235,11 @@ function uniqueExpectedEffects(effects: RouteExpectedEffect[]): RouteExpectedEff
   return result.length ? result : ["read"];
 }
 
-function agentForExpectedEffects(expectedEffects: RouteExpectedEffect[]): string {
-  const effectSet = new Set(expectedEffects);
-  if (effectSet.has("write")) return "worker";
-  if (effectSet.has("verify")) return "reviewer";
-  return "context-builder";
-}
-
 function kindForExpectedEffects(expectedEffects: RouteExpectedEffect[]): WorkUnitKind {
   const effectSet = new Set(expectedEffects);
   if (effectSet.has("write")) return "implementation";
   if (effectSet.has("verify")) return "review";
   return "synthesis";
-}
-
-function stageAgentLabel(refs: FanoutUnitRef[]): string {
-  const agents = [...new Set(refs.map((ref) => ref.agent))];
-  if (agents.length !== 1) return "units";
-  return `${agents[0]}s`;
 }
 
 function applyFileOverlapDependencies(refs: FanoutUnitRef[]): void {
@@ -392,55 +292,6 @@ function buildFanoutDependencyLookup(refs: FanoutUnitRef[]): Map<string, FanoutU
   return lookup;
 }
 
-function fanoutLevels(refs: FanoutUnitRef[]): Array<{ level: number; refs: FanoutUnitRef[] }> {
-  const levelById = new Map<string, number>();
-  const visiting = new Set<string>();
-  const byId = new Map(refs.map((ref) => [ref.id, ref]));
-  const levelFor = (ref: FanoutUnitRef): number => {
-    const known = levelById.get(ref.id);
-    if (known !== undefined) return known;
-    if (visiting.has(ref.id)) {
-      ref.unresolvedDependencies.push("cycle");
-      levelById.set(ref.id, 1);
-      return 1;
-    }
-    visiting.add(ref.id);
-    const dependencyLevels = ref.dependencyUnitIds
-      .map((id) => byId.get(id))
-      .filter((dependency): dependency is FanoutUnitRef => Boolean(dependency))
-      .map(levelFor);
-    visiting.delete(ref.id);
-    const level = dependencyLevels.length ? Math.max(...dependencyLevels) + 1 : 1;
-    levelById.set(ref.id, level);
-    return level;
-  };
-  for (const ref of refs) levelFor(ref);
-  const grouped = new Map<number, FanoutUnitRef[]>();
-  for (const ref of refs) {
-    const level = levelById.get(ref.id) ?? 1;
-    grouped.set(level, [...(grouped.get(level) ?? []), ref]);
-  }
-  return [...grouped.entries()]
-    .sort(([left], [right]) => left - right)
-    .map(([level, levelRefs]) => ({ level, refs: levelRefs }));
-}
-
-function interleaveWorkerReviewerStages(
-  workerStages: Extract<RoutePlan, { kind: "dag" }>["stages"],
-  reviewerStages: Extract<RoutePlan, { kind: "dag" }>["stages"],
-): Extract<RoutePlan, { kind: "dag" }>["stages"] {
-  if (reviewerStages.length === 0) return workerStages;
-  const stages: Extract<RoutePlan, { kind: "dag" }>["stages"] = [];
-  const count = Math.max(workerStages.length, reviewerStages.length);
-  for (let index = 0; index < count; index += 1) {
-    const workerStage = workerStages[index];
-    const reviewerStage = reviewerStages[index];
-    if (workerStage) stages.push(workerStage);
-    if (reviewerStage) stages.push(reviewerStage);
-  }
-  return stages;
-}
-
 function normalizeDependencyKey(value: string): string {
   return normalizeText(value).toLowerCase();
 }
@@ -489,7 +340,7 @@ function planSequentialSteps(route: RouteDecision, plan: Extract<RoutePlan, { ki
       workUnitId: unitId,
       dependencies: index > 0 ? [steps[index - 1]!.id] : [],
     });
-    units.push(unitForStep(unitId, step, id, "sequential", expectedEffects, index > 0 ? [steps[index - 1]!.workUnitId ?? steps[index - 1]!.id] : []));
+    units.push(unitForStep(unitId, step, id, expectedEffects, index > 0 ? [steps[index - 1]!.workUnitId ?? steps[index - 1]!.id] : []));
   }
   return { steps, workUnits: units };
 }
@@ -516,7 +367,7 @@ function planDagSteps(route: RouteDecision, plan: Extract<RoutePlan, { kind: "da
         workUnitId: unitId,
         dependencies: [...priorStageStepIds],
       });
-      units.push(unitForStep(unitId, step, id, stage.id, expectedEffects, priorStageUnitIds));
+      units.push(unitForStep(unitId, step, id, expectedEffects, priorStageUnitIds));
       stageStepIds.push(id);
       stageUnitIds.push(unitId);
     });
@@ -526,19 +377,19 @@ function planDagSteps(route: RouteDecision, plan: Extract<RoutePlan, { kind: "da
   return { steps, workUnits: units };
 }
 
-function unitForStep(unitId: string, step: AgentStep, stepId: string, stageId: string, expectedEffects: RouteExpectedEffect[], dependencies: string[]): WorkUnit {
+function unitForStep(unitId: string, step: AgentStep, stepId: string, expectedEffects: RouteExpectedEffect[], dependencies: string[]): WorkUnit {
   const unitExpectedEffects = expectedEffectsForPlannedStep(step, expectedEffects);
   return {
     id: unitId,
     title: step.id || taskTitle(step.task),
-    kind: kindForAgent(step.agent),
+    kind: kindForExpectedEffects(unitExpectedEffects),
     status: "pending",
     scope: [step.task],
     dependencies,
     expectedEffects: unitExpectedEffects,
     acceptanceCriteria: [step.task],
     ...(step.files?.length ? { files: step.files } : {}),
-    ...(step.agent === "reviewer" ? { reviewerStepId: stepId } : { workerStepId: stepId }),
+    ...stepReferenceForExpectedEffects(unitExpectedEffects, stepId),
     sourceStepId: stepId,
     createdFrom: "route-plan",
   };
@@ -574,19 +425,16 @@ function extractFanoutWorkUnits(step: RunStepState): AgentHandoffWorkUnit[] {
 }
 
 function expectedEffectsForPlannedStep(step: AgentStep, routeEffects: RouteExpectedEffect[]): RouteExpectedEffect[] {
-  if (isPlannedWriteStep(step.agent)) return uniqueExpectedEffects(routeEffects);
-  if (isPlannedVerificationStep(step.agent)) return routeEffects.includes("verify") ? ["read", "verify"] : ["read"];
+  if (step.expectedEffects?.length) return uniqueExpectedEffects(step.expectedEffects);
+  if (routeEffects.length === 1) return uniqueExpectedEffects(routeEffects);
   return ["read"];
 }
 
-function isPlannedWriteStep(agent: string): boolean {
-  const normalized = agent.toLowerCase();
-  return normalized === "worker" || normalized === "writer" || normalized === "implementer" || normalized === "conflict-resolver" || normalized === "repair";
-}
-
-function isPlannedVerificationStep(agent: string): boolean {
-  const normalized = agent.toLowerCase();
-  return normalized === "reviewer" || normalized === "verifier" || normalized === "validator" || normalized === "qa";
+function stepReferenceForExpectedEffects(expectedEffects: RouteExpectedEffect[], stepId: string): Pick<WorkUnit, "workerStepId" | "reviewerStepId"> {
+  const effectSet = new Set(expectedEffects);
+  if (effectSet.has("write")) return { workerStepId: stepId };
+  if (effectSet.has("verify")) return { reviewerStepId: stepId };
+  return { workerStepId: stepId };
 }
 
 function appendDagStages(run: RunState, stages: Extract<RoutePlan, { kind: "dag" }>["stages"], afterStageId?: string): void {
@@ -618,54 +466,23 @@ function routeExpectedEffects(route: RouteDecision): RouteExpectedEffect[] {
   return route.expectedEffects?.length ? route.expectedEffects : ["read"];
 }
 
-function unitTaskForEffects(unit: AgentHandoffWorkUnit, expectedEffects: RouteExpectedEffect[]): string {
-  const contract = formatUnitContract(unit);
-  const expectedEffectSet = new Set(expectedEffects);
-  if (expectedEffectSet.has("write")) {
-    return [
-      `Implement work unit '${unit.title}'.`,
-      contract,
-      "Preserve the Original User Goal. Change only files in this WorkUnit scope; commands that create or update files are mutations too. Preserve public/exported signatures unless this WorkUnit includes every direct caller/update surface. If another file or caller update is required, stop and report the missing dependency or scope gap instead of editing outside the unit.",
-    ].join(" ");
-  }
-  if (expectedEffectSet.has("verify")) {
-    return [
-      `Review work unit '${unit.title}' against the Original User Goal, available evidence, and verification/readback criteria.`,
-      contract,
-    ].join(" ");
-  }
+function planDiscoveredWorkUnitsTask(sourceStep: RunStepState, workUnits: WorkUnit[], routeEffects: RouteExpectedEffect[]): string {
+  const unitSummary = workUnits.map((unit) => [
+    `- ${unit.id}: ${unit.title}`,
+    `  effects: ${unit.expectedEffects.join(", ")}`,
+    unit.files?.length ? `  files: ${unit.files.join(", ")}` : undefined,
+    unit.dependencies.length ? `  dependencies: ${unit.dependencies.join(", ")}` : undefined,
+    unit.acceptanceCriteria.length ? `  acceptance: ${unit.acceptanceCriteria.join("; ")}` : undefined,
+  ].filter((line): line is string => Boolean(line)).join("\n")).join("\n");
   return [
-    `Analyze work unit '${unit.title}' against the Original User Goal and hand off evidence, gaps, and recommended next actions.`,
-    contract,
-  ].join(" ");
-}
-
-function reviewUnitTask(unit: AgentHandoffWorkUnit): string {
-  return [
-    `Review work unit '${unit.title}' against the Original User Goal, worker changes, and verification evidence.`,
-    formatUnitContract(unit),
-    "Fail or mark GAP if the worker edited outside this WorkUnit scope without an explicit dependency/scope-gap handoff.",
-  ].join(" ");
-}
-
-function formatUnitContract(unit: AgentHandoffWorkUnit): string {
-  return [
-    unit.scope.length ? `Scope: ${unit.scope.join("; ")}.` : undefined,
-    unit.files?.length ? `Files: ${unit.files.join("; ")}.` : undefined,
-    unit.files?.length ? "Only the Files list is mutation-authoritative; scope text, acceptance criteria, or prior handoffs cannot authorize extra files unless they appear in Files." : undefined,
-    unit.acceptanceCriteria.length ? `Acceptance criteria: ${unit.acceptanceCriteria.join("; ")}.` : undefined,
-    unit.dependencies?.length ? `Dependencies: ${unit.dependencies.join("; ")}.` : undefined,
-    unit.files?.length ? "Use edit for listed files that already exist, including full-content replacements; use write only for listed paths proven not to exist." : undefined,
-  ].filter((line): line is string => Boolean(line)).join(" ");
-}
-
-function kindForAgent(agent: string): WorkUnitKind {
-  if (agent === "scout" || agent === "researcher") return "discovery";
-  if (agent === "planner") return "planning";
-  if (agent === "reviewer") return "review";
-  if (agent === "context-builder") return "synthesis";
-  if (agent.toLowerCase() === "repair") return "repair";
-  return "implementation";
+    `Decide the executable route for ${workUnits.length} discovered WorkUnit(s) from ${sourceStep.agent}/${sourceStep.id}.`,
+    "Do not mutate files in this planning step.",
+    "Use semantic judgment to decide whether nested delegation is needed, which effects each unit requires, dependencies, verification coverage, and whether human clarification is needed.",
+    "If execution is needed, call chalin_delegate with the bounded objective and current evidence; do not choose topology, agents, or per-step budgets yourself.",
+    `Route-level expected effects: ${routeEffects.join(", ")}.`,
+    "Discovered WorkUnits:",
+    unitSummary,
+  ].join("\n");
 }
 
 function taskTitle(task: string): string {

@@ -1,6 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Editor, Key, matchesKey, truncateToWidth, visibleWidth, type Component, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
 import type { ArtifactStore, InterviewDecisionInput } from "../artifacts/artifacts.ts";
+import { compactText } from "../utils/text.ts";
 
 export interface InterviewChoiceInput {
   label: string;
@@ -107,9 +108,9 @@ export function formatInterviewResult(result: InterviewResult): string {
   const lines = [
     `chalin_interview ${result.status}`,
     `artifact: ${result.featureId}`,
-    `reason: ${compact(result.reason, 120)}`,
+    `reason: ${compactText(result.reason, 120)}`,
     result.answers.length ? `answers (${result.answers.length}):` : "answers: none",
-    ...result.answers.map((answer) => `- ${answer.questionId}: ${compact(answer.answer, 130)}${answer.custom ? " (custom)" : answer.recommended ? " (recommended)" : ""}`),
+    ...result.answers.map((answer) => `- ${answer.questionId}: ${compactText(answer.answer, 130)}${answer.custom ? " (custom)" : answer.recommended ? " (recommended)" : ""}`),
     result.status === "answered" ? "next: continue with these answers as planning context." : "next: ask the user directly before running subagents.",
   ];
   return lines.join("\n");
@@ -148,7 +149,7 @@ async function answerFromSelectedOption(ctx: ExtensionContext, question: Intervi
     return { questionId: question.id ?? `q${index + 1}`, question: question.question, answer: "Not sure", choiceLabel: selected, custom: false, recommended: false };
   }
   if (selected === CUSTOM_OPTION) {
-    const custom = await ctx.ui.input(compact(question.question, 72), "Type your answer...");
+  const custom = await ctx.ui.input(compactText(question.question, 72), "Type your answer...");
     if (!custom?.trim()) return undefined;
     return { questionId: question.id ?? `q${index + 1}`, question: question.question, answer: custom.trim(), custom: true, recommended: false };
   }
@@ -276,7 +277,7 @@ class InterviewBatchOverlay implements Component {
   private renderQuestionPanel(lines: string[], width: number, question: InterviewQuestionInput, questionIndex: number): void {
     const id = question.id ?? `q${questionIndex + 1}`;
     const answer = this.answers.get(id);
-    lines.push(` ${this.theme.fg("muted", `Question ${questionIndex + 1}/${this.questions.length}`)} ${this.theme.fg("accent", compact(id, 18))}`);
+      lines.push(` ${this.theme.fg("muted", `Question ${questionIndex + 1}/${this.questions.length}`)} ${this.theme.fg("accent", compactText(id, 18))}`);
     for (const line of wrapPlainText(question.question, Math.max(18, width - 2))) {
       lines.push(` ${this.theme.bold(line)}`);
     }
@@ -320,7 +321,7 @@ class InterviewBatchOverlay implements Component {
       const id = question.id ?? `q${index + 1}`;
       const answer = this.answers.get(id);
       const box = answer ? this.theme.fg("success", "■") : this.theme.fg("muted", "□");
-      lines.push(truncateToWidth(` ${box} ${this.theme.fg("muted", compact(id, 18))}`, width, "…", false));
+      lines.push(truncateToWidth(` ${box} ${this.theme.fg("muted", compactText(id, 18))}`, width, "…", false));
       const value = answer ? this.theme.fg("text", this.answerLabel(answer, Math.max(16, width - 6))) : this.theme.fg("warning", "pending");
       lines.push(truncateToWidth(`   ${this.theme.fg("muted", "→")} ${value}`, width, "…", false));
     }
@@ -443,7 +444,7 @@ class InterviewBatchOverlay implements Component {
       const id = question.id ?? `q${index + 1}`;
       const answered = this.answers.has(id);
       const box = answered ? "■" : "□";
-      const raw = ` ${box} ${compact(id, 14)} `;
+      const raw = ` ${box} ${compactText(id, 14)} `;
       const styled = this.focusIndex === index
         ? this.theme.bg("selectedBg", this.theme.fg("text", raw))
         : this.theme.fg(answered ? "success" : "muted", raw);
@@ -528,7 +529,7 @@ function normalizeQuestions(raw: InterviewQuestionInput[], batchSize: number): I
     .slice(0, max)
     .map((question, index) => ({
       id: question.id?.trim() || `q${index + 1}`,
-      question: compact(question.question, 160),
+      question: compactText(question.question, 160),
       allowCustom: question.allowCustom !== false,
       choices: normalizeChoices(question.choices),
     }));
@@ -538,7 +539,7 @@ function normalizeChoices(choices: InterviewChoiceInput[]): InterviewChoiceInput
   const normalized = choices
     .filter((choice) => choice.label.trim().length > 0)
     .slice(0, 5)
-    .map((choice) => ({ ...choice, label: compact(choice.label, 72), value: choice.value ? compact(choice.value, 180) : undefined }));
+    .map((choice) => ({ ...choice, label: compactText(choice.label, 72), value: choice.value ? compactText(choice.value, 180) : undefined }));
   if (normalized.some((choice) => choice.recommended)) return normalized;
   return normalized.map((choice, index) => ({ ...choice, recommended: index === 0 }));
 }
@@ -576,14 +577,14 @@ function formatChoice(choice: InterviewChoiceInput, recommended: InterviewChoice
 }
 
 function formatQuestionTitle(current: number, total: number, question: string): string {
-  return `pi-chalin interview ${current}/${total} · ${compact(question, 70)}`;
+  return `pi-chalin interview ${current}/${total} · ${compactText(question, 70)}`;
 }
 
 function formatInterviewRequest(task: string, reason: string, questions: InterviewQuestionInput[]): string {
   return [
     "pi-chalin interview required",
-    `task: ${compact(task, 140)}`,
-    `reason: ${compact(reason, 140)}`,
+    `task: ${compactText(task, 140)}`,
+    `reason: ${compactText(reason, 140)}`,
     ...questions.map((question, index) => `${index + 1}. ${question.question}\n   ${question.choices.map((choice) => `- ${choice.label}${choice.recommended ? " (recommended)" : ""}`).join("\n   ")}`),
   ].join("\n");
 }
@@ -612,10 +613,5 @@ async function persistInterview(store: ArtifactStore, result: InterviewResult) {
 }
 
 function safeFeatureId(value: string): string {
-  return compact(value, 80).toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "interview";
-}
-
-function compact(text: string, max: number): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  return normalized.length <= max ? normalized : `${normalized.slice(0, max - 1)}…`;
+  return compactText(value, 80).toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "interview";
 }

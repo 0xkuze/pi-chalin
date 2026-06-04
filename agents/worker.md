@@ -5,7 +5,6 @@ concern: implementation
 capabilities: inspect-files, search-files, run-safe-bash, validate, edit-files, write-new-files, memory-read, memory-write, coordinate
 model: inherit
 thinking: high
-budget-tool-calls: 80
 tools: read, grep, find, ls, bash, edit, write
 memory-read: true
 memory-write: candidate

@@ -241,7 +241,6 @@ test("subagent memory tools honor project-configured Engram provider", async () 
   }));
   const policy = createChildToolPolicy({
     cwd,
-    maxToolCalls: 6,
     agentName: "worker",
     allowedTools: ["chalin_memory_search", "chalin_memory_write", "chalin_memory_revise"],
   });

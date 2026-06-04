@@ -9,11 +9,6 @@ concerns:
 capabilities:
   - validate
 activation: auto
-triggers:
-  - implementation review
-  - final review
-  - changed files
-  - mutation
 risk: medium
 maxActiveWith:
   - bugfix-tight-loop

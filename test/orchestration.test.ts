@@ -27,3 +27,11 @@ test("orchestrator forbids web as a substitute for repository evidence", () => {
   assert.match(prompt, /delegate a read-only `chalin_route` instead/);
   assert.match(prompt, /Do not call `chalin_route` and `chalin_web_search` in the same assistant turn/);
 });
+
+test("orchestrator delegates intent instead of selecting topology or subagents", () => {
+  const prompt = buildChalinOrchestratorSystemPrompt(agents);
+
+  assert.match(prompt, /pass the task intent/i);
+  assert.doesNotMatch(prompt, /Use `topology=sequential`/);
+  assert.doesNotMatch(prompt, /Pick subagents/);
+});

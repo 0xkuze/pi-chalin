@@ -1,6 +1,4 @@
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
+export { isRecord } from "../utils/guards.ts";
 
 export function truncateText(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;

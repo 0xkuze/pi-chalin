@@ -53,10 +53,6 @@ export interface AgentMemoryPolicy {
   categories: string[];
 }
 
-export interface AgentBudgetMetadata {
-  baseToolCalls?: number;
-}
-
 export interface AgentDefinition {
   name: string;
   scope: AgentScope;
@@ -65,7 +61,6 @@ export interface AgentDefinition {
   description: string;
   model: "inherit" | string;
   thinking?: AgentThinkingLevel;
-  budget?: AgentBudgetMetadata;
   tools: string[];
   memory: AgentMemoryPolicy;
   systemPrompt: string;
@@ -81,7 +76,6 @@ export interface SkillDefinition {
   concerns: AgentConcern[];
   capabilities: AgentCapability[];
   activation: SkillActivation;
-  triggers: string[];
   risk: RouteRisk;
   maxActiveWith: string[];
   allowedTools: string[];
@@ -108,6 +102,12 @@ export interface SkillDefinition {
 export interface ResolvedSkill {
   skill: SkillDefinition;
   reason: string;
+}
+
+export interface SkillSelectionDecision {
+  reference: string;
+  reason: string;
+  confidence?: number;
 }
 
 export interface RejectedSkill {
@@ -146,6 +146,7 @@ export interface AgentStep {
   task: string;
   budget?: ToolBudgetProfile;
   files?: string[];
+  expectedEffects?: RouteExpectedEffect[];
 }
 
 export interface AgentStage {
@@ -182,8 +183,8 @@ export interface ApprovalDecision {
 
 export type RunStatus = "pending" | "running" | "complete" | "failed" | "paused" | "stale-repaired";
 export type RunStepStatus = "pending" | "running" | "complete" | "failed" | "paused" | "checkpointed" | "skipped";
-export type RunStepPauseReason = "aborted" | "idle-stall";
-export type CheckpointKind = "budget-cap" | "needs-continuation" | "low-signal" | "awaiting-review" | "split-recommended" | "handoff-contract";
+export type RunStepPauseReason = "aborted" | "idle-stall" | "awaiting-approval" | "human-rejected";
+export type CheckpointKind = "needs-continuation" | "low-signal" | "awaiting-review" | "split-recommended" | "handoff-contract";
 export type CheckpointContinuation = "continue" | "review" | "split" | "resume";
 
 export interface CheckpointInfo {
@@ -424,7 +425,6 @@ export interface TokenUsageSummary {
 }
 
 export type BudgetCapName =
-  | "max_tool_calls"
   | "max_seconds"
   | "max_usd"
   | "max_turns"
@@ -447,14 +447,37 @@ export interface BudgetCapHit {
   reason?: string;
 }
 
+export interface ToolApprovalRequest {
+  id: string;
+  toolName: string;
+  reason: string;
+  risk: "medium" | "high" | "critical";
+  actionDescription: string;
+  semanticDescription: string;
+  paramsSummary: string;
+  paramsFingerprint: string;
+  createdAt: string;
+}
+
+export interface ToolApprovalDecision {
+  requestId: string;
+  decision: "approved" | "rejected";
+  approvedAction: string;
+  retriedAction?: string;
+  equivalenceReason?: string;
+  decidedBy?: string;
+  decidedAt: string;
+  consumed?: boolean;
+}
+
 export interface RunStepMetrics {
   durationMs: number;
   usage: TokenUsageSummary;
   toolCalls: number;
-  maxToolCalls?: number;
   toolCallsByName: Record<string, number>;
   policyViolations?: string[];
-  budgetStopCount?: number;
+  approvalRequests?: ToolApprovalRequest[];
+  approvalDecisions?: ToolApprovalDecision[];
   budgetCapHits?: BudgetCapHit[];
   duplicateReadCount?: number;
   crossStepDuplicateReadCount?: number;
@@ -529,7 +552,6 @@ export interface RunStepState {
   repairKind?: RunStepRepairKind;
   checkpoint?: CheckpointInfo;
   budget?: ToolBudgetProfile;
-  maxToolCalls?: number;
   startedAt?: string;
   endedAt?: string;
   model?: string;
@@ -545,6 +567,26 @@ export interface RunStepState {
   suggestedSkills?: ResolvedSkill[];
   rejectedSkills?: RejectedSkill[];
   skillTraceEvents?: SkillTraceEvent[];
+  nestedRuns?: NestedRunTrace[];
+}
+
+export interface NestedRunStepTrace {
+  id: string;
+  agent: string;
+  task?: string;
+  status?: RunStepStatus;
+  workUnitId?: string;
+  error?: string;
+  skipReason?: string;
+}
+
+export interface NestedRunTrace {
+  id: string;
+  status: RunStatus;
+  rootTask?: string;
+  steps: NestedRunStepTrace[];
+  workUnits?: WorkUnit[];
+  updatedAt?: string;
 }
 
 export interface RunState {
@@ -584,7 +626,6 @@ export interface RunState {
     toolCalls: number;
     toolCallsByName: Record<string, number>;
     policyViolations?: string[];
-    budgetStopCount?: number;
     budgetCapHits?: BudgetCapHit[];
     duplicateReadCount?: number;
     crossStepDuplicateReadCount?: number;

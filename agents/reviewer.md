@@ -5,7 +5,6 @@ concern: review
 capabilities: inspect-files, search-files, run-safe-bash, validate, memory-read, memory-write, external-context
 model: inherit
 thinking: high
-budget-tool-calls: 50
 tools: read, grep, find, ls, bash
 memory-read: true
 memory-write: candidate

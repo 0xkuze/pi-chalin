@@ -13,6 +13,7 @@ import { getLatestRun, getLiveStepSession } from "../runtime/state.ts";
 import type { AgentDefinition, ApprovalDecision, BudgetCapHit, ChalinRuntimeState, MemoryRecord, RouteDecision, RunState, RunStepState, RunStepStatus } from "../domain/schemas.ts";
 import { isUsableStepStatus } from "../runtime/status.ts";
 import { setChalinStatus } from "./ui-status.ts";
+import { errorMessage, isRecord } from "../utils/guards.ts";
 import { formatWebFetchAudit, type WebFetchAuditEntry } from "../webfetch/webfetch.ts";
 
 const MEMORY_OVERLAY_TITLE = "Memory";
@@ -543,6 +544,7 @@ export async function openArtifactPanel(ctx: ExtensionContext, store: ArtifactSt
     "Checkpoints",
     "Validation contracts",
     "Interview decisions",
+    "Action approvals",
     "Worker skills",
     "Close",
   ]);
@@ -560,6 +562,10 @@ export async function openArtifactPanel(ctx: ExtensionContext, store: ArtifactSt
   }
   if (action === "Interview decisions") {
     ctx.ui.notify(formatArtifactInterviews(feature), "info");
+    return;
+  }
+  if (action === "Action approvals") {
+    ctx.ui.notify(formatArtifactApprovals(feature), "info");
     return;
   }
   if (action === "Worker skills") {
@@ -599,6 +605,17 @@ function formatArtifactInterviews(feature: FeatureArtifactState): string {
     `◆ ${decision.status} · ${truncateUi(decision.reason, 120)}`,
     ...decision.answers.map((answer) => `  - ${truncateUi(answer.question, 80)} → ${truncateUi(answer.answer, 120)}${answer.custom ? " (custom)" : answer.recommended ? " (recommended)" : ""}`),
   ].join("\n")).join("\n");
+}
+
+function formatArtifactApprovals(feature: FeatureArtifactState): string {
+  if (feature.approvalDecisions.length === 0) return "No action approval decisions recorded for this artifact.";
+  return feature.approvalDecisions.slice(-8).map((decision) => [
+    `◆ ${decision.decision} · ${decision.risk} · ${decision.toolName}`,
+    `  action: ${truncateUi(decision.approvedAction, 160)}`,
+    decision.retriedAction ? `  retry: ${truncateUi(decision.retriedAction, 160)}` : undefined,
+    decision.equivalenceReason ? `  equivalence: ${truncateUi(decision.equivalenceReason, 160)}` : undefined,
+    `  reason: ${truncateUi(decision.reason, 160)}`,
+  ].filter((line): line is string => Boolean(line)).join("\n")).join("\n");
 }
 
 function formatArtifactSkills(feature: FeatureArtifactState): string {
@@ -984,7 +1001,7 @@ class MemoryReviewOverlay implements Component, Focusable {
       header,
       ...this.renderStatusFilterRow(filter, innerWidth),
       ` ${renderMemorySearchInput(this.query, this.theme, Math.max(20, innerWidth - 2))}`,
-      ` ${this.theme.fg("dim", memoryShortcutLine(selected, this.query.length > 0, this.filters.length > 1))}`,
+      ` ${this.theme.fg("dim", memoryShortcutLine(this.query.length > 0, this.filters.length > 1))}`,
       "",
       ...body,
     ]);
@@ -1168,7 +1185,7 @@ function renderMemoryConfirmationDialog(theme: Theme, width: number, action: Mem
   return centerRenderedBlock(renderMemoryInnerBox(theme, dialogWidth, title, rows), width);
 }
 
-function memoryShortcutLine(record: MemoryRecord | undefined, hasQuery: boolean, hasStatusFilter: boolean): string {
+function memoryShortcutLine(hasQuery: boolean, hasStatusFilter: boolean): string {
   const clear = hasQuery ? " · Ctrl+U" : "";
   const status = hasStatusFilter ? " · Tab status" : "";
   return `Enter open/action${status} · Search cat/source/status:value${clear} · Esc`;
@@ -1537,7 +1554,6 @@ export function formatRunInspection(run: RunState | undefined, options: { stepId
 export function summarizeRuntimeGuards(run: RunState | undefined): string[] {
   if (!run) return ["guards: no run yet"];
   const policyViolations = run.metrics?.policyViolations?.length ?? sumStepMetric(run, (step) => step.metrics?.policyViolations?.length ?? 0);
-  const budgetStops = run.metrics?.budgetStopCount ?? sumStepMetric(run, (step) => step.metrics?.budgetStopCount ?? 0);
   const budgetHits = run.metrics?.budgetCapHits ?? run.steps.flatMap((step) => step.metrics?.budgetCapHits ?? []);
   const duplicateReads = run.metrics?.duplicateReadCount ?? sumStepMetric(run, (step) => step.metrics?.duplicateReadCount ?? 0);
   const crossStepDuplicateReads = run.metrics?.crossStepDuplicateReadCount ?? sumStepMetric(run, (step) => step.metrics?.crossStepDuplicateReadCount ?? 0);
@@ -1548,7 +1564,7 @@ export function summarizeRuntimeGuards(run: RunState | undefined): string[] {
   const guardHealth = policyViolations > 0 || /conflict|unavailable|failed/i.test(worktreeState) || modelFallbacks > 0
     ? "attention"
     : "ok";
-  const budgetHealth = summarizeBudgetHealth(budgetHits, budgetStops);
+  const budgetHealth = summarizeBudgetHealth(budgetHits);
   return [
     `guards: ${guardHealth}`,
     `budget: ${budgetHealth}`,
@@ -1560,10 +1576,10 @@ export function summarizeRuntimeGuards(run: RunState | undefined): string[] {
   ].filter((line): line is string => Boolean(line));
 }
 
-function summarizeBudgetHealth(hits: BudgetCapHit[] | undefined, stops: number): string {
+function summarizeBudgetHealth(hits: BudgetCapHit[] | undefined): string {
   const hard = (hits ?? []).filter((hit) => hit.severity === "hard");
   const soft = (hits ?? []).filter((hit) => hit.severity === "soft");
-  if (hard.length > 0 || stops > 0) return `limit reached ${formatBudgetHit(hard[0] ?? soft[0])}${stops > 0 ? ` (${stops} stops)` : ""}`;
+  if (hard.length > 0) return `checkpoint ${formatBudgetHit(hard[0])}`;
   if (soft.length > 0) return `warning ${formatBudgetHit(soft[0])}`;
   return "ok";
 }
@@ -1986,7 +2002,7 @@ function formatStepDiagnostics(step: RunStepState): string {
     step.modelResolution ? `model: ${step.modelResolution.selected}\nthinking: ${step.thinkingLevel ?? "inherit"}\n${step.modelResolution.attempts.map((attempt) => `- ${attempt.source}: ${attempt.ref ?? "inherit"} -> ${attempt.status}${attempt.reason ? ` (${attempt.reason})` : ""}`).join("\n")}` : undefined,
     step.activeSkills?.length ? `active skills:\n${step.activeSkills.map((item) => `- ${item.skill.qualifiedName}: ${item.reason}`).join("\n")}` : undefined,
     step.suggestedSkills?.length ? `suggested skills:\n${step.suggestedSkills.map((item) => `- ${item.skill.qualifiedName}: ${item.reason}`).join("\n")}` : undefined,
-    step.metrics ? `tools: ${step.metrics.toolCalls}/${step.maxToolCalls ?? "?"}\npolicy violations: ${step.metrics.policyViolations?.length ?? 0}\nbudget: ${summarizeBudgetHealth(step.metrics.budgetCapHits, step.metrics.budgetStopCount ?? 0)}\nfiles read: ${step.metrics.filesRead?.join(", ") ?? "none"}` : undefined,
+    step.metrics ? `tools: ${step.metrics.toolCalls}\npolicy violations: ${step.metrics.policyViolations?.length ?? 0}\nbudget: ${summarizeBudgetHealth(step.metrics.budgetCapHits)}\nfiles read: ${step.metrics.filesRead?.join(", ") ?? "none"}` : undefined,
     step.error ? `error: ${step.error}` : undefined,
   ].filter(Boolean).join("\n\n");
 }
@@ -2008,14 +2024,6 @@ function centerRenderedBlock(lines: string[], width: number): string[] {
     const left = Math.max(0, Math.floor((width - visibleWidth(line)) / 2));
     return padAnsi(`${" ".repeat(left)}${line}`, width);
   });
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
 }
 
 function summarizeGuardHealth(run: RunState | undefined): string {
@@ -2080,7 +2088,7 @@ function formatActivityStep(step: RunState["steps"][number] | undefined): string
     step.output?.handoff,
     step.output?.reviewerVerdict ? `reviewerVerdict: ${step.output.reviewerVerdict.verdict}\nfindings: ${step.output.reviewerVerdict.blockingFindings.join("; ") || "none"}\nmissing: ${step.output.reviewerVerdict.missingCoverage.join("; ") || "none"}\nrisks: ${step.output.reviewerVerdict.residualRisks?.join("; ") || "none"}\nevidence: ${step.output.reviewerVerdict.evidence.join("; ") || "none"}` : undefined,
     step.modelResolution ? `model: ${step.modelResolution.selected}\nthinking: ${step.thinkingLevel ?? "inherit"}\n${step.modelResolution.attempts.map((attempt) => `- ${attempt.source}: ${attempt.ref ?? "inherit"} → ${attempt.status}${attempt.reason ? ` (${attempt.reason})` : ""}`).join("\n")}` : undefined,
-    step.metrics ? `tools: ${step.metrics.toolCalls}/${step.maxToolCalls ?? "?"} · policy violations: ${step.metrics.policyViolations?.length ?? 0} · budget: ${summarizeBudgetHealth(step.metrics.budgetCapHits, step.metrics.budgetStopCount ?? 0)}` : undefined,
+    step.metrics ? `tools: ${step.metrics.toolCalls} · policy violations: ${step.metrics.policyViolations?.length ?? 0} · budget: ${summarizeBudgetHealth(step.metrics.budgetCapHits)}` : undefined,
     step.error ? `error: ${step.error}` : undefined,
   ].filter(Boolean).join("\n");
 }

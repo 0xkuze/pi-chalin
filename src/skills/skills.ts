@@ -5,6 +5,7 @@ import { Effect } from "effect";
 import { DEFAULT_CONFIG, type ChalinConfig } from "../config/config.ts";
 import { createSkillTraceEvent, type SkillTraceEvent } from "../observability/observability.ts";
 import { resolveChalinPaths, type ChalinPathsOptions } from "../config/paths.ts";
+import { errorMessage, isRecord } from "../utils/guards.ts";
 import {
   isAgentCapability,
   isAgentConcern,
@@ -21,7 +22,7 @@ import {
   type ResolvedSkill,
   type RouteKind,
   type RouteRisk,
-  type SkillActivation,
+  type SkillSelectionDecision,
   type SkillDefinition,
   type SkillLifecycle,
   type SkillScope,
@@ -96,9 +97,9 @@ export interface ResolveSkillsForStepOptions {
   routeKind?: RouteKind;
   risk?: RouteRisk;
   featureId?: string;
-  maxActive?: number;
   explicitSkills?: string[];
   disabledSkills?: string[];
+  selectedSkills?: SkillSelectionDecision[];
 }
 
 export interface SkillLifecycleReconcileResult {
@@ -107,22 +108,6 @@ export interface SkillLifecycleReconcileResult {
 }
 
 const SCOPE_RANK: Record<SkillScope, number> = { "on-demand": 0, project: 1, user: 2, "built-in": 3 };
-const COVERT_ACTION_PATTERNS = [
-  /\b(?:do not|don't|never)\s+(?:tell|mention|disclose|reveal)\b[^\n]{0,120}\b(?:user|reviewer|maintainer|owner|operator)\b/i,
-];
-const AUTHORITY_BYPASS_PATTERNS = [
-  /\b(?:ignore|override|bypass|disable)\b[^\n]{0,80}\b(?:previous|prior|system|developer|user|repository|AGENTS\.md|instructions?|rules?|polic(?:y|ies)|requirements?|sandbox|approvals?|permissions?)\b/i,
-  /\b(?:skip|omit|bypass|disable)\b[^\n]{0,80}\b(?:reviewer|review gate|review step|approval gate|safety check|sandbox)\b/i,
-];
-const DANGEROUS_ACTION_PATTERNS = [
-  /\b(?:read|cat|print|dump|copy|upload|send|post|export|leak|exfiltrate)\b[^\n]{0,120}\b(?:\.env|secrets?|private keys?|ssh keys?|api keys?|tokens?|credentials?|passwords?)\b/i,
-  /\b(?:curl|wget|httpie|nc|netcat|scp|rsync)\b[^\n]{0,160}\b(?:\.env|secrets?|private keys?|api keys?|tokens?|credentials?|passwords?)\b/i,
-  /\brm\s+-[^\n]*r[^\n]*f\b/i,
-  /\bgit\s+(?:reset\s+--hard|clean\s+-[^\n]*[fdx])\b/i,
-  /\b(?:mkfs(?:\.[a-z0-9]+)?|dd\s+if=.+\s+of=|chmod\s+-R\s+777|chown\s+-R\s+[^\n]+\s+\/)\b/i,
-];
-const DEFENSIVE_SKILL_AUDIT_LINE =
-  /^(?:[-*]\s*)?(?:block|detect|scan|audit|flag|reject|prevent|avoid|check for|watch for|treat|never|must not|should not|do not|don't)\b/i;
 const SECRET_PATTERNS = [
   /\b(?:AWS|GOOGLE|OPENAI|ANTHROPIC|GITHUB|NPM)_[A-Z0-9_]*(?:SECRET|TOKEN|KEY)[A-Z0-9_]*\s*=\s*[A-Za-z0-9_./+=-]{12,}/,
   /\b(?:sk|ghp|gho|github_pat)_[A-Za-z0-9_]{16,}\b/,
@@ -228,6 +213,7 @@ export function resolveSkillsForStep(options: ResolveSkillsForStepOptions): {
   const candidates: ResolvedSkill[] = [];
   const explicit = new Set(options.explicitSkills ?? []);
   const disabled = new Set((options.disabledSkills ?? []).flatMap((reference) => disabledReferences(reference)));
+  const selected = selectedSkillDecisions(options.selectedSkills ?? []);
   const events: SkillTraceEvent[] = [createSkillTraceEvent({
     type: "skill.match.started",
     agent: options.agent?.name,
@@ -262,10 +248,11 @@ export function resolveSkillsForStep(options: ResolveSkillsForStepOptions): {
       events.push(skillEvent("skill.activation.rejected", skill, rejection.reason, options, rejection.policy));
       continue;
     }
-    const match = matchSkill(skill, options.task, explicit.has(skill.name) || explicit.has(skill.qualifiedName));
-    if (!match.matched) {
-      rejected.push({ skill, reason: match.reason });
-      events.push(skillEvent("skill.activation.rejected", skill, match.reason, options));
+    const selection = selectedSkillDecision(skill, selected);
+    if (!isExplicit && !selection) {
+      const reason = "not selected by semantic skill selector";
+      rejected.push({ skill, reason });
+      events.push(skillEvent("skill.activation.rejected", skill, reason, options));
       continue;
     }
     const governance = rejectionReason(skill, options, config, isExplicit, true);
@@ -274,13 +261,13 @@ export function resolveSkillsForStep(options: ResolveSkillsForStepOptions): {
       events.push(skillEvent("skill.activation.rejected", skill, governance.reason, options, governance.policy));
       continue;
     }
-    const resolved = { skill: loadSkillBody(skill), reason: match.reason };
+    const resolved = { skill: loadSkillBody(skill), reason: isExplicit ? "explicit skill request" : selection?.reason ?? "semantic skill selector" };
     if (skill.activation === "manual" && !isExplicit) {
       suggested.push(resolved);
-      events.push(skillEvent("skill.match.result", skill, `suggested: ${match.reason}`, options));
+      events.push(skillEvent("skill.match.result", skill, `suggested: ${resolved.reason}`, options));
     } else if (skill.activation === "suggested") {
       suggested.push(resolved);
-      events.push(skillEvent("skill.match.result", skill, `suggested: ${match.reason}`, options));
+      events.push(skillEvent("skill.match.result", skill, `suggested: ${resolved.reason}`, options));
     } else {
       candidates.push(resolved);
     }
@@ -288,13 +275,7 @@ export function resolveSkillsForStep(options: ResolveSkillsForStepOptions): {
 
   const withoutShadowed = dropShadowed(candidates);
   const active: ResolvedSkill[] = [];
-  const cap = options.maxActive ?? maxActiveForRoute(options.routeKind, config);
   for (const item of withoutShadowed) {
-    if (active.length >= cap) {
-      rejected.push({ skill: item.skill, reason: `composition cap ${cap} reached` });
-      events.push(skillEvent("skill.activation.rejected", item.skill, `composition cap ${cap} reached`, options));
-      continue;
-    }
     const conflict = active.find((current) => !canCoexist(current.skill, item.skill));
     if (conflict) {
       rejected.push({ skill: item.skill, reason: `conflicts with active skill ${conflict.skill.qualifiedName}` });
@@ -332,13 +313,7 @@ export function auditSkill(skill: SkillDefinition, config: ChalinConfig = DEFAUL
   if (!auditedSkill.description || auditedSkill.description.length < 12) findings.push(error("weak-description", "Skill description must be specific."));
   if (!auditedSkill.body.trim()) findings.push(error("empty-body", "Skill body must not be empty."));
   if (auditedSkill.trust === "blocked" || auditedSkill.lifecycle === "blocked") findings.push(error("blocked-skill", "Skill is blocked by metadata."));
-  if (auditedSkill.triggers.some((trigger) => trigger.trim().length < 3 || /^(code|task|file|project|work|todo)$/i.test(trigger.trim()))) {
-    findings.push(warn("broad-trigger", "Triggers should be specific enough to avoid overmatching."));
-  }
   const text = `${serializeSkillMetadata(auditedSkill)}\n${auditedSkill.body}`;
-  const unsafeInstruction = unsafeSkillInstructionFinding(text);
-  if (unsafeInstruction === "prompt-injection") findings.push(error("prompt-injection", "Skill tries to alter instruction hierarchy or reviewer gates."));
-  if (unsafeInstruction === "unsafe-action") findings.push(error("unsafe-action", "Skill instructs unsafe secret access, external leakage, or destructive commands."));
   if (hasSecretLikeValue(text)) findings.push(error("secret", "Skill appears to contain a secret or credential-like value."));
   findings.push(...auditSkillResources(auditedSkill));
   if (auditedSkill.scripts !== "disabled" && !config.skills.allowSkillScripts) findings.push(error("scripts-disabled", "Skill scripts are disabled by configuration."));
@@ -608,7 +583,6 @@ export function formatSkillShow(skill: SkillDefinition, audit: SkillAuditResult 
     `extends: ${shownSkill.extends.join(", ") || "none"}`,
     `concerns: ${shownSkill.concerns.join(", ") || "any"}`,
     `capabilities: ${shownSkill.capabilities.join(", ") || "any"}`,
-    `triggers: ${shownSkill.triggers.join(", ") || "none"}`,
     `tools: allow ${shownSkill.allowedTools.join(", ") || "base"}; deny ${shownSkill.deniedTools.join(", ") || "none"}`,
     `scripts: ${shownSkill.scripts}`,
     `resources: ${shownSkill.resources.join(", ") || "none"}`,
@@ -676,22 +650,6 @@ function freshnessRejection(skill: SkillDefinition, config: ChalinConfig): { rea
   return undefined;
 }
 
-function matchSkill(skill: SkillDefinition, task: string, explicit: boolean): { matched: boolean; reason: string } {
-  if (explicit) return { matched: true, reason: "explicit skill request" };
-  const normalizedTask = task.toLowerCase();
-  const matchedTrigger = skill.triggers.find((trigger) => normalizedTask.includes(trigger.toLowerCase()));
-  if (matchedTrigger) return { matched: true, reason: `trigger:${matchedTrigger}` };
-  const words = skill.name.split(/[-_\s]+/).filter((word) => word.length >= 4);
-  if (words.length > 0 && words.every((word) => normalizedTask.includes(word.toLowerCase()))) return { matched: true, reason: `name:${skill.name}` };
-  return { matched: false, reason: "no trigger matched" };
-}
-
-function maxActiveForRoute(routeKind: RouteKind | undefined, config: ChalinConfig): number {
-  if (routeKind === "bypass") return config.skills.maxActiveInline;
-  if (routeKind === "multi-agent-dag" || routeKind === "multi-agent-sequential") return config.skills.maxActivePerStep;
-  return config.skills.maxActiveInline;
-}
-
 function canCoexist(a: SkillDefinition, b: SkillDefinition): boolean {
   if (a.maxActiveWith.length === 0 && b.maxActiveWith.length === 0) return true;
   return a.maxActiveWith.includes(b.name) || a.maxActiveWith.includes(b.qualifiedName) || b.maxActiveWith.includes(a.name) || b.maxActiveWith.includes(a.qualifiedName);
@@ -714,6 +672,20 @@ function uniqueSkills(skills: SkillDefinition[]): SkillDefinition[] {
     result.push(skill);
   }
   return result;
+}
+
+function selectedSkillDecisions(decisions: readonly SkillSelectionDecision[]): Map<string, SkillSelectionDecision> {
+  const selected = new Map<string, SkillSelectionDecision>();
+  for (const decision of decisions) {
+    const reason = decision.reason.trim();
+    if (!reason) continue;
+    for (const key of skillReferenceKeys(decision.reference)) selected.set(key, { ...decision, reason });
+  }
+  return selected;
+}
+
+function selectedSkillDecision(skill: SkillDefinition, selected: Map<string, SkillSelectionDecision>): SkillSelectionDecision | undefined {
+  return selected.get(skill.qualifiedName.toLowerCase()) ?? selected.get(skill.name.toLowerCase());
 }
 
 function loadSkillDir(
@@ -796,7 +768,6 @@ function loadSkillFile(filePath: string, scope: SkillScope, featureId?: string):
     concerns: parseConcerns(parsed.frontmatter.concerns, diagnostics),
     capabilities: parseCapabilities(parsed.frontmatter.capabilities, diagnostics),
     activation: enumValue(stringValue(parsed.frontmatter.activation), isSkillActivation, effectiveScope === "on-demand" ? "manual" : "suggested"),
-    triggers: parseList(parsed.frontmatter.triggers, []),
     risk: parseRisk(stringValue(parsed.frontmatter.risk), diagnostics),
     maxActiveWith: parseList(parsed.frontmatter.maxActiveWith ?? parsed.frontmatter["max-active-with"], []),
     allowedTools: parseList(parsed.frontmatter.allowedTools ?? parsed.frontmatter["allowed-tools"], []),
@@ -909,7 +880,6 @@ function writeSkillFile(filePath: string, skill: SkillDefinition, actor?: string
     listYaml("concerns", skill.concerns),
     listYaml("capabilities", skill.capabilities),
     `activation: ${skill.activation}`,
-    listYaml("triggers", skill.triggers),
     `risk: ${skill.risk}`,
     listYaml("maxActiveWith", skill.maxActiveWith),
     listYaml("allowedTools", skill.allowedTools),
@@ -999,9 +969,6 @@ function auditSkillResources(skill: SkillDefinition): SkillAuditFinding[] {
       findings.push(warn("large-resource", `Skill resource '${resource}' is large; keep resources compact or split reviewed references.`));
       continue;
     }
-    const unsafeResourceInstruction = unsafeSkillInstructionFinding(content);
-    if (unsafeResourceInstruction === "prompt-injection") findings.push(error("resource-prompt-injection", `Skill resource '${resource}' contains instruction-hierarchy override language.`));
-    if (unsafeResourceInstruction === "unsafe-action") findings.push(error("resource-unsafe-action", `Skill resource '${resource}' contains unsafe secret access, external leakage, or destructive commands.`));
     if (hasSecretLikeValue(content)) findings.push(error("resource-secret", `Skill resource '${resource}' appears to contain a secret or credential-like value.`));
   }
   return findings;
@@ -1009,24 +976,6 @@ function auditSkillResources(skill: SkillDefinition): SkillAuditFinding[] {
 
 function isAuditableTextResource(filePath: string): boolean {
   return /\.(?:md|mdx|txt|json|ya?ml|toml|csv|tsv|sh|bash|zsh|ts|tsx|js|jsx|mjs|cjs|py|rb|go|rs|java|kt|swift|sql|html|css)$/i.test(filePath);
-}
-
-function unsafeSkillInstructionFinding(text: string): "prompt-injection" | "unsafe-action" | undefined {
-  for (const line of text.split(/\r?\n/)) {
-    const finding = unsafeSkillLineFinding(line);
-    if (finding) return finding;
-  }
-  return undefined;
-}
-
-function unsafeSkillLineFinding(line: string): "prompt-injection" | "unsafe-action" | undefined {
-  const normalized = line.trim();
-  if (!normalized) return undefined;
-  if (COVERT_ACTION_PATTERNS.some((pattern) => pattern.test(normalized))) return "prompt-injection";
-  if (DEFENSIVE_SKILL_AUDIT_LINE.test(normalized)) return undefined;
-  if (AUTHORITY_BYPASS_PATTERNS.some((pattern) => pattern.test(normalized))) return "prompt-injection";
-  if (DANGEROUS_ACTION_PATTERNS.some((pattern) => pattern.test(normalized))) return "unsafe-action";
-  return undefined;
 }
 
 function hasSecretLikeValue(text: string): boolean {
@@ -1102,6 +1051,14 @@ function disabledReferences(reference: string): string[] {
   return parts.length >= 2 ? [normalized, parts.at(-1) ?? normalized] : [normalized];
 }
 
+function skillReferenceKeys(reference: string): string[] {
+  const normalized = normalizeSkillReference(reference.trim());
+  if (!normalized) return [];
+  const parts = normalized.split(":");
+  const shortName = parts.at(-1);
+  return [...new Set([normalized, shortName].filter((item): item is string => Boolean(item)).map((item) => item.toLowerCase()))];
+}
+
 function safeSkillName(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 96);
 }
@@ -1124,7 +1081,6 @@ function serializeSkillMetadata(skill: SkillDefinition): string {
   return [
     skill.name,
     skill.description,
-    skill.triggers.join("\n"),
     skill.allowedTools.join("\n"),
     skill.deniedTools.join("\n"),
   ].join("\n");
@@ -1205,18 +1161,10 @@ function stringOrUndefined(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
 function error(code: string, message: string): SkillAuditFinding {
   return { severity: "error", code, message };
 }
 
 function warn(code: string, message: string): SkillAuditFinding {
   return { severity: "warning", code, message };
-}
-
-function errorMessage(errorValue: unknown): string {
-  return errorValue instanceof Error ? errorValue.message : String(errorValue);
 }

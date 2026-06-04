@@ -1,6 +1,7 @@
 import { complete, completeSimple, StringEnum, Type, type Api, type AssistantMessage, type Context, type Model, type ProviderStreamOptions, type Tool } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { InlineNudgeKind, PolicyJudgeDecision, PolicyJudgeNextAction, SemanticPolicyJudgeRequest, SemanticPolicyJudgeResult, SemanticPolicyJudgeTrace } from "../runtime/inline-policy.ts";
+import { compactString, parseJsonObject } from "../utils/json.ts";
 
 export interface SemanticPolicyJudgeContext {
   model?: Model<Api>;
@@ -173,17 +174,6 @@ export function parseSemanticPolicyJudgeResult(message: AssistantMessage): Seman
   return result ? withSemanticPolicyJudgeTrace(result, message, "json-fallback") : undefined;
 }
 
-function parseJsonObject(text: string): Record<string, unknown> | undefined {
-  const trimmed = extractJsonObjectText(text);
-  if (!trimmed) return undefined;
-  try {
-    const parsed = JSON.parse(trimmed) as unknown;
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 export function validateSemanticPolicyJudgeResult(parsed: Record<string, unknown>): SemanticPolicyJudgeResult | undefined {
   if (Object.keys(parsed).some((key) => !SEMANTIC_POLICY_JUDGE_RESULT_KEYS.has(key))) return undefined;
   if (!isPolicyJudgeNextAction(parsed.nextAction)) return undefined;
@@ -274,13 +264,6 @@ function validateRequiredEvidence(values: unknown[]): string[] | undefined {
   return normalized;
 }
 
-function compactString(value: unknown, maxLength: number): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const normalized = value.trim().replace(/\s+/g, " ");
-  if (!normalized || normalized.length > maxLength) return undefined;
-  return normalized;
-}
-
 function isPolicyJudgeNextAction(value: unknown): value is PolicyJudgeNextAction {
   return typeof value === "string" && SEMANTIC_POLICY_JUDGE_ACTIONS.includes(value as PolicyJudgeNextAction);
 }
@@ -291,54 +274,6 @@ function isInlineNudgeKind(value: unknown): value is InlineNudgeKind {
 
 function actionStrictness(action: PolicyJudgeNextAction): number {
   return POLICY_ACTION_STRICTNESS[action];
-}
-
-function extractJsonObjectText(text: string): string | undefined {
-  const trimmed = stripMarkdownJsonFence(text);
-  if (trimmed.startsWith("{") && trimmed.endsWith("}")) return trimmed;
-  return firstBalancedJsonObject(trimmed);
-}
-
-function stripMarkdownJsonFence(text: string): string {
-  const trimmed = text.trim();
-  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  return (fenced?.[1] ?? trimmed).trim();
-}
-
-function firstBalancedJsonObject(text: string): string | undefined {
-  let start = -1;
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let index = 0; index < text.length; index += 1) {
-    const char = text[index];
-    if (start < 0) {
-      if (char === "{") {
-        start = index;
-        depth = 1;
-      }
-      continue;
-    }
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (char === "\"") {
-        inString = false;
-      }
-      continue;
-    }
-    if (char === "\"") {
-      inString = true;
-    } else if (char === "{") {
-      depth += 1;
-    } else if (char === "}") {
-      depth -= 1;
-      if (depth === 0) return text.slice(start, index + 1);
-    }
-  }
-  return undefined;
 }
 
 function semanticPolicyJudgeTimeoutMs(): number {

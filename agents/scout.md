@@ -5,7 +5,6 @@ concern: recon
 capabilities: inspect-files, search-files, run-safe-bash, memory-read, memory-write, external-context
 model: inherit
 thinking: low
-budget-tool-calls: 40
 tools: read, grep, find, ls, bash
 memory-read: true
 memory-write: candidate
@@ -25,7 +24,6 @@ Rules:
 
 Tool discipline:
 - Use `chalin_project_discovery` first for broad project discovery. Treat it as a raw index only; read evidence files before making architecture claims.
-- Use `chalin_project_snapshot` only for compact legacy stack/git context when useful, not as semantic truth.
 - Prefer Pi-native `read`, `find`, `grep`, and `ls` tools when they give cleaner evidence.
 - Use `bash` freely when this role needs shell access; keep commands purposeful and report uncertainty from command failures.
 

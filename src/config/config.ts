@@ -1,8 +1,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { Context, Effect, Layer } from "effect";
+import { Effect } from "effect";
 import { resolveChalinPaths, type ChalinPathsOptions } from "./paths.ts";
 import { isAgentThinkingLevel, riskRank, type AgentScope, type AgentThinkingLevel, type ApprovalDecision, type RouteDecision, type RouteRisk } from "../domain/schemas.ts";
+import { isRecord } from "../utils/guards.ts";
 
 export type AutonomyLevel = "low" | "balanced" | "high";
 export type ApprovalRiskThreshold = RouteRisk | "none";
@@ -19,7 +20,6 @@ export interface ChalinConfig {
     recursionGuard: boolean;
     singleWriterGuard: boolean;
     mutationExpectationGuard: boolean;
-    blockCritical: boolean;
   };
   agents: {
     modelOverrides: Record<string, string>;
@@ -41,8 +41,6 @@ export interface ChalinConfig {
   skills: {
     enabled: boolean;
     autoActivation: boolean;
-    maxActiveInline: number;
-    maxActivePerStep: number;
     allowProjectSkills: boolean;
     allowUserSkills: boolean;
     allowOnDemandSkills: boolean;
@@ -60,12 +58,6 @@ export interface LoadedChalinConfig {
   paths: ReturnType<typeof resolveChalinPaths>;
 }
 
-interface ConfigServiceShape {
-  readonly loaded: LoadedChalinConfig;
-}
-
-class ConfigService extends Context.Tag("pi-chalin/Config")<ConfigService, ConfigServiceShape>() {}
-
 export const DEFAULT_CONFIG: ChalinConfig = {
   enabled: true,
   autonomy: "balanced",
@@ -74,7 +66,6 @@ export const DEFAULT_CONFIG: ChalinConfig = {
     recursionGuard: true,
     singleWriterGuard: true,
     mutationExpectationGuard: true,
-    blockCritical: true,
   },
   agents: {
     modelOverrides: {},
@@ -99,8 +90,6 @@ export const DEFAULT_CONFIG: ChalinConfig = {
   skills: {
     enabled: true,
     autoActivation: true,
-    maxActiveInline: 1,
-    maxActivePerStep: 2,
     allowProjectSkills: true,
     allowUserSkills: true,
     allowOnDemandSkills: true,
@@ -112,16 +101,12 @@ export const DEFAULT_CONFIG: ChalinConfig = {
   },
 };
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
 function deepMerge<T>(base: T, override: unknown): T {
-  if (!isObject(base) || !isObject(override)) return override === undefined ? base : (override as T);
+  if (!isRecord(base) || !isRecord(override)) return override === undefined ? base : (override as T);
   const result: Record<string, unknown> = { ...base };
   for (const [key, value] of Object.entries(override)) {
     const current = result[key];
-    result[key] = isObject(current) && isObject(value) ? deepMerge(current, value) : value;
+    result[key] = isRecord(current) && isRecord(value) ? deepMerge(current, value) : value;
   }
   return result as T;
 }
@@ -130,7 +115,7 @@ function readJsonObject(filePath: string, diagnostics: string[]): Record<string,
   if (!fs.existsSync(filePath)) return {};
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8")) as unknown;
-    if (!isObject(parsed)) {
+    if (!isRecord(parsed)) {
       diagnostics.push(`Config '${filePath}' must contain a JSON object.`);
       return {};
     }
@@ -166,27 +151,27 @@ function coerceConfig(input: ChalinConfig, diagnostics: string[]): ChalinConfig 
     config.safety.approvalRiskThreshold = DEFAULT_APPROVAL_RISK_THRESHOLD;
   }
 
-  for (const key of ["recursionGuard", "singleWriterGuard", "mutationExpectationGuard", "blockCritical"] as const) {
+  for (const key of ["recursionGuard", "singleWriterGuard", "mutationExpectationGuard"] as const) {
     if (DEFAULT_CONFIG.safety[key] && config.safety[key] !== true) {
       diagnostics.push(`Safety non-downgrade enforced: safety.${key} cannot be disabled.`);
       config.safety[key] = true;
     }
   }
 
-  if (!isObject(config.agents.modelOverrides)) config.agents.modelOverrides = {};
-  if (!isObject(config.agents.thinkingOverrides)) config.agents.thinkingOverrides = {};
+  if (!isRecord(config.agents.modelOverrides)) config.agents.modelOverrides = {};
+  if (!isRecord(config.agents.thinkingOverrides)) config.agents.thinkingOverrides = {};
   for (const [agentRef, level] of Object.entries(config.agents.thinkingOverrides)) {
     if (typeof level !== "string" || !isAgentThinkingLevel(level)) {
       diagnostics.push(`Invalid agents.thinkingOverrides['${agentRef}']='${String(level)}'; removing override.`);
       delete config.agents.thinkingOverrides[agentRef];
     }
   }
-  if (!isObject(config.memory)) config.memory = structuredClone(DEFAULT_CONFIG.memory);
+  if (!isRecord(config.memory)) config.memory = structuredClone(DEFAULT_CONFIG.memory);
   if (!["auto", "engram", "pi-chalin"].includes(config.memory.provider)) {
     diagnostics.push(`Invalid memory.provider '${String(config.memory.provider)}'; using '${DEFAULT_CONFIG.memory.provider}'.`);
     config.memory.provider = DEFAULT_CONFIG.memory.provider;
   }
-  if (!isObject(config.memory.engram)) config.memory.engram = structuredClone(DEFAULT_CONFIG.memory.engram);
+  if (!isRecord(config.memory.engram)) config.memory.engram = structuredClone(DEFAULT_CONFIG.memory.engram);
   if (typeof config.memory.engram.baseUrl !== "string" || !config.memory.engram.baseUrl.trim()) {
     diagnostics.push(`Invalid memory.engram.baseUrl '${String(config.memory.engram.baseUrl)}'; using '${DEFAULT_CONFIG.memory.engram.baseUrl}'.`);
     config.memory.engram.baseUrl = DEFAULT_CONFIG.memory.engram.baseUrl;
@@ -215,7 +200,7 @@ function coerceConfig(input: ChalinConfig, diagnostics: string[]): ChalinConfig 
     diagnostics.push(`Invalid memory.engram.project '${String(config.memory.engram.project)}'; removing override.`);
     delete config.memory.engram.project;
   }
-  if (!isObject(config.skills)) config.skills = structuredClone(DEFAULT_CONFIG.skills);
+  if (!isRecord(config.skills)) config.skills = structuredClone(DEFAULT_CONFIG.skills);
   for (const key of [
     "enabled",
     "autoActivation",
@@ -233,8 +218,6 @@ function coerceConfig(input: ChalinConfig, diagnostics: string[]): ChalinConfig 
     }
   }
   for (const [key, min, max] of [
-    ["maxActiveInline", 0, 5],
-    ["maxActivePerStep", 0, 5],
     ["staleAfterDays", 1, 365],
   ] as const) {
     const value = config.skills[key];
@@ -250,10 +233,6 @@ function coerceConfig(input: ChalinConfig, diagnostics: string[]): ChalinConfig 
 
 export function loadEffectiveConfig(options: ChalinPathsOptions): LoadedChalinConfig {
   return Effect.runSync(loadEffectiveConfigEffect(options));
-}
-
-export function configLayer(options: ChalinPathsOptions): Layer.Layer<ConfigService> {
-  return Layer.effect(ConfigService, Effect.map(loadEffectiveConfigEffect(options), (loaded) => ({ loaded })));
 }
 
 export function loadEffectiveConfigEffect(options: ChalinPathsOptions): Effect.Effect<LoadedChalinConfig> {
@@ -315,11 +294,11 @@ export function setAgentThinkingOverride(
 
 export function approvalDecision(config: ChalinConfig, route: RouteDecision): ApprovalDecision {
   if (route.kind === "bypass") return { action: "allow", reason: "No subagent execution required." };
-  if (route.risk === "critical" && config.safety.blockCritical) {
-    return { action: "block", reason: "Critical routes are blocked by default safety policy." };
+  if (route.risk === "critical") {
+    return { action: "ask", reason: "Critical route requires explicit one-time safety approval before execution." };
   }
   if (config.safety.approvalRiskThreshold === "none") {
-    return { action: "allow", reason: "Approval prompts are disabled; critical routes remain governed by safety.blockCritical." };
+    return { action: "allow", reason: "Approval prompts are disabled for non-critical routes." };
   }
   const threshold = config.autonomy === "low" ? "low" : config.safety.approvalRiskThreshold;
   if (riskRank(route.risk) >= riskRank(threshold)) {

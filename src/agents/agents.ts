@@ -14,6 +14,7 @@ import {
   isAgentScope,
   isAgentThinkingLevel,
 } from "../domain/schemas.ts";
+import { errorMessage } from "../utils/guards.ts";
 
 interface ParsedFrontmatter {
   frontmatter: Record<string, string>;
@@ -148,7 +149,6 @@ function loadAgentFile(filePath: string, scope: AgentScope): AgentDefinition {
   const memory = parseMemoryPolicy(parsed.frontmatter, diagnostics);
   const model = (parsed.frontmatter.model || "inherit").trim() || "inherit";
   const thinking = parseThinkingLevel(parsed.frontmatter.thinking ?? parsed.frontmatter["thinking-level"], diagnostics);
-  const budget = parseBudgetMetadata(parsed.frontmatter, diagnostics);
   const tools = parseStringList(parsed.frontmatter.tools);
   const description = (parsed.frontmatter.description || `${name} agent`).trim();
 
@@ -163,24 +163,12 @@ function loadAgentFile(filePath: string, scope: AgentScope): AgentDefinition {
     description,
     model,
     thinking,
-    budget,
     tools,
     memory,
     systemPrompt: parsed.body.trim(),
     sourcePath: filePath,
     diagnostics,
   };
-}
-
-function parseBudgetMetadata(frontmatter: Record<string, string>, diagnostics: string[]): AgentDefinition["budget"] {
-  const rawBaseToolCalls = frontmatter["budget-tool-calls"] ?? frontmatter["base-tool-calls"];
-  if (rawBaseToolCalls === undefined) return undefined;
-  const baseToolCalls = Number(rawBaseToolCalls);
-  if (!Number.isFinite(baseToolCalls) || baseToolCalls <= 0 || baseToolCalls > 500) {
-    diagnostics.push(`invalid: budget-tool-calls must be a number between 1 and 500; got '${rawBaseToolCalls}'.`);
-    return undefined;
-  }
-  return { baseToolCalls: Math.floor(baseToolCalls) };
 }
 
 function parseThinkingLevel(value: string | undefined, diagnostics: string[]) {
@@ -280,8 +268,4 @@ function parseStringList(value: string | undefined): string[] {
   const trimmed = value.trim();
   const unwrapped = trimmed.startsWith("[") && trimmed.endsWith("]") ? trimmed.slice(1, -1) : trimmed;
   return unwrapped.split(",").map((item) => item.trim().replace(/^['\"]|['\"]$/g, "")).filter(Boolean);
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

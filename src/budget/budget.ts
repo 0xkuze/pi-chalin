@@ -1,15 +1,15 @@
-import { Context, Effect, Layer, Schedule } from "effect";
+import { Effect, Schedule } from "effect";
 import type { ArtifactCheckpoint, ArtifactStore } from "../artifacts/artifacts.ts";
 import type { AgentDefinition, BudgetCapHit, BudgetCapName, RouteKind, RouteRisk, RunStepState, ToolBudgetProfile } from "../domain/schemas.ts";
+import { compactText } from "../utils/text.ts";
 
 export type { BudgetCapHit } from "../domain/schemas.ts";
 
 export type BudgetTaskKind = "recon" | "review" | "implementation" | "migration" | "long-autonomous" | "research" | "planning" | "synthesis";
-export type BudgetHealthStatus = "ok" | "warn" | "checkpointed";
+export type BudgetHealthStatus = "ok" | "warn";
 export type BudgetResumeStrategy = "none" | "handoff-only" | "checkpoint-and-continue" | "split-and-continue" | "stage-checkpoint-validate-memory-next";
 
 export interface BudgetCaps {
-  maxToolCalls: number;
   maxSeconds: number;
   maxUsd: number;
   maxTurns: number;
@@ -65,7 +65,6 @@ export interface BudgetHealth {
   caps: BudgetCapHit[];
   warnings: string[];
   next: "continue" | "checkpoint-and-continue" | "checkpoint-low-signal" | "checkpoint-needs-continuation" | "split" | "escalate";
-  checkpointStatus?: "checkpointed-needs-continuation" | "checkpointed-low-signal" | "checkpointed-awaiting-review" | "checkpointed-split-recommended";
 }
 
 export interface ToolUtilityInput {
@@ -94,16 +93,6 @@ export interface ProgressScore {
   negativeSignals: string[];
 }
 
-interface BudgetPolicyServiceShape {
-  readonly policyForStep: typeof policyForStep;
-  readonly evaluateUsage: typeof evaluateBudgetUsage;
-  readonly checkpointSchedule: BudgetCheckpointSchedule;
-  readonly checkpointWriteSchedule: BudgetCheckpointWriteSchedule;
-  readonly recordCheckpoint: (store: ArtifactStore, featureId: string, step: RunStepState, reason: string) => Effect.Effect<ArtifactCheckpoint, unknown>;
-}
-
-class BudgetPolicyService extends Context.Tag("pi-chalin/BudgetPolicy")<BudgetPolicyService, BudgetPolicyServiceShape>() {}
-
 function makeCheckpointSchedule() {
   return Schedule.spaced("5 minutes");
 }
@@ -114,14 +103,6 @@ function makeCheckpointWriteSchedule() {
 
 type BudgetCheckpointSchedule = ReturnType<typeof makeCheckpointSchedule>;
 type BudgetCheckpointWriteSchedule = ReturnType<typeof makeCheckpointWriteSchedule>;
-
-const BudgetLayer = Layer.succeed(BudgetPolicyService, {
-  policyForStep,
-  evaluateUsage: evaluateBudgetUsage,
-  checkpointSchedule: makeCheckpointSchedule(),
-  checkpointWriteSchedule: makeCheckpointWriteSchedule(),
-  recordCheckpoint: recordBudgetCheckpointEffect,
-});
 
 export function budgetCheckpointSchedule(): BudgetCheckpointSchedule {
   return makeCheckpointSchedule();
@@ -135,7 +116,7 @@ export function policyForStep(
 ): BudgetPolicy {
   const profile = step.budget ?? inferredBudgetProfile(agent, step, routeKind);
   const taskKind = taskKindForStep(agent, { ...step, budget: profile }, routeKind);
-  const caps = scaleCaps(baseCapsForTask(taskKind, agent), profile, risk);
+  const caps = scaleCaps(baseCapsForTask(taskKind), profile);
   return {
     id: `${taskKind}:${profile}:${risk}`,
     taskKind,
@@ -150,16 +131,15 @@ export function policyForStep(
 export function estimateBudgetPreflight(input: BudgetPreflightInput): BudgetPreflight {
   const budgetProfile = inferPreflightProfile(input.steps, input.routeKind, input.needsArtifacts);
   const taskKind = inferTaskKind(input.steps, budgetProfile, input.needsArtifacts);
-  const risk = input.risk ?? inferRisk(input.steps);
+  const risk = input.risk ?? "low";
   const representativeStep = input.steps?.[0] ?? { agent: "scout", task: input.task, budget: budgetProfile };
   const policy = policyForStep(undefined, { ...representativeStep, budget: budgetProfile }, input.routeKind, risk);
   const expectedStages = input.routeKind === "multi-agent-dag"
     ? Math.max(2, Math.min(8, input.steps?.length ?? 3))
     : Math.max(1, input.steps?.length ?? 1);
-  const expectedTools = Math.max(policy.caps.maxToolCalls, (input.steps ?? [representativeStep]).reduce((sum, step) => {
-    const stepPolicy = policyForStep(undefined, step, input.routeKind, risk);
-    return sum + stepPolicy.caps.maxToolCalls;
-  }, 0));
+  const expectedTools = (input.steps ?? [representativeStep]).reduce((sum, step) => (
+    sum + estimateStepToolPressure(undefined, step, input.routeKind, risk)
+  ), 0);
   const requiresArtifacts = Boolean(input.needsArtifacts || taskKind === "long-autonomous" || budgetProfile === "extended");
   const resumeStrategy = requiresArtifacts ? "stage-checkpoint-validate-memory-next" : taskKind === "implementation" ? "checkpoint-and-continue" : "handoff-only";
   return {
@@ -178,7 +158,6 @@ export function estimateBudgetPreflight(input: BudgetPreflightInput): BudgetPref
 export function evaluateBudgetUsage(policy: BudgetPolicy, usage: BudgetUsage, progress?: ProgressScore): BudgetHealth {
   if (budgetGatesDisabled()) return { status: "ok", caps: [], warnings: [], next: "continue" };
   const caps: BudgetCapHit[] = [];
-  compare(caps, "max_tool_calls", usage.toolCalls, policy.caps.maxToolCalls);
   compare(caps, "max_seconds", Math.ceil(usage.elapsedMs / 1000), policy.caps.maxSeconds);
   compare(caps, "max_usd", usage.totalCostUsd, policy.caps.maxUsd);
   compare(caps, "max_turns", usage.turns, policy.caps.maxTurns);
@@ -187,14 +166,17 @@ export function evaluateBudgetUsage(policy: BudgetPolicy, usage: BudgetUsage, pr
   compare(caps, "max_files_touched", usage.filesTouched, policy.caps.maxFilesTouched);
   const maxRetries = Math.max(0, ...Object.values(usage.retriesByTool));
   compare(caps, "max_retries_per_tool", maxRetries, policy.caps.maxRetriesPerTool);
+  const progressWarnings = progress && progress.gate !== "continue"
+    ? [`progress signal ${progress.gate} from score ${formatNumber(progress.score)}`]
+    : [];
 
-  if (caps.length === 0) return { status: "ok", caps, warnings: [], next: "continue" };
+  if (caps.length === 0 && progressWarnings.length === 0) return { status: "ok", caps, warnings: [], next: "continue" };
   return {
     status: "warn",
     caps,
     warnings: [
       ...caps.map((cap) => `${cap.name} used ${formatNumber(cap.used)} over limit ${formatNumber(cap.limit)}`),
-      ...(progress && progress.gate !== "continue" ? [`progress signal ${progress.gate} from score ${formatNumber(progress.score)}`] : []),
+      ...progressWarnings,
     ],
     next: "continue",
   };
@@ -252,11 +234,13 @@ export function scoreProgress(input: ToolUtilityInput): ProgressScore {
   return { score, level, gate, positiveSignals, negativeSignals };
 }
 
-export async function recordBudgetCheckpoint(store: ArtifactStore, featureId: string, step: RunStepState, reason: string): Promise<ArtifactCheckpoint> {
-  return Effect.runPromise(Effect.gen(function* () {
-    const budget = yield* BudgetPolicyService;
-    return yield* checkpointWriteWithSchedule(budget.recordCheckpoint(store, featureId, step, reason), budget.checkpointWriteSchedule);
-  }).pipe(Effect.provide(BudgetLayer), Effect.withSpan("budget.recordCheckpoint")));
+export async function recordRuntimeCheckpoint(store: ArtifactStore, featureId: string, step: RunStepState, reason: string): Promise<ArtifactCheckpoint> {
+  return Effect.runPromise(
+    checkpointWriteWithSchedule(
+      recordRuntimeCheckpointEffect(store, featureId, step, reason),
+      makeCheckpointWriteSchedule(),
+    ).pipe(Effect.withSpan("runtime.recordCheckpoint")),
+  );
 }
 
 function checkpointWriteWithSchedule<A>(effect: Effect.Effect<A, unknown>, schedule: BudgetCheckpointWriteSchedule): Effect.Effect<A, unknown> {
@@ -267,29 +251,22 @@ function checkpointWriteWithSchedule<A>(effect: Effect.Effect<A, unknown>, sched
   }).pipe(Effect.withSpan("budget.checkpointSchedule"));
 }
 
-function recordBudgetCheckpointEffect(store: ArtifactStore, featureId: string, step: RunStepState, reason: string): Effect.Effect<ArtifactCheckpoint, unknown> {
+function recordRuntimeCheckpointEffect(store: ArtifactStore, featureId: string, step: RunStepState, reason: string): Effect.Effect<ArtifactCheckpoint, unknown> {
   return Effect.gen(function* () {
     yield* Effect.tryPromise(() => store.initFeature({
       featureId,
-      goal: `Continue budget checkpoint for pi-chalin step ${step.agent}`,
+      goal: `Continue runtime checkpoint for pi-chalin step ${step.agent}`,
       chain: [step.agent],
       currentStep: step.task,
     }));
     return yield* Effect.tryPromise(() => store.appendCheckpoint(featureId, {
       agent: step.agent,
-      title: `${step.agent} budget checkpoint`,
-      summary: compact([step.output?.handoff, step.output?.text, reason].filter(Boolean).join(" "), 900),
+      title: `${step.agent} runtime checkpoint`,
+      summary: compactText([step.output?.handoff, step.output?.text, reason].filter(Boolean).join(" "), 900),
       status: "paused",
       stage: step.id,
     }));
-  }).pipe(Effect.withSpan("budget.recordCheckpoint.write"));
-}
-
-function checkpointStatusForGate(gate: ProgressScore["gate"]): BudgetHealth["checkpointStatus"] | undefined {
-  if (gate === "checkpoint-low-signal") return "checkpointed-low-signal";
-  if (gate === "checkpoint-needs-continuation") return "checkpointed-needs-continuation";
-  if (gate === "split") return "checkpointed-split-recommended";
-  return undefined;
+  }).pipe(Effect.withSpan("runtime.recordCheckpoint.write"));
 }
 
 function compare(caps: BudgetCapHit[], name: BudgetCapName, used: number, limit: number): void {
@@ -303,13 +280,11 @@ function compare(caps: BudgetCapHit[], name: BudgetCapName, used: number, limit:
   });
 }
 
-function baseCapsForTask(taskKind: BudgetTaskKind, agent: AgentDefinition | undefined): BudgetCaps {
-  const baseToolCalls = baseToolCallsFor(taskKind, agent);
+function baseCapsForTask(taskKind: BudgetTaskKind): BudgetCaps {
   const isLong = taskKind === "long-autonomous";
   const isWriteHeavy = taskKind === "implementation" || taskKind === "migration";
   const isSynthesis = taskKind === "synthesis" || taskKind === "planning";
   return {
-    maxToolCalls: baseToolCalls,
     maxSeconds: isLong ? 7200 : isWriteHeavy ? 1800 : isSynthesis ? 900 : 1200,
     maxUsd: isLong ? 2.5 : isWriteHeavy ? 1.2 : isSynthesis ? 0.45 : 0.8,
     maxTurns: isLong ? 12 : isWriteHeavy ? 8 : isSynthesis ? 4 : 6,
@@ -320,8 +295,7 @@ function baseCapsForTask(taskKind: BudgetTaskKind, agent: AgentDefinition | unde
   };
 }
 
-function baseToolCallsFor(taskKind: BudgetTaskKind, agent: AgentDefinition | undefined): number {
-  if (agent?.budget?.baseToolCalls) return agent.budget.baseToolCalls;
+function estimatedToolPressureBase(taskKind: BudgetTaskKind): number {
   if (taskKind === "long-autonomous") return 160;
   if (taskKind === "migration") return 120;
   if (taskKind === "implementation") return 80;
@@ -332,12 +306,9 @@ function baseToolCallsFor(taskKind: BudgetTaskKind, agent: AgentDefinition | und
   return 40;
 }
 
-function scaleCaps(caps: BudgetCaps, profile: ToolBudgetProfile, risk: RouteRisk): BudgetCaps {
+function scaleCaps(caps: BudgetCaps, profile: ToolBudgetProfile): BudgetCaps {
   const multiplier = profile === "tight" ? 0.5 : profile === "deep" ? 2 : profile === "extended" ? 4 : 1;
-  const riskMultiplier = risk === "critical" ? 0.75 : risk === "high" ? 0.9 : 1;
-  const toolCap = profile === "extended" ? 500 : profile === "deep" ? 240 : profile === "tight" ? 60 : 140;
   return {
-    maxToolCalls: Math.max(1, Math.min(toolCap, Math.ceil(caps.maxToolCalls * multiplier * riskMultiplier))),
     maxSeconds: Math.max(120, Math.ceil(caps.maxSeconds * multiplier)),
     maxUsd: round(caps.maxUsd * multiplier),
     maxTurns: Math.max(1, Math.ceil(caps.maxTurns * (profile === "tight" ? 0.75 : profile === "deep" ? 1.5 : profile === "extended" ? 2 : 1))),
@@ -348,34 +319,29 @@ function scaleCaps(caps: BudgetCaps, profile: ToolBudgetProfile, risk: RouteRisk
   };
 }
 
+function estimateStepToolPressure(agent: AgentDefinition | undefined, step: Pick<RunStepState, "agent" | "task" | "budget">, routeKind: RouteKind, risk: RouteRisk): number {
+  const profile = step.budget ?? inferredBudgetProfile(agent, step, routeKind);
+  const taskKind = taskKindForStep(agent, { ...step, budget: profile }, routeKind);
+  const multiplier = profile === "tight" ? 0.5 : profile === "deep" ? 2 : profile === "extended" ? 4 : 1;
+  const riskMultiplier = risk === "critical" ? 0.75 : risk === "high" ? 0.9 : 1;
+  return Math.max(1, Math.ceil(estimatedToolPressureBase(taskKind) * multiplier * riskMultiplier));
+}
+
 function taskKindForStep(agent: AgentDefinition | undefined, step: Pick<RunStepState, "agent" | "budget">, routeKind: RouteKind): BudgetTaskKind {
   if (step.budget === "extended") return "long-autonomous";
   if (agent?.concern === "implementation") return "implementation";
-  if (step.agent === "worker") return "implementation";
   if (agent?.concern === "research") return "research";
   if (agent?.concern === "planning") return "planning";
   if (agent?.concern === "review") return "review";
-  if (step.agent === "researcher") return "research";
-  if (step.agent === "planner") return "planning";
-  if (step.agent === "reviewer") return "review";
-  if (routeKind === "multi-agent-dag" && step.budget === "deep" && step.agent === "worker") return "migration";
+  if (routeKind === "multi-agent-dag" && step.budget === "deep" && agent?.capabilities.includes("edit-files")) return "migration";
   return "recon";
 }
 
 function inferTaskKind(steps: BudgetPreflightInput["steps"], profile: ToolBudgetProfile, needsArtifacts?: boolean): BudgetTaskKind {
   if (needsArtifacts && profile === "extended") return "long-autonomous";
   if ((steps ?? []).some((step) => step.budget === "extended")) return "long-autonomous";
-  if ((steps ?? []).some((step) => step.agent === "worker" && step.budget === "deep")) return "migration";
-  if ((steps ?? []).some((step) => step.agent === "worker")) return "implementation";
-  if ((steps ?? []).some((step) => step.agent === "researcher")) return "research";
-  if ((steps ?? []).some((step) => step.agent === "planner")) return "planning";
-  if ((steps ?? []).some((step) => step.agent === "reviewer")) return "review";
+  if (profile === "deep" && needsArtifacts) return "long-autonomous";
   return "recon";
-}
-
-function inferRisk(steps: BudgetPreflightInput["steps"]): RouteRisk {
-  if ((steps ?? []).some((step) => step.agent === "worker")) return "medium";
-  return "low";
 }
 
 function inferPreflightProfile(steps: BudgetPreflightInput["steps"], routeKind: RouteKind, needsArtifacts?: boolean): ToolBudgetProfile {
@@ -383,7 +349,6 @@ function inferPreflightProfile(steps: BudgetPreflightInput["steps"], routeKind: 
   if (explicit) return explicit;
   if (needsArtifacts) return "extended";
   if (routeKind === "multi-agent-dag") return "deep";
-  if ((steps ?? []).length === 1 && steps?.[0]?.agent === "planner") return "tight";
   return "normal";
 }
 
@@ -403,7 +368,7 @@ function resumeStrategyFor(taskKind: BudgetTaskKind, profile: ToolBudgetProfile)
 
 function recommendationFor(taskKind: BudgetTaskKind, profile: ToolBudgetProfile, artifacts: boolean): string {
   if (taskKind === "long-autonomous") return "Use staged DAG execution with checkpoint → validate → memory → next-stage continuation.";
-  if (artifacts || profile === "extended") return "Write checkpoint artifacts at every handoff and split work before budget caps are hit.";
+  if (artifacts || profile === "extended") return "Write checkpoint artifacts at every handoff and split work when it improves recoverability.";
   if (taskKind === "migration") return "Prefer DAG fan-out by module with reviewer synthesis and validation contracts.";
   return "Use the smallest bounded agent workflow and stop after enough exact evidence to state remaining uncertainty.";
 }
@@ -419,10 +384,6 @@ function memoryQualityScore(candidate: { content: string; category?: string; con
   return round(sentenceScore + lengthScore + categoryScore + confidenceScore);
 }
 
-function compact(text: string, max: number): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  return normalized.length <= max ? normalized : `${normalized.slice(0, max - 1)}…`;
-}
 
 function round(value: number): number {
   return Math.round(value * 1000) / 1000;

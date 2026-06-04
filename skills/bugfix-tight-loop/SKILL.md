@@ -10,10 +10,6 @@ capabilities:
   - edit-files
   - validate
 activation: auto
-triggers:
-  - bugfix
-  - failing test
-  - regression
 risk: low
 maxActiveWith:
   - review-final-gate

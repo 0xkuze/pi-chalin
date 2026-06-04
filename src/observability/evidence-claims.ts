@@ -1,4 +1,5 @@
 import type { EvidenceClaim, EvidenceClaimKind, EvidenceKind } from "../domain/schemas.ts";
+import { isRecord } from "../utils/guards.ts";
 
 const CLAIM_KIND_ALIASES: Record<string, EvidenceClaimKind> = {
   "stable-fact": "stable-fact",
@@ -178,9 +179,6 @@ function clampConfidence(value: unknown): number {
   return Math.max(0, Math.min(1, numeric));
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function tokenOverlap(left: string, right: string): number {
   const leftTokens = meaningfulTokens(left);

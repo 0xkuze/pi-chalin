@@ -10,9 +10,8 @@ export function buildCompactChalinResumeSystemPrompt(): string {
   ].join("\n");
 }
 
-export function buildChalinOrchestratorSystemPrompt(agents: readonly AgentDefinition[], _prompt = ""): string {
-  const selectedAgents = selectLikelyAgentsForPrompt(agents);
-  const roster = selectedAgents.map(formatAgentForPrompt).join("\n") || "- none";
+export function buildChalinOrchestratorSystemPrompt(agents: readonly AgentDefinition[]): string {
+  const roster = formatAgentRoster(agents);
   return [
     "## pi-chalin harness",
     "You are Primary Pi: the conversation owner and final user-facing agent. The user should experience one coherent assistant, not internal labels.",
@@ -27,11 +26,10 @@ export function buildChalinOrchestratorSystemPrompt(agents: readonly AgentDefini
     "Use `chalin_route` when subagents materially improve quality: multi-file or multi-surface work, multiple ownership boundaries, substantial mutation, independent review, fan-out, long context, risky changes, or non-trivial implementation/research beyond a superficial check. Default to delegation when the expected evidence would exceed one compact inline loop.",
     "Do not call `chalin_route` and `chalin_web_search` in the same assistant turn. Let the delegated route gather local evidence first; use web only after the route reports an explicit external gap.",
     "When delegating, pass uncertainty into the workflow instead of pre-scouting only to polish the delegation. Keep the primary thread thin.",
+    "When using `chalin_route`, pass the task intent, obvious expectedEffects/risk, and any true human authorization signals; let pi-chalin's internal route planner select topology, subagents, and parallelization.",
     "For delegation, expectedEffects is a contract: include read for investigation, write for workspace mutation, and verify whenever mutation or user-visible correctness is expected. Do not omit verify to make a workflow look simpler.",
-    "Use `topology=sequential` for dependent phases. Use `topology=dag` only for independent work before fan-in; parallel writers need disjoint file ownership when known.",
     "WorkUnits: use `workUnitStrategy=planned` when the user already named independent slices, file areas, or responsibilities. Use `workUnitStrategy=discover` when the orchestrator must derive safe bounded units before execution. Set fanoutAuthorized only when the user authorized applying work across discovered independent targets.",
-    "Pick subagents by responsibility: reconnaissance, context packaging, planning, implementation, review, conflict repair, external research, or synthesis. Use the fewest subagents that can prove the result.",
-    "A delegated plan must be concrete: every step needs a responsibility, expected evidence, and known file scope when available. Do not create placeholder agents or generic 'analyze everything' tasks.",
+    "Do not pass topology, steps, stages, or subagent choices unless the user supplied explicit independent slices that must be preserved as proposal context.",
     "If delegated work returns final material, answer from it immediately. Use more tools only for an explicit critical gap in that material.",
     "Before finalizing, verify that the answer covers every user request, names any uncompleted blocker, and does not expose internal path labels unless the user asked for internals.",
     "If resuming prior work, call `chalin_resume` before answering from partial findings. After resume returns final material, answer from it.",
@@ -41,10 +39,8 @@ export function buildChalinOrchestratorSystemPrompt(agents: readonly AgentDefini
   ].join("\n");
 }
 
-export function selectLikelyAgentsForPrompt(agents: readonly AgentDefinition[], _prompt = ""): AgentDefinition[] {
-  const coreConcerns = new Set<AgentDefinition["concern"]>(["recon", "context-building", "planning", "implementation", "review"]);
-  const selected = agents.filter((agent) => coreConcerns.has(agent.concern));
-  return selected.length > 0 ? selected : [...agents];
+function formatAgentRoster(agents: readonly AgentDefinition[]): string {
+  return agents.map(formatAgentForPrompt).join("\n") || "- none";
 }
 
 function formatAgentForPrompt(agent: AgentDefinition): string {

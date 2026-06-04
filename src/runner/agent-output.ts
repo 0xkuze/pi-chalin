@@ -3,13 +3,18 @@ import { createMemoryCandidate } from "../memory/memory.ts";
 import type { AgentHandoff, AgentHandoffWorkUnit, AgentOutput, EvidenceClaim, MemoryCandidate, ReviewerEvidenceKind, ReviewerEvidenceRecord, ReviewerEvidenceStatus, ReviewerVerdict, RouteExpectedEffect } from "../domain/schemas.ts";
 import { handoffBudgetChars, isRecord, memoryCandidateBudget, rawOutputBudgetChars, truncateText } from "./runner-utils.ts";
 
-export function parseAgentOutput(agent: string, raw: string): AgentOutput {
+export interface ParseAgentOutputOptions {
+  expectsReviewerVerdict?: boolean;
+}
+
+export function parseAgentOutput(agent: string, raw: string, options: ParseAgentOutputOptions = {}): AgentOutput {
   const warnings: string[] = [];
   const claimLedger = parseClaimLedger(raw, agent);
   warnings.push(...claimLedger.warnings);
   const structuredHandoff = parseStructuredAgentHandoff(raw, claimLedger.claims, warnings);
-  const reviewerVerdict = agent === "reviewer" ? parseStructuredReviewerVerdict(raw, warnings) : undefined;
-  if (agent === "reviewer" && !reviewerVerdict) warnings.push("Reviewer output did not include a structured Reviewer Verdict.");
+  const hasReviewerVerdictSection = Boolean(extractMarkdownSection(raw, "Reviewer Verdict"));
+  const reviewerVerdict = options.expectsReviewerVerdict || hasReviewerVerdictSection ? parseStructuredReviewerVerdict(raw, warnings) : undefined;
+  if (options.expectsReviewerVerdict && !reviewerVerdict) warnings.push("Review output did not include a structured Reviewer Verdict.");
   const handoff = structuredHandoff ? formatAgentHandoffSummary(structuredHandoff, agent) : undefined;
   const handoffContract = structuredHandoff ? "structured" : "missing";
 

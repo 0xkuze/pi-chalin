@@ -44,6 +44,18 @@ test("ArtifactStore persists resumable feature state with checkpoints and valida
     status: "answered",
     answers: [{ questionId: "scope", question: "How broad is the change?", answer: "MVP scope", recommended: true }],
   });
+  await store.appendApprovalDecision("memory-and-artifacts", {
+    requestId: "approval-123",
+    decision: "approved",
+    toolName: "bash",
+    reason: "llm_declared_risky_action:production database access",
+    risk: "high",
+    approvedAction: "bash: psql production",
+    retriedAction: "bash: psql production",
+    equivalenceReason: "exact normalized retry",
+    subagentId: "worker",
+    paramsSummary: "psql production",
+  });
 
   const state = await store.loadFeature("memory-and-artifacts");
   assert.equal(state?.featureId, "memory-and-artifacts");
@@ -52,6 +64,7 @@ test("ArtifactStore persists resumable feature state with checkpoints and valida
   assert.equal(state?.validationContracts.length, 1);
   assert.equal(state?.workerSkills.length, 1);
   assert.equal(state?.interviewDecisions.length, 1);
+  assert.equal(state?.approvalDecisions.length, 1);
 
   const resume = await store.resumeContext("memory-and-artifacts");
   assert.match(resume, /Improve pi-chalin memory/);
@@ -60,9 +73,13 @@ test("ArtifactStore persists resumable feature state with checkpoints and valida
   assert.match(resume, /memory-worker/);
   assert.match(resume, /Interview decisions/);
   assert.match(resume, /How broad is the change\?/);
+  assert.match(resume, /Action approvals/);
+  assert.match(resume, /approved: bash: psql production/);
+  assert.match(resume, /exact normalized retry/);
 
   assert.ok(fs.existsSync(path.join(cwd, ".pi-chalin", "artifacts", "features", "memory-and-artifacts", "state.json")));
   assert.ok(fs.existsSync(path.join(cwd, ".pi-chalin", "artifacts", "features", "memory-and-artifacts", "checkpoints.jsonl")));
+  assert.ok(fs.existsSync(path.join(cwd, ".pi-chalin", "artifacts", "features", "memory-and-artifacts", "approvals.jsonl")));
   const skillPath = path.join(cwd, ".pi-chalin", "artifacts", "features", "memory-and-artifacts", "skills", "memory-worker", "SKILL.md");
   assert.ok(fs.existsSync(skillPath));
   assert.match(fs.readFileSync(skillPath, "utf-8"), /lifecycle: candidate\nexpiresAt: /);
@@ -145,4 +162,37 @@ test("openArtifactPanel shows interview decisions as navigable artifact context"
 
   assert.match(notifications.join("\n"), /Migration target is ambiguous/);
   assert.match(notifications.join("\n"), /What should be migrated\? → Only auth module \(custom\)/);
+});
+
+test("openArtifactPanel shows action approval decisions as navigable artifact context", async () => {
+  const cwd = tempDir("pi-chalin-artifacts-approval-ui-");
+  const store = new ArtifactStore({ cwd });
+  await store.initFeature({ featureId: "risky-migration", goal: "Run guarded migration.", chain: ["worker"] });
+  await store.appendApprovalDecision("risky-migration", {
+    requestId: "approval-migration",
+    decision: "rejected",
+    toolName: "bash",
+    reason: "llm_declared_risky_action:production migration",
+    risk: "high",
+    approvedAction: "bash: pnpm db:migrate --prod",
+    retriedAction: "bash: pnpm db:migrate --prod",
+    equivalenceReason: "same migration command",
+    subagentId: "worker",
+    paramsSummary: "pnpm db:migrate --prod",
+  });
+
+  const notifications: string[] = [];
+  const selections = ["paused · risky-migration · Action approval rejected", "Action approvals"];
+  await openArtifactPanel({
+    cwd,
+    hasUI: true,
+    ui: {
+      notify: (message: string) => notifications.push(message),
+      select: async (_title: string, options: string[]) => selections.shift() ?? options.at(-1),
+    },
+  } as never, store);
+
+  assert.match(notifications.join("\n"), /rejected · high · bash/);
+  assert.match(notifications.join("\n"), /bash: pnpm db:migrate --prod/);
+  assert.match(notifications.join("\n"), /same migration command/);
 });

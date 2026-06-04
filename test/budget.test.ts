@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { evaluateBudgetUsage, estimateBudgetPreflight, policyForStep, recordBudgetCheckpoint, scoreProgress, summarizeToolUtility } from "../src/budget/budget.ts";
+import { evaluateBudgetUsage, estimateBudgetPreflight, policyForStep, recordRuntimeCheckpoint, scoreProgress, summarizeToolUtility } from "../src/budget/budget.ts";
 import { ArtifactStore } from "../src/artifacts/artifacts.ts";
 import type { AgentDefinition, RunStepState } from "../src/domain/schemas.ts";
+import { normalizeThinkingForBudget } from "../src/runner/runner.ts";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -32,7 +33,6 @@ test("policyForStep centralizes every budget cap and scales by task/profile", ()
 
   assert.equal(policy.profile, "deep");
   assert.equal(policy.taskKind, "implementation");
-  assert.equal(policy.caps.maxToolCalls, 160);
   assert.ok(policy.caps.maxSeconds >= 1800);
   assert.ok(policy.caps.maxUsd > 0);
   assert.ok(policy.caps.maxTurns >= 1);
@@ -69,7 +69,7 @@ test("evaluateBudgetUsage reports exhausted budgets as soft telemetry without st
   const policy = policyForStep(reviewer, { agent: "reviewer", task: "Review project", budget: "tight" }, "multi-agent-sequential");
   const health = evaluateBudgetUsage(policy, {
     elapsedMs: policy.caps.maxSeconds * 1000 + 1,
-    toolCalls: policy.caps.maxToolCalls,
+    toolCalls: 10_000,
     totalCostUsd: 0,
     turns: 1,
     outputChars: 100,
@@ -82,7 +82,12 @@ test("evaluateBudgetUsage reports exhausted budgets as soft telemetry without st
   assert.ok(health.caps.some((cap) => cap.name === "max_seconds"));
   assert.equal(health.caps.every((cap) => cap.severity === "soft"), true);
   assert.equal(health.next, "continue");
-  assert.equal(health.checkpointStatus, undefined);
+});
+
+test("budget profile never caps agent thinking level", () => {
+  const thinking = normalizeThinkingForBudget({ level: "xhigh", label: "xhigh" }, "tight", { handoffOnly: true });
+
+  assert.deepEqual(thinking, { level: "xhigh", label: "xhigh" });
 });
 
 test("budget-disabled harness mode suppresses continuation gates for ablation evals", () => {
@@ -92,7 +97,7 @@ test("budget-disabled harness mode suppresses continuation gates for ablation ev
     const reviewer = agent("reviewer", "review");
     const policy = policyForStep(reviewer, { agent: "reviewer", task: "Review project", budget: "tight" }, "multi-agent-sequential");
     const health = evaluateBudgetUsage(policy, {
-      toolCalls: policy.caps.maxToolCalls + 10,
+      toolCalls: 10_000,
       elapsedMs: (policy.caps.maxSeconds + 1) * 1000,
       totalCostUsd: 0,
       turns: 1,
@@ -111,12 +116,12 @@ test("budget-disabled harness mode suppresses continuation gates for ablation ev
   }
 });
 
-test("tool-call budget alone remains a soft cap and never checkpoints the stage", () => {
+test("tool-call count is progress telemetry and not a budget cap", () => {
   const scout = agent("scout", "recon");
   const policy = policyForStep(scout, { agent: "scout", task: "Map project", budget: "normal" }, "multi-agent-sequential");
   const health = evaluateBudgetUsage(policy, {
     elapsedMs: 1000,
-    toolCalls: policy.caps.maxToolCalls,
+    toolCalls: 10_000,
     totalCostUsd: 0,
     turns: 1,
     outputChars: 100,
@@ -125,8 +130,8 @@ test("tool-call budget alone remains a soft cap and never checkpoints the stage"
     retriesByTool: {},
   });
 
-  assert.equal(health.status, "warn");
-  assert.ok(health.caps.some((cap) => cap.name === "max_tool_calls"));
+  assert.equal(health.status, "ok");
+  assert.deepEqual(health.caps, []);
   assert.equal(health.next, "continue");
 });
 
@@ -207,7 +212,7 @@ test("evaluateBudgetUsage records low-signal progress without checkpointing budg
   const policy = policyForStep(scout, { agent: "scout", task: "Map project", budget: "normal" }, "multi-agent-sequential");
   const health = evaluateBudgetUsage(policy, {
     elapsedMs: 1000,
-    toolCalls: policy.caps.maxToolCalls,
+    toolCalls: 10_000,
     totalCostUsd: 0,
     turns: 1,
     outputChars: 100,
@@ -223,12 +228,12 @@ test("evaluateBudgetUsage records low-signal progress without checkpointing budg
   });
 
   assert.equal(health.status, "warn");
+  assert.deepEqual(health.caps, []);
   assert.equal(health.next, "continue");
-  assert.equal(health.checkpointStatus, undefined);
   assert.ok(health.warnings.some((warning) => warning.includes("progress signal checkpoint-low-signal")));
 });
 
-test("recordBudgetCheckpoint persists partial handoff when a step is checkpointed", async () => {
+test("recordRuntimeCheckpoint persists partial handoff when a step is checkpointed", async () => {
   const cwd = tempDir("pi-chalin-budget-checkpoint-");
   try {
     const step: RunStepState = {
@@ -236,7 +241,7 @@ test("recordBudgetCheckpoint persists partial handoff when a step is checkpointe
       agent: "context-builder",
       task: "Analyze backend module",
       status: "checkpointed",
-      checkpoint: { kind: "budget-cap", reason: "Reached tool cap after useful findings.", continuation: "continue" },
+      checkpoint: { kind: "needs-continuation", reason: "Runtime checkpoint after useful findings.", continuation: "continue" },
       output: {
         agent: "context-builder",
         text: "Partial backend findings.",
@@ -247,7 +252,7 @@ test("recordBudgetCheckpoint persists partial handoff when a step is checkpointe
       },
     };
 
-    const checkpoint = await recordBudgetCheckpoint(new ArtifactStore({ cwd }), "feature-budget", step, "Reached tool cap after useful findings.");
+    const checkpoint = await recordRuntimeCheckpoint(new ArtifactStore({ cwd }), "feature-budget", step, "Runtime checkpoint after useful findings.");
     const state = await new ArtifactStore({ cwd }).loadFeature("feature-budget");
 
     assert.match(checkpoint.summary, /Backend uses API route handlers/);

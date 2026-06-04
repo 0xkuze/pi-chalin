@@ -9,10 +9,6 @@ concerns:
 capabilities:
   - validate
 activation: manual
-triggers:
-  - generate skill
-  - reusable procedure
-  - worker skill
 risk: low
 maxActiveWith: []
 allowedTools:

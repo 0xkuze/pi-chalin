@@ -3,6 +3,7 @@ import { sanitizeTransientVerificationClaims } from "../observability/evidence-c
 import type { ChalinRouteOutcome } from "../runtime/state.ts";
 import type { AgentHandoff, EvidenceClaim, RouteDecision, RunState } from "../domain/schemas.ts";
 import { isUsableStepStatus } from "../runtime/status.ts";
+import { compactText as truncate } from "../utils/text.ts";
 
 export function formatRoute(route: RouteDecision, result: ChalinHandleResult | undefined, options: { availableAgents?: string[] } = {}): string {
   if (!result) {
@@ -100,7 +101,7 @@ function finalMaterialWithEvidence(run: RunState, material: string, max: number)
 }
 
 function implementationEvidenceFooter(run: RunState, material: string): string | undefined {
-  if (!run.steps.some((step) => step.agent === "worker")) return undefined;
+  if (!hasMutationEvidence(run)) return undefined;
   const changedPaths = uniqueStrings(run.steps.flatMap((step) => step.metrics?.filesTouched ?? []));
   const verificationCommands = uniqueStrings(run.steps
     .flatMap((step) => step.metrics?.shellCommands ?? [])
@@ -133,11 +134,7 @@ function uniqueStrings(values: string[]): string[] {
 function shouldAggregateFinalMaterial(run: RunState, completeSteps: RunState["steps"]): boolean {
   if (completeSteps.length <= 1) return false;
   if (run.route.kind === "multi-agent-dag") return true;
-  const agents = new Set(completeSteps.map((step) => step.agent));
-  const hasWriter = agents.has("worker");
-  const hasEvidenceBuilder = agents.has("scout") || agents.has("context-builder");
-  const hasSynthesis = agents.has("reviewer") || agents.has("context-builder");
-  return !hasWriter && hasEvidenceBuilder && hasSynthesis;
+  return !hasMutationEvidence(run);
 }
 
 function supportingEvidenceMaterial(steps: RunState["steps"]): string | undefined {
@@ -208,8 +205,8 @@ function finalAnswerMaterialBudget(run: RunState): number {
   const parsed = Number(process.env.PI_CHALIN_FINAL_MATERIAL_CHARS);
   if (Number.isFinite(parsed) && parsed > 500) return Math.floor(parsed);
   if (run.route.kind === "multi-agent-dag") return 12000;
-  if (run.steps.length > 1 && !run.steps.some((step) => step.agent === "worker")) return 10000;
-  if (run.steps.length === 1 && !run.steps.some((step) => step.agent === "worker")) return 6000;
+  if (run.steps.length > 1 && !hasMutationEvidence(run)) return 10000;
+  if (run.steps.length === 1 && !hasMutationEvidence(run)) return 6000;
   return 1200;
 }
 
@@ -269,7 +266,7 @@ function stepOutput(step: RunState["steps"][number]): string | undefined {
 }
 
 function primaryFinalOutput(run: RunState, step: RunState["steps"][number]): string | undefined {
-  if (run.steps.length === 1 && step.agent !== "worker" && step.agent !== "conflict-resolver") {
+  if (run.steps.length === 1 && !hasMutationEvidence(run)) {
     return stepFullOutput(step);
   }
   return stepOutput(step);
@@ -309,6 +306,7 @@ export function compactRouteDetails(route: RouteDecision, result: ChalinHandleRe
         handoff: truncate(step.output?.handoff || step.output?.text || step.error || "", 600),
         structuredHandoff: step.output?.structuredHandoff,
         reviewerVerdict: step.output?.reviewerVerdict,
+        nestedRuns: step.nestedRuns,
       })),
       workUnits: result.run.workUnits,
       recoveryState: result.run.recoveryState,
@@ -319,7 +317,11 @@ export function compactRouteDetails(route: RouteDecision, result: ChalinHandleRe
   };
 }
 
-function truncate(text: string, max: number): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  return normalized.length <= max ? normalized : `${normalized.slice(0, max - 1)}…`;
+function hasMutationEvidence(run: RunState): boolean {
+  if (run.route.expectedEffects?.includes("write")) return true;
+  if ((run.mutationLedger?.length ?? 0) > 0) return true;
+  return run.steps.some((step) => {
+    if ((step.metrics?.filesTouched?.length ?? 0) > 0) return true;
+    return (step.output?.structuredHandoff?.changedFiles.length ?? 0) > 0;
+  });
 }

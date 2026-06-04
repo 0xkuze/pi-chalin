@@ -5,7 +5,6 @@ concern: context-building
 capabilities: inspect-files, search-files, memory-read, memory-write
 model: inherit
 thinking: medium
-budget-tool-calls: 60
 tools: read, grep, find, ls
 memory-read: true
 memory-write: candidate

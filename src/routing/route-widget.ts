@@ -1,12 +1,14 @@
 import type { ChalinFooterState } from "../ui/ui-status.ts";
-import type { BudgetCapHit, CheckpointInfo, RouteDecision, RunState, RunStatus, RunStepStatus } from "../domain/schemas.ts";
-import { checkpointLabel, isCheckpointStepStatus, isUsableStepStatus as isUsableCheckpointStepStatus } from "../runtime/status.ts";
+import type { CheckpointInfo, NestedRunTrace, RouteDecision, RunState, RunStatus, RunStepPauseReason, RunStepStatus, WorkUnit } from "../domain/schemas.ts";
+import { isCheckpointStepStatus, isUsableStepStatus } from "../runtime/status.ts";
+export { isUsableStepStatus } from "../runtime/status.ts";
 
 type ChalinRouteWidgetStep = {
   id?: string;
   agent: string;
   task?: string;
   status?: RunStepStatus;
+  pauseReason?: RunStepPauseReason;
   checkpoint?: CheckpointInfo;
   model?: string;
   thinkingLevel?: string;
@@ -15,14 +17,17 @@ type ChalinRouteWidgetStep = {
   skipReason?: string;
   workUnitId?: string;
   handoff?: string;
+  nestedRuns?: NestedRunTrace[];
 };
 
 export type ChalinRouteWidgetDetails = {
   route?: RouteDecision;
   run?: {
     id: string;
+    rootTask?: string;
     status: RunStatus;
     steps: ChalinRouteWidgetStep[];
+    workUnits?: RunState["workUnits"];
     metrics?: RunState["metrics"];
     warnings?: string[];
     recoveryState?: RunState["recoveryState"];
@@ -32,8 +37,8 @@ export type ChalinRouteWidgetDetails = {
 type ChalinRouteToolParams = {
   task: string;
   topology?: "auto" | "sequential" | "dag";
-  steps?: Array<{ id?: string; agent: string; task: string; budget?: "small" | "medium" | "large" | "tight" | "normal" | "deep" | "extended" }>;
-  stages?: Array<{ id?: string; name?: string; tasks?: Array<{ id?: string; agent: string; task: string; budget?: "small" | "medium" | "large" | "tight" | "normal" | "deep" | "extended" }> }>;
+  steps?: Array<{ id?: string; agent: string; task: string }>;
+  stages?: Array<{ id?: string; name?: string; tasks?: Array<{ id?: string; agent: string; task: string }> }>;
 };
 
 export function formatChalinRoutePlanWidget(params: ChalinRouteToolParams): string {
@@ -41,17 +46,17 @@ export function formatChalinRoutePlanWidget(params: ChalinRouteToolParams): stri
   const title = routeTitle(params.topology, params.task);
   const agents = steps.map((step) => step.agent).filter(Boolean);
   return [
-    `pi-chalin · ${title}`,
+    `chalin · ${title}`,
     agents.length ? `agents: ${compactAgentPath(agents)} · 0/${steps.length || 1}` : "agents: memory · 0/1",
-    ...steps.slice(0, 8).map((step, index) => `${treePrefix(index, steps.length)} ${statusGlyph(step.status ?? "pending")} ${step.agent} — ${taskTitle(step.task)}`),
+    ...steps.slice(0, 8).map((step, index) => `${treePrefix(index, steps.length)} ${statusGlyph(step.status ?? "pending")} ${step.agent} — ${shortText(step.task)}`),
     steps.length > 8 ? `└ … +${steps.length - 8} more` : undefined,
   ].filter((line): line is string => Boolean(line)).join("\n");
 }
 
-export function formatChalinRouteRequestWidget(_params: ChalinRouteToolParams): string {
+export function formatChalinRouteRequestWidget(params: ChalinRouteToolParams): string {
   return [
-    "pi-chalin · route requested",
-    "awaiting policy and normalized run",
+    "chalin · running · 0/1",
+    shortText(params.task, 15, 52),
   ].join("\n");
 }
 
@@ -61,21 +66,30 @@ export function formatChalinRunWidget(run: RunState): string {
 
 export function formatChalinRunWidgetFromDetails(details: ChalinRouteWidgetDetails): string {
   const run = details.run;
-  if (!run) return "pi-chalin · no run";
-  const route = details.route;
-  const steps = run.steps;
-  const completed = steps.filter((step) => isUsableStepStatus(step.status)).length;
-  const active = activeWidgetStep(run.status, steps);
-  const title = route ? routeIntent(route) : "workflow";
+  if (!run) return "chalin · pending";
+  const visibleItems = visibleWorkItems(run);
+  const active = activeWidgetStep(run.status, run.steps);
+  const parentAgent = active?.agent ?? firstVisibleAgent(visibleItems) ?? details.route?.agents[0] ?? "chalin";
+  const total = visibleItems.length || 1;
+  const completed = visibleItems.length
+    ? visibleItems.filter((item) => isFinishedItemStatus(item.status)).length
+    : run.status === "complete" || run.status === "stale-repaired"
+      ? 1
+      : 0;
   const displayStatus = statusLabel(run.status);
-  const activeLabel = run.status === "failed" ? "blocked" : run.status === "paused" ? "paused" : "current";
+  if ((run.status === "complete" || run.status === "stale-repaired") && visibleItems.length > 0) {
+    return [
+      `chalin · ${parentAgent} · ${displayStatus} · ${completed}/${total}`,
+      `${visibleItems.length} task${visibleItems.length === 1 ? "" : "s"} done`,
+    ].join("\n");
+  }
+  const mission = shortText(run.rootTask ?? details.route?.reason ?? active?.task ?? "", 15, 120);
+  const current = currentWidgetLine(active, visibleItems) ?? mission;
   return [
-    `pi-chalin · ${title} · ${displayStatus} · ${completed}/${steps.length || 1}`,
-    active ? `${activeLabel}: ${active.agent} — ${active.error ? truncate(active.error, 86) : taskTitle(active.task ?? statusLabel(active.status ?? "pending"))}` : undefined,
-    ...steps.slice(0, 8).map((step, index) => formatWidgetStep(step, index, steps.length, run.status)),
-    steps.length > 8 ? `└ … +${steps.length - 8} more` : undefined,
-    run.recoveryState?.failedStepId ? `recovery: failed ${run.recoveryState.failedStepId} · skipped reviewers: ${run.recoveryState.reviewersNotRun.length}` : undefined,
-    formatWidgetGuards(run.metrics),
+    `chalin · ${parentAgent} · ${displayStatus} · ${completed}/${total}`,
+    current || undefined,
+    ...visibleItems.slice(0, 8).flatMap((item, index) => formatWorkItemTree(item, index, visibleItems.length)),
+    visibleItems.length > 8 ? `└ … +${visibleItems.length - 8} more` : undefined,
   ].filter((line): line is string => Boolean(line)).join("\n");
 }
 
@@ -102,15 +116,18 @@ export function chalinRouteUpdateDetails(run: RunState): ChalinRouteWidgetDetail
     route: run.route,
     run: {
       id: run.id,
+      rootTask: run.rootTask,
       status: run.status,
       metrics: run.metrics,
       warnings: run.warnings,
       recoveryState: run.recoveryState,
+      workUnits: run.workUnits,
       steps: run.steps.map((step) => ({
         id: step.id,
         agent: step.agent,
         task: step.task,
         status: step.status,
+        pauseReason: step.pauseReason,
         skipReason: step.skipReason,
         workUnitId: step.workUnitId,
         checkpoint: step.checkpoint,
@@ -118,11 +135,22 @@ export function chalinRouteUpdateDetails(run: RunState): ChalinRouteWidgetDetail
         thinkingLevel: step.thinkingLevel,
         skills: step.activeSkills?.map((item) => item.skill.name),
         error: step.error,
-        handoff: truncate(step.output?.handoff || step.output?.text || "", 180),
+        handoff: shortText(step.output?.handoff || step.output?.text || "", 45, 180),
+        nestedRuns: step.nestedRuns,
       })),
     },
   };
 }
+
+type VisibleWorkItem = {
+  id: string;
+  title: string;
+  agent: string;
+  status: RunStepStatus;
+  step?: ChalinRouteWidgetStep;
+  unit?: WorkUnit;
+  children?: VisibleWorkItem[];
+};
 
 function plannedStepsFromRoute(route: RouteDecision): ChalinRouteWidgetStep[] {
   const plan = route.plan;
@@ -137,26 +165,136 @@ function plannedWidgetSteps(params: ChalinRouteToolParams): ChalinRouteWidgetSte
   return [];
 }
 
-function formatWidgetStep(step: ChalinRouteWidgetStep, index: number, total: number, runStatus?: RunStatus): string {
-  const detail = step.status === "complete"
-    ? taskTitle(step.task ?? "done")
-    : step.status === "failed"
-      ? step.error || "failed"
-    : step.status === "paused"
-      ? step.error || "paused"
-    : step.status === "skipped"
-      ? step.skipReason || "skipped after upstream failure"
-      : isCheckpointStepStatus(step.status)
-          ? taskTitle(step.task ?? step.error ?? "checkpoint saved")
-          : step.status === "pending" && runStatus === "failed"
-            ? "skipped after failure"
-          : step.status === "pending" && runStatus === "paused"
-            ? "waiting for resume"
-          : taskTitle(step.task ?? "working");
-  const suffix = isCheckpointStepStatus(step.status) ? ` · ${checkpointLabel(step.checkpoint).replace(/^checkpointed · /, "")}` : "";
-  const skills = step.skills?.length ? ` · skills:${step.skills.join(",")}` : "";
-  const unit = step.workUnitId ? ` · ${step.workUnitId}` : "";
-  return `${treePrefix(index, total)} ${statusGlyph(step.status)} ${step.agent}${skills}${unit} — ${truncate(detail, 88)}${suffix}`;
+function visibleWorkItems(run: NonNullable<ChalinRouteWidgetDetails["run"]>): VisibleWorkItem[] {
+  const items = run.workUnits?.length ? visibleItemsFromUnits(run.workUnits, run.steps, true) : visibleItemsFromSteps(run.steps, true);
+  return withUniqueDisplayIds(items);
+}
+
+function visibleItemsFromUnits(units: WorkUnit[], steps: ChalinRouteWidgetStep[], includeNested: boolean): VisibleWorkItem[] {
+  const items: VisibleWorkItem[] = [];
+  const unitStepLookup = stepLookupByUnit(steps);
+  for (const unit of units) {
+    const step = selectRepresentativeStep(unit, unitStepLookup.get(unit.id) ?? []);
+    items.push({
+      id: displayId(unit.id),
+      title: unit.title || step?.task || unit.id,
+      agent: step?.agent ?? unit.kind,
+      status: visibleStatus(unit.status, step),
+      step,
+      unit,
+      children: includeNested ? nestedItemsFromStep(step) : [],
+    });
+  }
+  return items;
+}
+
+function visibleItemsFromSteps(steps: ChalinRouteWidgetStep[], includeNested: boolean): VisibleWorkItem[] {
+  const groups = new Map<string, ChalinRouteWidgetStep[]>();
+  for (const step of steps) {
+    const key = step.workUnitId ?? step.id ?? `${step.agent}:${groups.size + 1}`;
+    const list = groups.get(key) ?? [];
+    list.push(step);
+    groups.set(key, list);
+  }
+  const items: VisibleWorkItem[] = [];
+  for (const [key, group] of groups.entries()) {
+    const step = selectRepresentativeStep(undefined, group);
+    if (!step) continue;
+    items.push({
+      id: displayId(step.workUnitId ?? step.id ?? key),
+      title: step.task ?? step.id ?? step.agent,
+      agent: step.agent,
+      status: step.status ?? "pending",
+      step,
+      children: includeNested ? nestedItemsFromStep(step) : [],
+    });
+  }
+  return items;
+}
+
+function nestedItemsFromStep(step: ChalinRouteWidgetStep | undefined): VisibleWorkItem[] {
+  if (!step?.nestedRuns?.length) return [];
+  const nestedItems = step.nestedRuns.flatMap((run) => {
+    const runLike = {
+      id: run.id,
+      rootTask: run.rootTask,
+      status: run.status,
+      steps: run.steps,
+      workUnits: run.workUnits,
+    };
+    return run.workUnits?.length
+      ? visibleItemsFromUnits(run.workUnits, runLike.steps, false)
+      : visibleItemsFromSteps(runLike.steps, false);
+  });
+  return withUniqueDisplayIds(nestedItems);
+}
+
+function stepLookupByUnit(steps: ChalinRouteWidgetStep[]): Map<string, ChalinRouteWidgetStep[]> {
+  const lookup = new Map<string, ChalinRouteWidgetStep[]>();
+  for (const step of steps) {
+    if (!step.workUnitId) continue;
+    const current = lookup.get(step.workUnitId) ?? [];
+    current.push(step);
+    lookup.set(step.workUnitId, current);
+  }
+  return lookup;
+}
+
+function selectRepresentativeStep(unit: WorkUnit | undefined, steps: ChalinRouteWidgetStep[]): ChalinRouteWidgetStep | undefined {
+  const preferredIds = [unit?.workerStepId, unit?.reviewerStepId, unit?.finalReviewerStepId].filter((id): id is string => Boolean(id));
+  for (const id of preferredIds) {
+    const found = steps.find((step) => step.id === id);
+    if (found) return found;
+  }
+  return steps.find((step) => step.status === "running")
+    ?? steps.find((step) => step.status === "pending")
+    ?? steps.find((step) => step.status === "paused")
+    ?? [...steps].reverse().find((step) => step.status !== "failed")
+    ?? steps.at(-1);
+}
+
+function visibleStatus(unitStatus: RunStepStatus, step: ChalinRouteWidgetStep | undefined): RunStepStatus {
+  if (unitStatus === "failed" && step && step.status !== "failed") return step.status ?? "running";
+  return unitStatus;
+}
+
+function formatWorkItem(item: VisibleWorkItem, index: number, total: number): string {
+  return `${treePrefix(index, total)} ${statusGlyph(item.status)} ${item.agent} - ${item.id} — ${shortText(workItemTitle(item))}`;
+}
+
+function workItemTitle(item: VisibleWorkItem): string {
+  if (item.step?.pauseReason === "awaiting-approval") return "awaiting approval";
+  if (item.step?.pauseReason === "human-rejected") return "blocked by human rejection";
+  return item.title;
+}
+
+function currentWidgetLine(active: ChalinRouteWidgetStep | undefined, items: VisibleWorkItem[]): string | undefined {
+  const current = active
+    ? items.find((item) => item.step === active)
+      ?? items.find((item) => item.children?.some((child) => child.step === active))
+    : items.find((item) => item.status === "running") ?? items.find((item) => item.status === "pending");
+  const agent = current?.agent ?? active?.agent;
+  const title = current ? workItemTitle(current) : active?.task;
+  if (!agent || !title) return undefined;
+  return `current: ${agent} - ${shortText(title, 15, 80)}`;
+}
+
+function formatWorkItemTree(item: VisibleWorkItem, index: number, total: number): string[] {
+  const children = item.children ?? [];
+  return [
+    formatWorkItem(item, index, total),
+    ...children.slice(0, 8).map((child, childIndex) => `   ${formatWorkItem(child, childIndex, children.length)}`),
+    children.length > 8 ? `   └ … +${children.length - 8} more` : undefined,
+  ].filter((line): line is string => Boolean(line));
+}
+
+function withUniqueDisplayIds(items: VisibleWorkItem[]): VisibleWorkItem[] {
+  const counts = new Map<string, number>();
+  return items.map((item) => {
+    const count = (counts.get(item.id) ?? 0) + 1;
+    counts.set(item.id, count);
+    return count === 1 ? item : { ...item, id: `${item.id}-${count}` };
+  });
 }
 
 function statusGlyph(status: RunStepStatus | undefined): string {
@@ -170,16 +308,13 @@ function statusGlyph(status: RunStepStatus | undefined): string {
 
 function statusLabel(status: RunStatus | RunStepStatus): string {
   if (status === "complete") return "done";
+  if (status === "stale-repaired") return "done";
   if (status === "failed") return "failed";
   if (status === "paused") return "paused";
   if (status === "skipped") return "skipped";
-  if (isCheckpointStepStatus(status)) return "checkpointed";
+  if (isCheckpointStepStatus(status)) return "done";
   if (status === "running") return "running";
   return "pending";
-}
-
-export function isUsableStepStatus(status: RunStepStatus | undefined): boolean {
-  return isUsableCheckpointStepStatus(status);
 }
 
 function treePrefix(index: number, total: number): string {
@@ -187,7 +322,7 @@ function treePrefix(index: number, total: number): string {
 }
 
 function routeTitle(topology: ChalinRouteToolParams["topology"], task: string): string {
-  return `${topology ?? "auto"} · ${truncate(task, 52)}`;
+  return `${topology ?? "auto"} · ${shortText(task, 15, 52)}`;
 }
 
 function compactAgentPath(agents: string[]): string {
@@ -198,38 +333,12 @@ function compactAgentPath(agents: string[]): string {
 export function colorizeChalinWidget(text: string, theme: { fg(scope: string, value: string): string; bold(value: string): string }): string {
   return text.split("\n").map((line, index) => {
     if (index === 0) return theme.fg("toolTitle", theme.bold(line));
-    if (/current:/.test(line)) return theme.fg("muted", line);
-    if (/✓/.test(line)) return theme.fg("success", line);
-    if (/×|failed|attention/.test(line)) return theme.fg("error", line);
-    if (/budget: (warning|stopped|limit reached)|inefficient/.test(line)) return theme.fg("warning", line);
-    if (/◆/.test(line)) return theme.fg("accent", line);
+    if (line.includes("✓") || line.includes("done")) return theme.fg("success", line);
+    if (line.includes("×") || line.includes("failed")) return theme.fg("error", line);
+    if (line.includes("pending") || line.includes("skipped")) return theme.fg("warning", line);
+    if (line.includes("◆")) return theme.fg("accent", line);
     return theme.fg("dim", line);
   }).join("\n");
-}
-
-function formatWidgetGuards(metrics: RunState["metrics"] | undefined): string {
-  if (!metrics) return "tools: 0 · guards: checking";
-  const policyViolations = metrics.policyViolations?.length ?? 0;
-  const budgetStops = metrics.budgetStopCount ?? 0;
-  const budgetHits = metrics.budgetCapHits ?? [];
-  const crossStepDuplicates = metrics.crossStepDuplicateReadCount ?? 0;
-  if (policyViolations > 0) return `tools: ${metrics.toolCalls} · guards: attention · ${policyViolations} policy`;
-  if (budgetStops > 0) return `tools: ${metrics.toolCalls} · guards: attention · budget: limit reached ${formatBudgetHit(budgetHits.find((hit) => hit.severity === "hard") ?? budgetHits[0])} (${budgetStops} stops)`;
-  if (crossStepDuplicates > 0) return `tools: ${metrics.toolCalls} · guards: inefficient · cross-step duplicate reads: ${crossStepDuplicates}`;
-  if (budgetHits.some((hit) => hit.severity === "soft")) return `tools: ${metrics.toolCalls} · guards: ok · budget: warning ${formatBudgetHit(budgetHits.find((hit) => hit.severity === "soft"))}`;
-  return `tools: ${metrics.toolCalls} · guards: ok`;
-}
-
-function formatBudgetHit(hit: BudgetCapHit | undefined): string {
-  if (!hit) return "unknown cap";
-  return `${hit.name} ${formatCompactNumber(hit.used)}/${formatCompactNumber(hit.limit)}${hit.toolName ? ` via ${hit.toolName}` : ""}`;
-}
-
-function formatCompactNumber(value: number): string {
-  if (!Number.isFinite(value)) return "∞";
-  if (Math.abs(value) >= 1_000_000) return `${Math.round(value / 100_000) / 10}M`;
-  if (Math.abs(value) >= 1_000) return `${Math.round(value / 100) / 10}k`;
-  return String(Math.round(value * 1000) / 1000);
 }
 
 export function footerStateForRun(run: RunState): ChalinFooterState {
@@ -243,24 +352,119 @@ export function footerStateForRun(run: RunState): ChalinFooterState {
 }
 
 export function routeIntent(route: RouteDecision): string {
-  if (route.agents.includes("worker")) return "implement safely";
-  if (route.agents.includes("reviewer")) return "review";
-  if (route.agents.includes("context-builder")) return "understand";
-  if (route.agents.includes("planner")) return "plan";
   return route.agents[0] ?? route.kind;
 }
-function truncate(text: string, max: number): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  return normalized.length <= max ? normalized : `${normalized.slice(0, max - 1)}…`;
+
+function firstVisibleAgent(items: VisibleWorkItem[]): string | undefined {
+  return items.find((item) => item.status === "running")?.agent
+    ?? items.find((item) => item.status === "pending")?.agent
+    ?? items[0]?.agent;
 }
 
-function taskTitle(task: string | undefined, max = 64): string {
-  const normalized = (task || "working")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .replace(/[*_#>]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  const [firstClause = normalized] = normalized.split(/\s*(?:[.;:]\s+|\s+-\s+|\s+—\s+|\s+and\s+|\s+y\s+|\s+para\s+|\s+to\s+|\s+include\b|\s+including\b|\s+incluye\b|\s+identificar\b|\s+identify\b|\s+con\s+|\s+with\s+)/i);
-  return truncate(firstClause || normalized || "working", max);
+function isFinishedItemStatus(status: RunStepStatus): boolean {
+  return status === "complete" || status === "checkpointed" || status === "failed" || status === "skipped";
+}
+
+function displayId(id: string): string {
+  const normalized = normalizeId(id);
+  return normalized || "work-unit";
+}
+
+function normalizeId(value: string): string {
+  let result = "";
+  let lastWasDash = false;
+  for (const char of compactWhitespace(value).toLocaleLowerCase()) {
+    const code = char.charCodeAt(0);
+    const isDigit = code >= 48 && code <= 57;
+    const isAsciiLetter = code >= 97 && code <= 122;
+    const isUnicodeLetter = char.toLocaleLowerCase() !== char.toLocaleUpperCase();
+    const isLetter = isAsciiLetter || isUnicodeLetter;
+    if (isDigit || isLetter) {
+      result += char;
+      lastWasDash = false;
+      continue;
+    }
+    if (!lastWasDash && result.length > 0) {
+      result += "-";
+      lastWasDash = true;
+    }
+  }
+  while (result.endsWith("-")) result = result.slice(0, -1);
+  return result;
+}
+
+function shortText(text: string | undefined, maxWords = 15, maxChars = 64): string {
+  const normalized = compactWhitespace(stripInlineMarkup(text || "working"));
+  if (normalized.length <= maxChars && wordCount(normalized) <= maxWords) return normalized;
+  const byWords = firstWords(normalized, maxWords);
+  const bounded = byWords.length <= maxChars ? byWords : trimToWordBoundary(byWords, maxChars);
+  return `${bounded}...`;
+}
+
+function stripInlineMarkup(text: string): string {
+  let result = "";
+  for (const char of text) {
+    if (char === "`" || char === "*" || char === "_") continue;
+    result += char;
+  }
+  return result;
+}
+
+function compactWhitespace(text: string): string {
+  let result = "";
+  let pendingSpace = false;
+  for (const char of text.trim()) {
+    if (char === " " || char === "\n" || char === "\t" || char === "\r") {
+      pendingSpace = result.length > 0;
+      continue;
+    }
+    if (pendingSpace) result += " ";
+    result += char;
+    pendingSpace = false;
+  }
+  return result;
+}
+
+function wordCount(text: string): number {
+  if (!text) return 0;
+  let count = 0;
+  let inWord = false;
+  for (const char of text) {
+    const isSpace = char === " " || char === "\n" || char === "\t" || char === "\r";
+    if (isSpace) {
+      inWord = false;
+      continue;
+    }
+    if (!inWord) count += 1;
+    inWord = true;
+  }
+  return count;
+}
+
+function firstWords(text: string, maxWords: number): string {
+  const words: string[] = [];
+  let current = "";
+  for (const char of text) {
+    const isSpace = char === " " || char === "\n" || char === "\t" || char === "\r";
+    if (isSpace) {
+      if (current) {
+        words.push(current);
+        if (words.length >= maxWords) break;
+        current = "";
+      }
+      continue;
+    }
+    current += char;
+  }
+  if (current && words.length < maxWords) words.push(current);
+  return words.join(" ");
+}
+
+function trimToWordBoundary(text: string, maxChars: number): string {
+  const clipped = text.slice(0, Math.max(0, maxChars)).trimEnd();
+  let lastSpace = -1;
+  for (let index = 0; index < clipped.length; index += 1) {
+    if (clipped[index] === " ") lastSpace = index;
+  }
+  return lastSpace > 0 ? clipped.slice(0, lastSpace) : clipped;
 }

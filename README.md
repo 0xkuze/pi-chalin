@@ -42,7 +42,7 @@ The product goal is simple: keep the human in command while giving complex engin
 | Subagents | Built-in `scout`, `planner`, `worker`, `reviewer`, `researcher`, `context-builder`, and `conflict-resolver` agents. |
 | Workflow shapes | `single`, `chain`, `parallel`, `dag`, and `memory-only` plans. |
 | Memory | Built-in SQLite memory with review, or native Engram memory with optional cloud sync. |
-| Safety | Approval thresholds, critical-route blocking, recursion guards, single-writer protection, mutation expectation checks, and destructive-action confirmation. |
+| Safety | Approval thresholds, required approval for critical routes, recursion guards, single-writer protection, mutation expectation checks, secret/workspace guardrails, and subagent-declared risky-action approval. |
 | State | Resumable runs, artifacts, validation contracts, activity monitoring, and cached discovery context. |
 | TUI | Smart Panel, Settings, Agent Manager, Memory Review, Activity, Artifacts, and WebFetch audit panels. |
 
@@ -112,7 +112,7 @@ The extension registers Pi tools for the primary agent. The primary agent stays 
 | `chalin_artifact_resume` | Load resumable task context from stored artifacts. |
 | `chalin_web_search` | Search or fetch current web context through the audited web layer. |
 
-Child agents receive only the guarded tools appropriate to their role, capability set, and budget.
+Child agents receive only the guarded tools appropriate to their role, capability set, and runtime profile. Child agents also get `chalin_request_approval` so the subagent can declare a concrete risky next action and route it through `chalin_interview` instead of relying on command-name heuristics.
 
 ## Configuration
 
@@ -152,7 +152,7 @@ Use `/chalin settings` for the supported interactive path. It exposes:
 - maintenance for caches;
 - diagnostics.
 
-Critical routes remain blocked by the safety policy even when approval prompts are disabled.
+Critical routes always require explicit one-time safety approval before execution, even when prompts are disabled for non-critical routes.
 
 ## Memory
 

@@ -7,7 +7,7 @@ import { createConfiguredMemoryStore } from "../memory/memory-provider.ts";
 import { beginChalinRouteInvocation, finishChalinRouteInvocation, setLatestRun } from "../runtime/state.ts";
 import { setChalinStatus } from "../ui/ui-status.ts";
 import { openSafetyApproval } from "../ui/ui.ts";
-import { collapseReadOnlyScoutContextRoute, inferRouteRequiresWorkspaceMutation, normalizeRouteForExecution } from "./route-guards.ts";
+import { normalizeRouteForExecution, routeRequiresWorkspaceMutation } from "./route-guards.ts";
 import { chalinRouteUpdateDetails, formatChalinRunWidget } from "./route-widget.ts";
 import { planChalinRoute, type ChalinDelegationStep, type ChalinRoutePlannerInput } from "./route-planner.ts";
 
@@ -57,10 +57,10 @@ export async function executeDelegatedChalinRoute(
   const requiresWorkspaceMutation = route.expectedEffects?.includes("write") === true
     || Boolean(params.requiresWorkspaceMutation)
     || Boolean(planned.requiresWorkspaceMutation)
-    || inferRouteRequiresWorkspaceMutation(route, params.task);
+    || routeRequiresWorkspaceMutation(route);
   route = loaded.config.safety.mutationExpectationGuard
-    ? normalizeRouteForExecution(route, { requiresWorkspaceMutation, task: params.task, agents: kernel.resolvePlanAgents(route) })
-    : collapseReadOnlyScoutContextRoute(route, requiresWorkspaceMutation);
+    ? normalizeRouteForExecution(route, { requiresWorkspaceMutation, agents: kernel.resolvePlanAgents(route) })
+    : route;
 
   const guard = beginChalinRouteInvocation({ dryRun: false, route });
   const preApproval = await kernel.approvalFor(route);

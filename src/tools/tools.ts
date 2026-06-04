@@ -15,11 +15,12 @@ import { activateSkillForTurn, disableSkillForTurn, hasInlineToolStarted, setLat
 import { setChalinStatus } from "../ui/ui-status.ts";
 import { chalinRouteUpdateDetails, colorizeChalinWidget, footerStateForRun, formatChalinRouteRequestWidget, formatChalinRunWidget, formatChalinRunWidgetFromDetails, isUsableStepStatus, routeIntent, type ChalinRouteWidgetDetails } from "../routing/route-widget.ts";
 import { fetchWebUrls, formatWebBundle, formatWebBundleProgressWidget, formatWebBundleWidget, searchWeb, type WebBundleProgressWidgetInput, type WebContextBundle } from "../webfetch/webfetch.ts";
-import type { MemoryRecord, RunState } from "../domain/schemas.ts";
+import type { MemoryRecord } from "../domain/schemas.ts";
 import { compactRouteDetails, formatRoute } from "../routing/route-format.ts";
 import { executeDelegatedChalinRoute, type ChalinDelegationRouteParams } from "../routing/delegation.ts";
 import { buildProjectDiscoveryIndex, formatProjectDiscoveryIndex } from "../project/discovery.ts";
 import { SkillCatalog, SkillMetricsStore, auditSkill, formatSkillList, formatSkillSearch, formatSkillShow, promoteSkill, reconcileSkillLifecyclesEffect, retireSkill, summarizeSkillMetrics } from "../skills/skills.ts";
+import { runStructuredSkillSelector } from "../skills/skill-selector.ts";
 import { Effect } from "effect";
 import { clampInteger, clampNumber, errorResult, finalToolResult, formatMemoryInventory, isMemoryInventoryQuery, textResult, truncateForTool } from "./tool-output.ts";
 
@@ -45,19 +46,11 @@ const ChalinInterviewParams = Type.Object({
 });
 
 const ChalinRouteStepParams = Type.Object({
-  id: Type.Optional(Type.String({ description: "Stable step id, e.g. scout, plan, implement, review." })),
-  agent: Type.String({ description: "pi-chalin agent name such as scout, planner, context-builder, worker, reviewer, researcher, or conflict-resolver." }),
+  id: Type.Optional(Type.String({ description: "Stable short step id proposed by the planner." })),
+  agent: Type.String({ description: "pi-chalin agent reference selected from the available roster." }),
   task: Type.String({ minLength: 12, description: "Concrete responsibility for this subagent. Include relevant constraints and expected evidence." }),
-  budget: Type.Optional(Type.Union([
-    Type.Literal("small"),
-    Type.Literal("medium"),
-    Type.Literal("large"),
-    Type.Literal("tight"),
-    Type.Literal("normal"),
-    Type.Literal("deep"),
-    Type.Literal("extended"),
-  ], { description: "Optional budget hint. Human aliases are accepted: small=tight, medium=normal, large=deep." })),
   files: Type.Optional(Type.Array(Type.String(), { description: "Optional authoritative mutable file scope for this step when known." })),
+  expectedEffects: Type.Optional(Type.Array(Type.Union([Type.Literal("read"), Type.Literal("write"), Type.Literal("verify")]), { minItems: 1, maxItems: 3, uniqueItems: true, description: "Effects this proposal step is responsible for covering when already known." })),
 });
 
 const ChalinRouteStageParams = Type.Object({
@@ -68,9 +61,9 @@ const ChalinRouteStageParams = Type.Object({
 
 const ChalinRouteParams = Type.Object({
   task: Type.String({ minLength: 12, description: "Original user request or the exact work to delegate to the pi-chalin orchestrator." }),
-  topology: Type.Optional(Type.Union([Type.Literal("auto"), Type.Literal("sequential"), Type.Literal("dag")], { description: "Optional advanced override. Omit or use auto so pi-chalin selects topology from task intent." })),
-  steps: Type.Optional(Type.Array(ChalinRouteStepParams, { minItems: 1, maxItems: 6, description: "Advanced override: ordered subagent steps when the workflow is already explicitly known." })),
-  stages: Type.Optional(Type.Array(ChalinRouteStageParams, { minItems: 1, maxItems: 8, description: "Advanced override: DAG stages for already-known independent work." })),
+  topology: Type.Optional(Type.Union([Type.Literal("auto"), Type.Literal("sequential"), Type.Literal("dag")], { description: "Optional proposal context. Omit or use auto so pi-chalin selects topology from task intent." })),
+  steps: Type.Optional(Type.Array(ChalinRouteStepParams, { minItems: 1, maxItems: 6, description: "Proposal context: ordered subagent steps only when the workflow is already explicitly known." })),
+  stages: Type.Optional(Type.Array(ChalinRouteStageParams, { minItems: 1, maxItems: 8, description: "Proposal context: DAG stages for already-known independent work." })),
   risk: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"), Type.Literal("critical")])),
   needsMemory: Type.Optional(Type.Boolean({ description: "Allow the workflow to retrieve relevant pi-chalin memory." })),
   needsArtifacts: Type.Optional(Type.Boolean({ description: "Persist run artifacts/checkpoints for resume and inspection." })),
@@ -245,8 +238,8 @@ export function registerChalinTools(pi: ExtensionAPI): void {
       if (params.action === "search" || params.action === "use") {
         const task = params.task?.trim() || params.name?.trim() || "";
         if (!task) return errorResult("Skill search requires task or name.", { action: params.action });
-        const result = catalog.search(task, { config: loaded.config, explicitSkills: params.action === "use" && params.name ? [params.name] : undefined });
         if (params.action === "use" && params.name) {
+          const result = catalog.search(task, { config: loaded.config, explicitSkills: [params.name] });
           const resolved = catalog.resolve(params.name);
           if (!resolved.skill) return errorResult(resolved.error ?? `Skill '${params.name}' not found.`, { action: params.action });
           const audit = auditSkill(resolved.skill, loaded.config);
@@ -258,7 +251,21 @@ export function registerChalinTools(pi: ExtensionAPI): void {
             disabledSkills: [...overrides.disabled],
           });
         }
-        return textResult(formatSkillSearch(task, result), result);
+        const selection = await runStructuredSkillSelector({
+          catalog,
+          config: loaded.config,
+          task,
+          context: {
+            model: ctx.model,
+            modelRegistry: ctx.modelRegistry,
+            signal: ctx.signal,
+          },
+        });
+        const result = catalog.search(task, { config: loaded.config, selectedSkills: selection.selectedSkills });
+        return textResult(`${formatSkillSearch(task, result)}${selection.diagnostics.length ? `\n\n${selection.diagnostics.join("\n")}` : ""}`, {
+          ...result,
+          selectionDiagnostics: selection.diagnostics,
+        });
       }
       if (!params.name?.trim()) return errorResult(`chalin_skill ${params.action} requires name.`, { action: params.action });
       const resolved = catalog.resolve(params.name);
@@ -366,8 +373,8 @@ export function registerChalinTools(pi: ExtensionAPI): void {
       "Do not call chalin_route just to decide whether to delegate. Decide with LLM judgment from the task shape, evidence burden, risk, ambiguity, decomposition value, and verification burden.",
       "Default to intent-only delegation: pass task, expectedEffects when obvious, risk if obvious, and workUnitStrategy when needed. Omit topology, steps, and stages unless the user or prior evidence already gave explicit independent slices.",
       "If a non-discoverable human decision blocks safe progress, use chalin_interview before delegating. If uncertainty is discoverable from repo/web evidence, pass it into the delegated workflow.",
-      "Use explicit topology/steps/stages only as an advanced override. Chalin should choose subagents and parallelization from the delegated task intent by default.",
-      "For mutation, include expectedEffects read/write/verify and let the orchestrator add worker/reviewer coverage when needed.",
+      "Use explicit topology/steps/stages only as proposal context when the user or prior evidence already identified independent slices. Pi-chalin still validates and selects the executable route from delegated task intent.",
+      "For mutation, include expectedEffects read/write/verify and let pi-chalin's internal planner select mutation and verification coverage.",
       "Do not call chalin_web_search in the same assistant turn as chalin_route. Let the delegated route gather local evidence first; use web only after the route reports an explicit external gap.",
       "Keep the user experience simple: after chalin_route returns, answer from its final material without exposing internal delegation labels unless the user asks.",
     ],
@@ -471,9 +478,7 @@ export function registerChalinTools(pi: ExtensionAPI): void {
         return textResult(`chalin_resume failed for ${run.id}: ${message}\nlog: ${run.logsPath ?? "unknown"}`, { runId: run.id, run, error: message });
       }
     },
-    renderCall(args, theme) {
-      void args;
-      void theme;
+    renderCall(_args, _theme) {
       return new Text("", 0, 0);
     },
     renderResult(result, _options, theme) {

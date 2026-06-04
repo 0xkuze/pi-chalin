@@ -12,11 +12,6 @@ capabilities:
   - edit-files
   - validate
 activation: auto
-triggers:
-  - docs
-  - documentation
-  - README
-  - artifact
 risk: low
 maxActiveWith:
   - review-final-gate

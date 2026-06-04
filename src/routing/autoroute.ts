@@ -10,6 +10,7 @@ import { formatSemanticPolicyJudgeSteer, runSemanticPolicyJudge, shouldApplySema
 import type { InlineNudgeKind, PolicyJudgeDecision } from "../runtime/state.ts";
 import type { RunState } from "../domain/schemas.ts";
 import { setChalinStatus } from "../ui/ui-status.ts";
+import { isRecord } from "../utils/guards.ts";
 
 type PendingToolArgs = {
   command?: string;
@@ -34,7 +35,7 @@ function runHookEffect<A>(span: string, run: () => A | Promise<A>): Promise<A> {
 }
 
 export function registerChalinAutoRouter(pi: ExtensionAPI): void {
-  pi.on("input", (event, ctx) => Effect.runPromise(inputGuardEffect(pi, event, ctx)));
+  pi.on("input", (event, ctx) => Effect.runPromise(inputGuardEffect(event, ctx)));
 
   pi.on("before_agent_start", (event, ctx) => runHookEffect("autoroute.beforeAgentStart", async () => {
     const loaded = loadEffectiveConfig({ cwd: ctx.cwd });
@@ -47,7 +48,7 @@ export function registerChalinAutoRouter(pi: ExtensionAPI): void {
     const resumeContext = resumableRun ? compactResumeCandidateMessage(resumableRun) : undefined;
     const systemPrompt = [
       event.systemPrompt,
-      buildChalinOrchestratorSystemPrompt(catalog.list(), promptText),
+      buildChalinOrchestratorSystemPrompt(catalog.list()),
     ].filter((part): part is string => typeof part === "string" && part.trim().length > 0).join("\n\n");
     return {
       systemPrompt,
@@ -437,7 +438,7 @@ function restoreOrchestratorThinking(pi: ExtensionAPI): void {
   }
 }
 
-function inputGuardEffect(pi: ExtensionAPI, event: { source?: string; text: string }, ctx: ExtensionContext): Effect.Effect<{ action: "continue" } | { action: "handled" }, unknown> {
+function inputGuardEffect(event: { source?: string; text: string }, ctx: ExtensionContext): Effect.Effect<{ action: "continue" } | { action: "handled" }, unknown> {
   return Effect.tryPromise(async () => {
     if (event.source === "extension") return { action: "continue" as const };
     const text = event.text.trim();
@@ -524,10 +525,6 @@ function stringArg(args: object, key: string): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
 function compactResumeCandidateMessage(run: RunState): string {
   const completed = run.steps.filter((step) => isUsableStepHandoff(step)).length;
   const total = Math.max(run.steps.length, 1);
@@ -550,10 +547,15 @@ function workflowBlockedReason(event: unknown): string | undefined {
   return undefined;
 }
 
+export function shouldScheduleNonInteractiveShutdown(ctx: { hasUI?: boolean; shutdown?: () => void }): boolean {
+  return !ctx.hasUI && typeof ctx.shutdown === "function" && process.env.PI_CHALIN_NONINTERACTIVE_SHUTDOWN === "1";
+}
+
 function scheduleNonInteractiveShutdown(ctx: { hasUI?: boolean; abort?: () => void; shutdown?: () => void }): void {
-  if (ctx.hasUI || typeof ctx.shutdown !== "function" || process.env.PI_CHALIN_NONINTERACTIVE_SHUTDOWN === "0") return;
+  if (!shouldScheduleNonInteractiveShutdown(ctx)) return;
   const abort = ctx.abort;
   const shutdown = ctx.shutdown;
+  if (typeof shutdown !== "function") return;
   const configuredDelay = Number(process.env.PI_CHALIN_NONINTERACTIVE_SHUTDOWN_DELAY_MS);
   const delayMs = Number.isFinite(configuredDelay) && configuredDelay >= 0 ? configuredDelay : 0;
   const timer = setTimeout(() => {

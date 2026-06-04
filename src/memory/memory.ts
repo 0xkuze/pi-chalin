@@ -1,9 +1,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import initSqlJs from "sql.js-fts5/dist/sql-asm.js";
-import { Context, Effect, Layer } from "effect";
+import { Effect } from "effect";
 import { resolveChalinPaths, type ChalinPathsOptions } from "../config/paths.ts";
 import type { AgentConcern, MemoryAuditEvent, MemoryAuditEventType, MemoryCandidate, MemoryRecord } from "../domain/schemas.ts";
+import { compactText } from "../utils/text.ts";
 import { applyCurrentPolicy, buildFtsQuery, buildMemoryRecord, dedupeCandidates, dedupeRecords, estimateTokens, findMemoryUpdateTarget, mergeEvidence, mergeMemoryRecord, normalizeContent, normalizeForDedupe, sortMemoryRecords, stableHash } from "./memory-policy.ts";
 
 export interface MemorySearchResult {
@@ -56,50 +57,7 @@ export interface MemoryStoreLike {
 type SqlJsStatic = any;
 type SqlJsDatabase = any;
 
-interface SqlJsService {
-  readonly module: Effect.Effect<SqlJsStatic, unknown>;
-}
-
-class SqlJs extends Context.Tag("pi-chalin/SqlJs")<SqlJs, SqlJsService>() {}
-
 const cachedSqlModule = Effect.runSync(Effect.cached(Effect.tryPromise(() => initSqlJs())));
-const SqlJsLive = Layer.succeed(SqlJs, { module: cachedSqlModule });
-
-interface MemoryStoreServiceShape {
-  readonly store: MemoryStoreLike;
-  readonly submitCandidates: (candidates: MemoryCandidate[]) => Effect.Effect<MemoryRecord[], unknown>;
-  readonly list: (status?: MemoryRecord["status"]) => Effect.Effect<MemoryRecord[], unknown>;
-  readonly pendingCount: Effect.Effect<number, unknown>;
-  readonly approve: (id: string) => Effect.Effect<MemoryRecord | undefined, unknown>;
-  readonly reject: (id: string) => Effect.Effect<MemoryRecord | undefined, unknown>;
-  readonly delete: (id: string) => Effect.Effect<boolean, unknown>;
-  readonly search: (query: string, limit?: number) => Effect.Effect<MemorySearchResult[], unknown>;
-  readonly retrieve: (request: MemoryContextRequest) => Effect.Effect<MemoryContextBundle, unknown>;
-  readonly revise: (id: string, input: MemoryRevisionInput) => Effect.Effect<MemoryRecord | undefined, unknown>;
-  readonly events: (recordId?: string) => Effect.Effect<MemoryAuditEvent[], unknown>;
-}
-
-class MemoryStoreService extends Context.Tag("pi-chalin/MemoryStore")<MemoryStoreService, MemoryStoreServiceShape>() {}
-
-export function memoryStoreLayer(store: MemoryStoreLike): Layer.Layer<MemoryStoreService> {
-  return Layer.succeed(MemoryStoreService, {
-    store,
-    submitCandidates: (candidates) => Effect.tryPromise(() => store.submitCandidates(candidates)),
-    list: (status) => Effect.tryPromise(() => store.list(status)),
-    pendingCount: Effect.tryPromise(() => store.pendingCount()),
-    approve: (id) => Effect.tryPromise(() => store.approve(id)),
-    reject: (id) => Effect.tryPromise(() => store.reject(id)),
-    delete: (id) => Effect.tryPromise(() => store.delete(id)),
-    search: (query, limit) => Effect.tryPromise(() => store.search(query, limit)),
-    retrieve: (request) => Effect.tryPromise(() => store.retrieve(request)),
-    revise: (id, input) => Effect.tryPromise(() => store.revise(id, input)),
-    events: (recordId) => Effect.tryPromise(() => store.events(recordId)),
-  });
-}
-
-export function createMemoryStoreLayer(options: ChalinPathsOptions): Layer.Layer<MemoryStoreService> {
-  return memoryStoreLayer(new MemoryStore(options));
-}
 
 export class MemoryStore {
   private readonly dbPath: string;
@@ -268,7 +226,7 @@ export class MemoryStore {
             type: "retrieve",
             actor: request.sourceAgent ?? "memory-system",
             at: now,
-            summary: `Retrieved for '${truncateText(request.query, 120)}'.`,
+            summary: `Retrieved for '${compactText(request.query, 120)}'.`,
             metadata: { score: result.score, tokenBudget },
           });
         }
@@ -322,7 +280,7 @@ export class MemoryStore {
         type: "revise",
         actor: input.sourceAgent,
         at: now,
-        summary: input.reason ? `Memory revised: ${truncateText(input.reason, 180)}` : "Memory revised by autonomous memory policy.",
+        summary: input.reason ? `Memory revised: ${compactText(input.reason, 180)}` : "Memory revised by autonomous memory policy.",
         previousContent: existing.content,
         nextContent: revised.content,
         metadata: { category: revised.category, status: revised.status, topicKey: revised.topicKey },
@@ -387,10 +345,7 @@ export function prepareMemoryRecords(candidates: MemoryCandidate[], now = new Da
 }
 
 function getSqlModuleEffect(): Effect.Effect<SqlJsStatic, unknown> {
-  return Effect.gen(function* () {
-    const sql = yield* SqlJs;
-    return yield* sql.module;
-  }).pipe(Effect.provide(SqlJsLive), Effect.withSpan("memory.sql.init"));
+  return cachedSqlModule.pipe(Effect.withSpan("memory.sql.init"));
 }
 
 function migrate(db: SqlJsDatabase): void {
@@ -679,13 +634,7 @@ function formatMemoryLine(record: MemoryRecord, includeEvidence: boolean): strin
     record.topicKey ? `topic=${record.topicKey}` : undefined,
     record.revisionCount > 1 ? `rev=${record.revisionCount}` : undefined,
   ].filter(Boolean).join(" · ");
-  const content = truncateText(record.content, 260);
-  const evidence = includeEvidence && record.evidence ? ` evidence=${truncateText(record.evidence, 120)}` : "";
+  const content = compactText(record.content, 260);
+  const evidence = includeEvidence && record.evidence ? ` evidence=${compactText(record.evidence, 120)}` : "";
   return `[${meta}] ${content}${evidence}`;
-}
-
-function truncateText(text: string, maxChars: number): string {
-  const normalized = normalizeContent(text);
-  if (normalized.length <= maxChars) return normalized;
-  return `${normalized.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
 }
