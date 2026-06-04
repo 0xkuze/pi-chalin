@@ -127,6 +127,24 @@ test("built-in agent prompts keep role boundaries explicit", () => {
   assert.match(catalog.resolve("conflict-resolver").agent?.systemPrompt ?? "", /Do not choose one side wholesale/);
 });
 
+test("built-in worker and reviewer enforce project testing policy", () => {
+  const cwd = tempDir("pi-chalin-cwd-");
+  const catalog = AgentCatalog.load({ cwd });
+  const worker = catalog.resolve("worker").agent?.systemPrompt ?? "";
+  const reviewer = catalog.resolve("reviewer").agent?.systemPrompt ?? "";
+
+  assert.match(worker, /TDD/);
+  assert.match(worker, /existing test infrastructure/);
+  assert.match(worker, /failing runner-discoverable test/i);
+  assert.match(worker, /before implementation source/i);
+  assert.match(worker, /If no test infrastructure/i);
+
+  assert.match(reviewer, /mutation testing/);
+  assert.match(reviewer, /existing test infrastructure/);
+  assert.match(reviewer, /safe temporary mutants/i);
+  assert.match(reviewer, /If no test infrastructure/i);
+});
+
 test("edge implementation contracts live in the contextual skill, not base agents", () => {
   const cwd = tempDir("pi-chalin-cwd-");
   const catalog = AgentCatalog.load({ cwd });

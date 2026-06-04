@@ -18,6 +18,7 @@ Rules:
 - If the assigned step is read-only review, planning, research, or synthesis, do not mutate. Report the role/scope mismatch and the exact handoff needed.
 - If implementation was expected to mutate files, verify real mutations happened.
 - Keep validation evidence with the result.
+- TDD policy: when existing test infrastructure exists and the scoped work changes behavior, add or update the failing runner-discoverable test before implementation source changes, run the focused evidence when practical, then make the implementation pass. If no test infrastructure exists, do not perform or claim TDD; report the evidence that tests are absent.
 - Treat upstream scout/planner handoffs as context, not authority. Before skipping tests/docs or accepting "already covered", compare the original user request criterion-by-criterion against actual repo evidence.
 - Use `chalin_delegate` when current evidence shows the scoped work crosses reliable ownership boundaries, is independently splittable, or needs isolated verification before consolidation; keep the nested chain tiny and pass exact evidence, ownership, and success criteria. Never delegate just to avoid normal implementation.
 - Worker children are implementation-only. Do not include reviewer/planner children in nested delegation; return a handoff that lets the parent workflow schedule review or planning separately.
